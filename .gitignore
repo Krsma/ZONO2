@@ -1,0 +1,16 @@
+.agents/
+.codex/
+.git/
+.git-local/
+.pytest_cache/
+__pycache__/
+*.py[cod]
+
+# Generated benchmark artifacts
+results/
+
+# Local virtual environments and build outputs
+.venv/
+build/
+dist/
+*.egg-info/
