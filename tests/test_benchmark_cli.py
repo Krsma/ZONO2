@@ -41,6 +41,7 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
         "reference",
         "box",
         "girard",
+        "girard7",
         "combastel",
         "methA",
         "scott",
@@ -50,6 +51,7 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
         "keep_calibration_aware",
         "mpc",
         "mpc_sequence",
+        "mpc_rollout_girard",
     }
     assert set(raw["seed"]) == {0, 1}
 
@@ -59,7 +61,7 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
     assert (budgeted["reduction_failure_count"] == 0).all()
     assert (budgeted["unsafe_disagreement_count"] == 0).all()
 
-    mpc = raw[raw["method"].isin({"mpc", "mpc_sequence"})]
+    mpc = raw[raw["method"].isin({"mpc", "mpc_sequence", "mpc_rollout_girard"})]
     chosen_total = (
         mpc["chosen_box_count"]
         + mpc["chosen_girard_count"]
@@ -88,7 +90,7 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
 
     comparisons = pd.read_csv(tmp_path / "comparisons.csv")
     assert {"method", "baseline", "metric", "wilcoxon_p_value"} <= set(comparisons.columns)
-    assert set(comparisons["baseline"]) == {"mpc_sequence"}
+    assert set(comparisons["baseline"]) == {"mpc_rollout_girard"}
 
     config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert config["length"] == 8

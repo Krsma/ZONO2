@@ -15,7 +15,12 @@ import pandas as pd
 from scipy import stats
 
 from pzr.control.costs import CostWeights, WeightedZonotopeCost
-from pzr.control.policies import MPCPolicy, SequenceMPCPolicy, StaticReductionPolicy
+from pzr.control.policies import (
+    MPCPolicy,
+    RolloutMPCPolicy,
+    SequenceMPCPolicy,
+    StaticReductionPolicy,
+)
 from pzr.monitoring.base import MonitorAdapter, MonitorState, Verdict, evaluate_triggers
 from pzr.reduction.base import Reducer
 from pzr.reduction.paper_reducers import (
@@ -26,10 +31,15 @@ from pzr.reduction.paper_reducers import (
     PcaReducer,
     ScottReducer,
 )
-from pzr.reduction.reducers import BoxReducer, ProtectedReducer, ScoredKeepReducer
+from pzr.reduction.reducers import (
+    BoxReducer,
+    ProtectedReducer,
+    ScoredKeepReducer,
+    TargetBudgetReducer,
+)
 
 InputT = TypeVar("InputT")
-MethodKind = Literal["reference", "static", "mpc", "mpc_sequence"]
+MethodKind = Literal["reference", "static", "mpc", "mpc_sequence", "mpc_rollout"]
 PredictorMode = Literal["online", "oracle", "both"]
 
 KEY_METRICS = (
@@ -80,6 +90,8 @@ class MethodSpec:
     kind: MethodKind
     reducer_factory: Callable[[], Reducer] | None = None
     mpc_reducer_factories: tuple[Callable[[], Reducer], ...] = ()
+    mpc_base_reducer_factory: Callable[[], Reducer] | None = None
+    mpc_fallback_reducer_factory: Callable[[], Reducer] | None = None
 
     @staticmethod
     def reference() -> "MethodSpec":
@@ -102,6 +114,21 @@ class MethodSpec:
         reducer_factories: tuple[Callable[[], Reducer], ...],
     ) -> "MethodSpec":
         return MethodSpec(name, "mpc_sequence", mpc_reducer_factories=reducer_factories)
+
+    @staticmethod
+    def rollout_mpc(
+        name: str,
+        reducer_factories: tuple[Callable[[], Reducer], ...],
+        base_reducer_factory: Callable[[], Reducer],
+        fallback_reducer_factory: Callable[[], Reducer] | None = None,
+    ) -> "MethodSpec":
+        return MethodSpec(
+            name,
+            "mpc_rollout",
+            mpc_reducer_factories=reducer_factories,
+            mpc_base_reducer_factory=base_reducer_factory,
+            mpc_fallback_reducer_factory=fallback_reducer_factory,
+        )
 
 
 @dataclass(frozen=True)
@@ -191,9 +218,18 @@ def default_methods() -> tuple[MethodSpec, ...]:
         _protected(ScoredKeepReducer.by_norm),
         _protected(ScoredKeepReducer.calibration_aware),
     )
+    rollout_candidates = (
+        _protected(GirardReducer),
+        _protected(ScoredKeepReducer.by_norm),
+        _protected(ScoredKeepReducer.calibration_aware),
+    )
     return (
         MethodSpec.static("box", _protected(BoxReducer)),
         MethodSpec.static("girard", _protected(GirardReducer)),
+        MethodSpec.static(
+            "girard7",
+            _target_budget(_protected(GirardReducer), 7, "girard7"),
+        ),
         MethodSpec.static("combastel", _protected(CombastelReducer)),
         MethodSpec.static("methA", _protected(MethAReducer)),
         MethodSpec.static("scott", _protected(ScottReducer)),
@@ -206,12 +242,29 @@ def default_methods() -> tuple[MethodSpec, ...]:
         ),
         MethodSpec.mpc("mpc", mpc_candidates),
         MethodSpec.sequence_mpc("mpc_sequence", mpc_candidates),
+        MethodSpec.rollout_mpc(
+            "mpc_rollout_girard",
+            rollout_candidates,
+            _protected(GirardReducer),
+            _protected(BoxReducer),
+        ),
     )
 
 
 def _protected(factory: Callable[[], Reducer]) -> Callable[[], Reducer]:
     def make() -> Reducer:
         return ProtectedReducer(factory())
+
+    return make
+
+
+def _target_budget(
+    factory: Callable[[], Reducer],
+    target_budget: int,
+    name: str,
+) -> Callable[[], Reducer]:
+    def make() -> Reducer:
+        return TargetBudgetReducer(factory(), target_budget, name=name)
 
     return make
 
@@ -344,7 +397,15 @@ def compare_against_mpc(raw: pd.DataFrame) -> pd.DataFrame:
         ["scenario", "predictor_mode"],
         sort=True,
     ):
-        baseline = "mpc_sequence" if "mpc_sequence" in set(scenario_df["method"]) else "mpc"
+        method_names = set(scenario_df["method"])
+        baseline = next(
+            (
+                candidate
+                for candidate in ("mpc_rollout_girard", "mpc_sequence", "mpc")
+                if candidate in method_names
+            ),
+            "",
+        )
         if baseline not in set(scenario_df["method"]):
             continue
         methods = sorted(set(scenario_df["method"]) - {baseline, "reference"})
@@ -565,7 +626,7 @@ def _run_budgeted_method(
             try:
                 if method.kind == "static":
                     decision = policy.reduce_state(monitor, state)
-                elif method.kind in {"mpc", "mpc_sequence"}:
+                elif method.kind in {"mpc", "mpc_sequence", "mpc_rollout"}:
                     predicted = _predicted_inputs(scenario, config, history, trace, index)
                     decision = policy.reduce_state(monitor, state, predicted)
                 else:
@@ -618,7 +679,12 @@ def _make_policy(
     method: MethodSpec,
     monitor: MonitorAdapter[InputT],
     config: BenchmarkConfig,
-) -> StaticReductionPolicy | MPCPolicy[InputT] | SequenceMPCPolicy[InputT]:
+) -> (
+    StaticReductionPolicy
+    | MPCPolicy[InputT]
+    | SequenceMPCPolicy[InputT]
+    | RolloutMPCPolicy[InputT]
+):
     if method.kind == "static":
         if method.reducer_factory is None:
             raise ValueError(f"static method {method.name} has no reducer factory")
@@ -644,6 +710,30 @@ def _make_policy(
             budget=config.budget,
             horizon=config.horizon,
             cost=cost,
+        )
+    if method.kind == "mpc_rollout":
+        if method.mpc_base_reducer_factory is None:
+            raise ValueError(f"rollout method {method.name} has no base reducer factory")
+        cost = WeightedZonotopeCost(
+            CostWeights(
+                trigger_width=1.0,
+                straddling=20.0,
+                generator_count=0.0,
+            ),
+            triggers=monitor.triggers,
+        )
+        return RolloutMPCPolicy(
+            reducers=tuple(factory() for factory in method.mpc_reducer_factories),
+            base_reducer=method.mpc_base_reducer_factory(),
+            fallback_reducer=(
+                method.mpc_fallback_reducer_factory()
+                if method.mpc_fallback_reducer_factory is not None
+                else None
+            ),
+            budget=config.budget,
+            horizon=config.horizon,
+            cost=cost,
+            terminal_cost_multiplier=0.0,
         )
     raise ValueError(f"method {method.name} is not a budgeted policy")
 
@@ -805,7 +895,7 @@ class _MetricAccumulator:
             ),
             "rollout_steps": (
                 self.reduction_count * config.horizon
-                if method_kind in {"mpc", "mpc_sequence"}
+                if method_kind in {"mpc", "mpc_sequence", "mpc_rollout"}
                 else 0
             ),
             "evaluated_sequence_count": self.evaluated_sequences,

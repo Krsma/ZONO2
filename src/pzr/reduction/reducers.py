@@ -192,6 +192,29 @@ class ProtectedReducer:
 
 
 @dataclass(frozen=True)
+class TargetBudgetReducer:
+    """Reducer wrapper that spends at most a fixed target budget."""
+
+    base: Reducer
+    target_budget: int
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if self.target_budget < 0:
+            raise ValueError("target_budget must be non-negative")
+        if not self.name:
+            object.__setattr__(self, "name", f"{self.base.name}{self.target_budget}")
+
+    def reduce(
+        self,
+        zonotope: Zonotope,
+        budget: int,
+        context: ReductionContext | None = None,
+    ) -> ReductionResult:
+        return self.base.reduce(zonotope, min(budget, self.target_budget), context)
+
+
+@dataclass(frozen=True)
 class BoxReducer:
     """Reduce a zonotope to its interval hull represented as an axis-aligned box."""
 

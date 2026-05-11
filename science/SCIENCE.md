@@ -72,12 +72,24 @@ but it does not inspect equations or depend on monitor internals.
 Reducers currently include:
 
 - `BoxReducer`: replace a zonotope by its interval hull.
+- `GirardReducer`, `CombastelReducer`, `MethAReducer`, `ScottReducer`,
+  `PcaReducer`, and `AdaptiveReducer`: Python baselines corresponding to the
+  main reducer families compared in Kohn et al.
 - `ScoredKeepReducer.by_norm`: keep large generators and box-merge the rest.
 - `ScoredKeepReducer.calibration_aware`: keep important generators while giving
   calibration generators a strong preservation bonus.
+- `ProtectedReducer`: wrap a reducer so monitor-required generators, such as
+  the robot calibration generator, are preserved exactly before reducing the
+  residual zonotope.
 
-The MPC policy compares these certified actions by predicted trigger width,
-threshold straddling, and generator count.
+The benchmark now compares three receding-horizon selectors. `MPCPolicy`
+chooses a single reducer and reuses it across the predicted horizon.
+`SequenceMPCPolicy` searches reducer choices at each predicted overflow.
+`RolloutMPCPolicy` evaluates candidate first reductions, then rolls future
+overflows forward with a fixed protected-Girard base reducer and a certified
+box fallback. The current default rollout objective uses predicted trigger
+width and threshold straddling; metadata-aware generator rewards are available
+for future sweeps but are not enabled in the default benchmark.
 
 ## Current Scope
 

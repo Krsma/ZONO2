@@ -24,6 +24,12 @@ Run the default paper-style robot benchmark with:
 pzr-benchmark robot --length 200 --budget 8 --horizon 4 --seeds 30 --out results/robot
 ```
 
+The default suite includes static box, Girard, Combastel, MethA, Scott, PCA,
+adaptive, and keep-generator reducers, plus the original one-action MPC,
+sequence MPC, and `mpc_rollout_girard`. The rollout MPC evaluates candidate
+first reductions under a short predicted trace, then uses protected Girard as
+the fixed future-overflow policy with box as a last-resort certified fallback.
+
 Use `--predictor-mode both` to run online and oracle prediction in one
 artifact set. The command writes `raw_runs.csv`, `summary.csv`,
 `comparisons.csv`, `predictor_comparisons.csv`, `config.json`, and

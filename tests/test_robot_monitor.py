@@ -1,9 +1,23 @@
 from pzr.benchmarks.robot import OmnidirectionalRobotMonitor, generate_robot_trace
 from pzr.control.costs import CostWeights, WeightedZonotopeCost
-from pzr.control.policies import MPCPolicy, SequenceMPCPolicy, StaticReductionPolicy
+from pzr.control.policies import (
+    MPCPolicy,
+    RolloutMPCPolicy,
+    SequenceMPCPolicy,
+    StaticReductionPolicy,
+)
 from pzr.core.zonotope import GeneratorKind
 from pzr.experiments.run_robot import run_robot_experiment
 from pzr.reduction.reducers import BoxReducer, ProtectedReducer, ScoredKeepReducer
+from pzr.reduction.paper_reducers import GirardReducer
+
+
+class FailingReducer:
+    name = "failing"
+
+    def reduce(self, zonotope, budget, context=None):
+        _ = zonotope, budget, context
+        raise ValueError("intentional failure")
 
 
 def test_robot_monitor_grows_one_measurement_generator_per_step() -> None:
@@ -91,6 +105,96 @@ def test_sequence_mpc_policy_returns_certified_metadata_safe_robot_state() -> No
         meta.kind == GeneratorKind.CALIBRATION and meta.source == "delta"
         for meta in decision.state.zonotope.metadata
     )
+
+
+def test_rollout_mpc_policy_returns_certified_metadata_safe_robot_state() -> None:
+    monitor = OmnidirectionalRobotMonitor()
+    trace = generate_robot_trace(12, seed=8)
+    state = monitor.initial_state()
+    for measurement in trace[:8]:
+        state = monitor.step(state, measurement).state
+
+    policy = RolloutMPCPolicy(
+        reducers=(
+            ProtectedReducer(GirardReducer()),
+            ProtectedReducer(ScoredKeepReducer.by_norm()),
+        ),
+        base_reducer=ProtectedReducer(GirardReducer()),
+        fallback_reducer=ProtectedReducer(BoxReducer()),
+        budget=6,
+        horizon=3,
+        cost=WeightedZonotopeCost(
+            CostWeights(
+                trigger_width=1.0,
+                straddling=20.0,
+                generator_count=0.0,
+            ),
+            triggers=monitor.triggers,
+        ),
+    )
+
+    decision = policy.reduce_state(monitor, state, trace[8:11])
+
+    assert decision.result.certificate.is_sound
+    assert decision.state.zonotope.generator_count <= 6
+    assert decision.reducer_name in {"girard", "keep_norm"}
+    assert decision.evaluated_sequences == 2
+    assert decision.predicted_sequence
+    assert any(
+        meta.kind == GeneratorKind.CALIBRATION and meta.source == "delta"
+        for meta in decision.state.zonotope.metadata
+    )
+
+
+def test_rollout_mpc_policy_uses_box_fallback_only_when_active_candidates_fail() -> None:
+    monitor = OmnidirectionalRobotMonitor()
+    trace = generate_robot_trace(12, seed=9)
+    state = monitor.initial_state()
+    for measurement in trace[:8]:
+        state = monitor.step(state, measurement).state
+
+    policy = RolloutMPCPolicy(
+        reducers=(FailingReducer(),),
+        base_reducer=ProtectedReducer(GirardReducer()),
+        fallback_reducer=ProtectedReducer(BoxReducer()),
+        budget=6,
+        horizon=2,
+        cost=WeightedZonotopeCost(
+            CostWeights(trigger_width=1.0, straddling=20.0),
+            triggers=monitor.triggers,
+        ),
+    )
+
+    decision = policy.reduce_state(monitor, state, trace[8:10])
+
+    assert decision.reducer_name == "box"
+    assert decision.state.zonotope.generator_count <= 6
+
+
+def test_rollout_mpc_policy_records_future_box_fallback() -> None:
+    monitor = OmnidirectionalRobotMonitor()
+    trace = generate_robot_trace(12, seed=10)
+    state = monitor.initial_state()
+    for measurement in trace[:8]:
+        state = monitor.step(state, measurement).state
+
+    policy = RolloutMPCPolicy(
+        reducers=(ProtectedReducer(GirardReducer()),),
+        base_reducer=FailingReducer(),
+        fallback_reducer=ProtectedReducer(BoxReducer()),
+        budget=6,
+        horizon=2,
+        cost=WeightedZonotopeCost(
+            CostWeights(trigger_width=1.0, straddling=20.0),
+            triggers=monitor.triggers,
+        ),
+    )
+
+    decision = policy.reduce_state(monitor, state, trace[8:10])
+
+    assert decision.reducer_name == "girard"
+    assert "box" in decision.predicted_sequence[1:]
+    assert decision.state.zonotope.generator_count <= 6
 
 
 def test_robot_experiment_smoke() -> None:

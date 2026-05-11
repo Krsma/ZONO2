@@ -6,6 +6,7 @@ from dataclasses import dataclass
 
 import numpy as np
 
+from pzr.core.zonotope import GeneratorKind
 from pzr.monitoring.base import MonitorState, TriggerSpec, Verdict
 
 
@@ -17,6 +18,9 @@ class CostWeights:
     straddling: float = 10.0
     generator_count: float = 0.01
     total_width: float = 0.0
+    synthetic_generator: float = 0.0
+    measurement_generator_reward: float = 0.0
+    calibration_generator_reward: float = 0.0
 
 
 @dataclass(frozen=True)
@@ -35,6 +39,15 @@ class WeightedZonotopeCost:
         widths = zonotope.widths()
         total = self.weights.generator_count * zonotope.generator_count
         total += self.weights.total_width * float(np.sum(widths))
+        total += self.weights.synthetic_generator * sum(
+            meta.kind == GeneratorKind.SYNTHETIC for meta in zonotope.metadata
+        )
+        total -= self.weights.measurement_generator_reward * sum(
+            meta.kind == GeneratorKind.MEASUREMENT for meta in zonotope.metadata
+        )
+        total -= self.weights.calibration_generator_reward * sum(
+            meta.kind == GeneratorKind.CALIBRATION for meta in zonotope.metadata
+        )
 
         triggers = self.triggers
         if verdicts is not None:

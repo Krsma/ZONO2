@@ -260,6 +260,142 @@ class SequenceMPCPolicy(Generic[InputT]):
         )
 
 
+@dataclass(frozen=True)
+class RolloutMPCPolicy(Generic[InputT]):
+    """One-step reducer lookahead with a fixed certified rollout base policy."""
+
+    reducers: tuple[Reducer, ...]
+    base_reducer: Reducer
+    budget: int
+    horizon: int
+    cost: WeightedZonotopeCost
+    fallback_reducer: Reducer | None = None
+    terminal_cost_multiplier: float = 0.0
+
+    def reduce_state(
+        self,
+        monitor: MonitorAdapter[InputT],
+        state: MonitorState,
+        predicted_inputs: Sequence[InputT],
+        context: ReductionContext | None = None,
+    ) -> ReductionDecision:
+        ctx = context or _reduction_context(monitor, state)
+        inputs = tuple(predicted_inputs)[: self.horizon]
+        best = self._best_from_candidates(
+            monitor,
+            state,
+            inputs,
+            ctx,
+            self.reducers,
+        )
+        if best is None and self.fallback_reducer is not None:
+            best = self._best_from_candidates(
+                monitor,
+                state,
+                inputs,
+                ctx,
+                (self.fallback_reducer,),
+            )
+        if best is None:
+            raise ValueError("no rollout candidate reducer could produce a certified budgeted state")
+        return best
+
+    def _best_from_candidates(
+        self,
+        monitor: MonitorAdapter[InputT],
+        state: MonitorState,
+        predicted_inputs: tuple[InputT, ...],
+        context: ReductionContext,
+        reducers: tuple[Reducer, ...],
+    ) -> ReductionDecision | None:
+        best: ReductionDecision | None = None
+        evaluated = 0
+        pruned = 0
+        for reducer in reducers:
+            first = _try_reduce(monitor, reducer, state, self.budget, context)
+            if first is None:
+                pruned += 1
+                continue
+            first_state, first_result = first
+            evaluated += 1
+            total_cost = self.cost(first_state)
+            rollout_state = first_state
+            sequence = [reducer.name]
+            failed = False
+
+            for measurement in predicted_inputs:
+                step_result = monitor.step(rollout_state, measurement)
+                rollout_state = step_result.state
+                if rollout_state.zonotope.generator_count > self.budget:
+                    applied_reducer = self.base_reducer
+                    reduced = _try_reduce(
+                        monitor,
+                        applied_reducer,
+                        rollout_state,
+                        self.budget,
+                    )
+                    if reduced is None and self.fallback_reducer is not None:
+                        applied_reducer = self.fallback_reducer
+                        reduced = _try_reduce(
+                            monitor,
+                            applied_reducer,
+                            rollout_state,
+                            self.budget,
+                        )
+                    if reduced is None:
+                        pruned += 1
+                        failed = True
+                        break
+                    rollout_state, _ = reduced
+                    sequence.append(applied_reducer.name)
+                total_cost += self.cost(rollout_state, step_result.verdicts)
+
+            if failed:
+                continue
+            if self.terminal_cost_multiplier:
+                total_cost += self.terminal_cost_multiplier * self.cost(rollout_state)
+            decision = ReductionDecision(
+                state=monitor.replace_zonotope(state, first_result.reduced),
+                result=first_result,
+                reducer_name=reducer.name,
+                predicted_cost=float(total_cost),
+                predicted_sequence=tuple(sequence),
+                evaluated_sequences=evaluated,
+                pruned_sequences=pruned,
+            )
+            if best is None or decision.predicted_cost < best.predicted_cost:
+                best = decision
+
+        if best is None:
+            return None
+        return ReductionDecision(
+            state=best.state,
+            result=best.result,
+            reducer_name=best.reducer_name,
+            predicted_cost=best.predicted_cost,
+            predicted_sequence=best.predicted_sequence,
+            evaluated_sequences=evaluated,
+            pruned_sequences=pruned,
+        )
+
+
+def _try_reduce(
+    monitor: MonitorAdapter[InputT],
+    reducer: Reducer,
+    state: MonitorState,
+    budget: int,
+    context: ReductionContext | None = None,
+) -> tuple[MonitorState, ReductionResult] | None:
+    ctx = context or _reduction_context(monitor, state)
+    try:
+        result = reducer.reduce(state.zonotope, budget, ctx)
+    except ValueError:
+        return None
+    if not result.certificate.is_sound:
+        return None
+    return monitor.replace_zonotope(state, result.reduced), result
+
+
 def _reduction_context(
     monitor: MonitorAdapter[InputT],
     state: MonitorState,

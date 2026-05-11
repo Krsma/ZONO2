@@ -16,6 +16,7 @@ from pzr.reduction.reducers import (
     IdentityReducer,
     ProtectedReducer,
     ScoredKeepReducer,
+    TargetBudgetReducer,
 )
 from pzr.reduction.scoring import (
     calibration_aware_scores,
@@ -36,6 +37,7 @@ __all__ = [
     "ReductionContext",
     "ScoredKeepReducer",
     "ScottReducer",
+    "TargetBudgetReducer",
     "calibration_aware_scores",
     "girard_scores",
     "l2_scores",
