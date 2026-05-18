@@ -20,6 +20,7 @@ class ReductionDecision:
     state: MonitorState
     result: ReductionResult
     reducer_name: str
+    is_no_op: bool = False
     predicted_cost: float = 0.0
     predicted_sequence: tuple[str, ...] = ()
     evaluated_sequences: int = 0
@@ -48,6 +49,7 @@ class StaticReductionPolicy:
             state=reduced_state,
             result=result,
             reducer_name=self.reducer.name,
+            is_no_op=_is_no_op_reducer(self.reducer.name),
         )
 
 
@@ -108,6 +110,7 @@ class MPCPolicy(Generic[InputT]):
                 state=monitor.replace_zonotope(state, first_result.reduced),
                 result=first_result,
                 reducer_name=reducer.name,
+                is_no_op=_is_no_op_reducer(reducer.name),
                 predicted_cost=float(total_cost),
                 predicted_sequence=(reducer.name,),
                 evaluated_sequences=1,
@@ -169,6 +172,7 @@ class SequenceMPCPolicy(Generic[InputT]):
                 state=monitor.replace_zonotope(state, first_result.reduced),
                 result=first_result,
                 reducer_name=first_reducer,
+                is_no_op=_is_no_op_reducer(first_reducer),
                 predicted_cost=float(total_cost),
                 predicted_sequence=sequence,
             )
@@ -253,6 +257,7 @@ class SequenceMPCPolicy(Generic[InputT]):
             state=best.state,
             result=best.result,
             reducer_name=best.reducer_name,
+            is_no_op=best.is_no_op,
             predicted_cost=best.predicted_cost,
             predicted_sequence=best.predicted_sequence,
             evaluated_sequences=evaluated_sequences,
@@ -358,6 +363,7 @@ class RolloutMPCPolicy(Generic[InputT]):
                 state=monitor.replace_zonotope(state, first_result.reduced),
                 result=first_result,
                 reducer_name=reducer.name,
+                is_no_op=_is_no_op_reducer(reducer.name),
                 predicted_cost=float(total_cost),
                 predicted_sequence=tuple(sequence),
                 evaluated_sequences=evaluated,
@@ -372,6 +378,7 @@ class RolloutMPCPolicy(Generic[InputT]):
             state=best.state,
             result=best.result,
             reducer_name=best.reducer_name,
+            is_no_op=best.is_no_op,
             predicted_cost=best.predicted_cost,
             predicted_sequence=best.predicted_sequence,
             evaluated_sequences=evaluated,
@@ -394,6 +401,10 @@ def _try_reduce(
     if not result.certificate.is_sound:
         return None
     return monitor.replace_zonotope(state, result.reduced), result
+
+
+def _is_no_op_reducer(name: str) -> bool:
+    return name == "no_reduction"
 
 
 def _reduction_context(

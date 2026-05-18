@@ -17,7 +17,12 @@ from pzr.reduction.paper_reducers import (
     ScottReducer,
 )
 from pzr.reduction.base import ReductionContext
-from pzr.reduction.reducers import BoxReducer, ProtectedReducer, ScoredKeepReducer
+from pzr.reduction.reducers import (
+    BoxReducer,
+    IdentityReducer,
+    ProtectedReducer,
+    ScoredKeepReducer,
+)
 
 
 def _sample_points(zonotope: Zonotope) -> list[np.ndarray]:
@@ -40,6 +45,22 @@ def test_box_reducer_contains_sampled_original_points() -> None:
     assert result.reduced.generator_count <= 2
     for point in _sample_points(zonotope):
         assert result.reduced.contains_in_interval_hull(point)
+
+
+def test_identity_reducer_is_explicit_no_reduction_action() -> None:
+    zonotope = Zonotope([0.0, 1.0], [[1.0, -0.5], [0.2, 1.0]])
+
+    result = IdentityReducer().reduce(zonotope, budget=2)
+
+    assert result.certificate.is_sound
+    assert result.certificate.reducer == "no_reduction"
+    assert result.reduced.generator_count == zonotope.generator_count
+    np.testing.assert_allclose(result.reduced.center, zonotope.center)
+    np.testing.assert_allclose(result.reduced.generators, zonotope.generators)
+    assert result.reduced.metadata == zonotope.metadata
+
+    with pytest.raises(ValueError, match="no-op reducer"):
+        IdentityReducer().reduce(zonotope, budget=1)
 
 
 def test_scored_keep_reducer_respects_budget_and_preserves_calibration() -> None:

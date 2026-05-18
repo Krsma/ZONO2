@@ -11,6 +11,7 @@ from scipy.linalg import qr
 
 from pzr.core.certificates import ReductionResult
 from pzr.core.zonotope import GeneratorKind, GeneratorMetadata, Zonotope
+from pzr.monitoring.base import trigger_straddles_threshold
 from pzr.reduction.base import Reducer, ReductionContext
 from pzr.reduction.reducers import BoxReducer, _axis_box_generators, _certificate
 
@@ -551,7 +552,11 @@ def _current_cost(
         for trigger in context.triggers:
             width = float(widths[trigger.state_index])
             total += trigger_width_weight * width
-            if lower[trigger.state_index] <= trigger.threshold <= upper[trigger.state_index]:
+            if trigger_straddles_threshold(
+                lower[trigger.state_index],
+                upper[trigger.state_index],
+                trigger,
+            ):
                 total += straddling_weight
     else:
         total += trigger_width_weight * float(np.sum(widths))

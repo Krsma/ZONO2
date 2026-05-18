@@ -11,7 +11,10 @@ from typing import Sequence
 from pzr.experiments.benchmark import (
     BenchmarkConfig,
     combine_reports,
+    default_methods,
     format_terminal_summary,
+    learned_distilled_method,
+    paper_baseline_methods,
     run_benchmark,
 )
 from pzr.experiments.scenarios import SCENARIOS
@@ -34,14 +37,18 @@ def main(argv: Sequence[str] | None = None) -> int:
     )
     out_dir = Path(args.out) if args.out else _default_out_dir(args.scenario)
     scenario = scenario_factory()
+    methods = _selected_methods(args.method_set)
+    if args.learned_policy:
+        learned = learned_distilled_method(args.learned_policy)
+        methods = (*default_methods(), learned) if methods is None else (*methods, learned)
     if args.predictor_mode == "both":
         reports = tuple(
-            run_benchmark(scenario, replace(config, predictor_mode=mode))
+            run_benchmark(scenario, replace(config, predictor_mode=mode), methods=methods)
             for mode in ("online", "oracle")
         )
         report = combine_reports(config, reports)
     else:
-        report = run_benchmark(scenario, config)
+        report = run_benchmark(scenario, config, methods=methods)
     report.write_artifacts(out_dir)
     if not args.quiet:
         print(format_terminal_summary(report))
@@ -70,7 +77,13 @@ def _make_parser() -> argparse.ArgumentParser:
         )
         scenario.add_argument("--bootstrap-samples", type=int, default=1000)
         scenario.add_argument("--bootstrap-seed", type=int, default=0)
+        scenario.add_argument(
+            "--method-set",
+            choices=("extended", "paper", "paper_plus_ours", "paper_plus_wide"),
+            default="extended",
+        )
         scenario.add_argument("--no-reference", action="store_true")
+        scenario.add_argument("--learned-policy", type=str, default=None)
         scenario.add_argument("--quiet", action="store_true")
     return parser
 
@@ -78,6 +91,26 @@ def _make_parser() -> argparse.ArgumentParser:
 def _default_out_dir(scenario: str) -> Path:
     timestamp = datetime.now().strftime("%Y%m%d-%H%M%S")
     return Path("results") / f"{scenario}-{timestamp}"
+
+
+def _selected_methods(method_set: str):
+    if method_set == "extended":
+        return None
+    if method_set == "paper":
+        return paper_baseline_methods()
+    if method_set == "paper_plus_ours":
+        ours = tuple(
+            method for method in default_methods() if method.name == "mpc_rollout_girard"
+        )
+        return (*paper_baseline_methods(), *ours)
+    if method_set == "paper_plus_wide":
+        ours = tuple(
+            method
+            for method in default_methods()
+            if method.name in {"mpc_rollout_girard", "mpc_rollout_wide"}
+        )
+        return (*paper_baseline_methods(), *ours)
+    raise ValueError(f"unknown method set: {method_set}")
 
 
 if __name__ == "__main__":

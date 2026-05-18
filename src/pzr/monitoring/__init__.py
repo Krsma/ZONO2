@@ -7,6 +7,9 @@ from pzr.monitoring.base import (
     TriggerSpec,
     Verdict,
     evaluate_triggers,
+    trigger_predicate_holds,
+    trigger_satisfaction_fraction,
+    trigger_straddles_threshold,
 )
 
 __all__ = [
@@ -16,4 +19,7 @@ __all__ = [
     "TriggerSpec",
     "Verdict",
     "evaluate_triggers",
+    "trigger_predicate_holds",
+    "trigger_satisfaction_fraction",
+    "trigger_straddles_threshold",
 ]

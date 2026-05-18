@@ -7,7 +7,7 @@ from dataclasses import dataclass
 import numpy as np
 
 from pzr.core.zonotope import GeneratorKind
-from pzr.monitoring.base import MonitorState, TriggerSpec, Verdict
+from pzr.monitoring.base import MonitorState, TriggerSpec, Verdict, trigger_straddles_threshold
 
 
 @dataclass(frozen=True)
@@ -54,12 +54,12 @@ class WeightedZonotopeCost:
             triggers = tuple(verdict.trigger for verdict in verdicts)
 
         if triggers:
+            lower, upper = zonotope.interval_bounds()
             for trigger in triggers:
                 width = float(widths[trigger.state_index])
                 total += self.weights.trigger_width * width
-                lower, upper = zonotope.interval_bounds()
                 lo = float(lower[trigger.state_index])
                 hi = float(upper[trigger.state_index])
-                if lo <= trigger.threshold <= hi:
+                if trigger_straddles_threshold(lo, hi, trigger):
                     total += self.weights.straddling
         return float(total)

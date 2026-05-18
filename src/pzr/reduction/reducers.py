@@ -62,7 +62,7 @@ def _axis_box_generators(
 class IdentityReducer:
     """Return the original zonotope when it already satisfies the budget."""
 
-    name: str = "identity"
+    name: str = "no_reduction"
 
     def reduce(
         self,
@@ -75,7 +75,7 @@ class IdentityReducer:
             raise ValueError("budget must be non-negative")
         if zonotope.generator_count > budget:
             raise ValueError(
-                f"identity reducer cannot reduce {zonotope.generator_count} generators to {budget}"
+                f"no-op reducer cannot reduce {zonotope.generator_count} generators to {budget}"
             )
         certificate = _certificate(
             self.name,
