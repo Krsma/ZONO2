@@ -81,9 +81,10 @@ only from certified first actions.
 
 **Robust prediction gate.** Robust or tube-aware predictors should be added only
 if the existing online-vs-oracle artifacts show a meaningful gap on precision
-or false-alarm metrics. Until that evidence exists, the constant-input online
-predictor and oracle ablation are enough to separate prediction quality from
-certified reduction soundness.
+or false-alarm metrics. The current TACAS-main artifacts do not yet show a large
+or consistent oracle advantage, so the constant-input online predictor and
+oracle ablation are enough for now to separate prediction quality from certified
+reduction soundness.
 
 ## Control-Theoretic Project Idea
 
@@ -109,6 +110,17 @@ CLI can run either mode or both modes in one artifact set with
 `--predictor-mode both`. Dynamic policy calls and decision-feature rows are
 emitted only at real over-budget reduction points; budgeted no-op decisions
 are not part of the current experimental design.
+
+The latest full artifact examined in this checkout is `results/tacas-main`.
+Its manifest records a paper-profile run overridden to `length=300`,
+`budget=8`, `horizon=6`, `seeds=50`, `predictor_mode=both`, and
+`method_set=paper_plus_wide` over the `robot`, `robot_simple`, and
+`thermostat` scenarios. The aggregate diagnostics are clean:
+`budget_violation_count = 0`, `unsound_certificate_count = 0`,
+`reduction_failure_count = 0`, and `no_op_count = 0`. The strongest empirical
+claim from this artifact is focused rollout precision on the hard robot
+monitor; broad rollout is a useful ablation, not the headline method, and the
+learned selector is best described as a cheap certified selector approximation.
 
 ## Code Mapping
 
@@ -166,18 +178,28 @@ The benchmark now compares three smarter MPC selectors:
   predicted future overflow in the horizon.
 - `SequenceMPCPolicy` searches reducer choices at each predicted overflow. It
   records the chosen reducer sequence, counts evaluated leaves, and prunes
-  branches whose partial cost already exceeds the best complete sequence.
+  branches whose partial cost already exceeds the best complete sequence. The
+  method `mpc_focused_sequence` uses a geometry-regularized candidate set
+  consisting of protected Girard, `girard_slack1`, trigger-influence keep, and
+  norm keep, with protected box only as fallback when all normal candidates fail.
 - `RolloutMPCPolicy` keeps the first-action search small. It evaluates
   candidate first reductions, then rolls future overflows forward with a fixed
   certified base reducer and an optional certified fallback. The default
-  method `mpc_rollout_girard` tests protected Girard, norm-keep, and
-  calibration-aware keep as first actions, uses protected Girard for future
-  overflows, and uses protected box reduction only as a last-resort fallback.
-- `mpc_rollout_wide` is the broader rollout ablation. It uses the same future
-  protected Girard policy and protected box fallback as `mpc_rollout_girard`,
+  method `mpc_focused_fixed_girard` tests the same focused geometry candidates
+  as first actions, uses protected Girard for future overflows, and uses
+  protected box reduction only as a last-resort fallback.
+- `mpc_wide_fixed_girard` is the broader first-action ablation. It uses the same
+  future protected Girard policy and protected box fallback as
+  `mpc_focused_fixed_girard`,
   but admits broad protected precision reducers as first-action candidates.
   Protected box is deliberately excluded from the first-action candidate set
   and appears only as an emergency fallback in predicted future overflows.
+
+Artifact and figure outputs may also use report-facing labels for these rollout
+methods. In the latest TACAS-main aggregate, `mpc_focused_fixed_girard` appears
+as `mpc_rollout_girard`, and `mpc_wide_fixed_girard` appears as
+`mpc_rollout_wide`. These are naming aliases for interpretation; the code-level
+method IDs above remain the source of truth for CLI method selection and tests.
 
 All three selectors use `WeightedZonotopeCost`. The default MPC and sequence
 objectives penalize predicted trigger width, threshold straddling, and a small
@@ -194,8 +216,12 @@ box emergency fallback use. It supports the same method-set choices as the
 benchmark CLI:
 
 - `paper`: only the static reducer baselines.
-- `paper_plus_ours`: static baselines plus `mpc_rollout_girard`.
-- `paper_plus_wide`: static baselines plus both rollout MPC methods.
+- `paper_plus_focused`: static baselines plus `mpc_focused_fixed_girard` and
+  `mpc_focused_sequence`.
+- `paper_plus_mpc_ablation`: static baselines plus focused fixed-Girard, wide
+  fixed-Girard, and focused sequence MPC methods.
+- `paper_plus_ours`: legacy alias for `paper_plus_focused`.
+- `paper_plus_wide`: legacy alias for `paper_plus_mpc_ablation`.
 - `extended`: the full default benchmark suite.
 
 The `pzr-run-experiments` suite orchestrates baseline benchmarks, learned
@@ -205,7 +231,17 @@ the learned evaluation down to the learned method so baseline methods are not
 double-counted across baseline and learned reruns. The suite and figure paths
 write `analysis_notes.json` with metric winners, soundness counters, and
 warning flags for unexpected no-op use, reduction failures, budget violations,
-unsound certificates, or box-first choices in `mpc_rollout_wide`.
+unsound certificates, or box-first choices in `mpc_wide_fixed_girard`.
+
+Learned-policy results should be interpreted with care. The current code trains
+the suite policy against `mpc_focused_sequence` labels, while the latest
+TACAS-main artifact's `learned_distilled.metrics.json` records
+`expert_method = mpc_rollout_wide`; treat the artifact metadata as authoritative
+when reporting that run. In that artifact, the label distribution is highly
+Girard-heavy (`girard` 37224 of 40862 rows), with validation accuracy about
+0.906 and top-3 accuracy about 0.988. This supports the claim that learned
+selection can be kept outside the trusted soundness boundary, but not yet that
+learning discovers a qualitatively better selector than the focused rollout.
 
 ## Trigger Semantics
 
@@ -227,16 +263,23 @@ heuristics over the interval hull, separate from the paper predicate above.
 
 The paper-style robot benchmark includes the optional unreduced `reference`,
 static reducers (`box`, `girard`, `girard7`, `combastel`, `methA`, `scott`,
-`pca`, `adaptive`, `keep_norm`, `keep_calibration_aware`), and four MPC
-methods (`mpc`, `mpc_sequence`, `mpc_rollout_girard`,
-`mpc_rollout_wide`). It writes:
+`pca`, `adaptive`, `keep_norm`, `keep_calibration_aware`), and five MPC
+methods (`mpc`, `mpc_sequence`, `mpc_focused_sequence`,
+`mpc_focused_fixed_girard`, `mpc_wide_fixed_girard`). It writes:
+
+In suite aggregates that include learned evaluation and figure-facing method
+labels, expect the method set to be narrower and renamed. For example,
+`results/tacas-main/aggregate/raw_runs.csv` contains static baselines plus
+`mpc_rollout_girard`, `mpc_rollout_wide`, and `learned_distilled`, but not all
+extended CLI method IDs.
 
 - `raw_runs.csv`: one row per scenario, predictor mode, method, and seed.
 - `summary.csv`: bootstrapped aggregate statistics with 95% confidence
   intervals.
 - `comparisons.csv`: paired method-vs-MPC deltas, effect sizes, and Wilcoxon
-  p-values. The baseline priority is `mpc_rollout_wide`, then
-  `mpc_rollout_girard`, then `mpc_sequence`, then `mpc`.
+  p-values. The baseline priority is `mpc_focused_sequence`, then
+  `mpc_focused_fixed_girard`, then `mpc_wide_fixed_girard`, then
+  `mpc_sequence`, then `mpc`.
 - `predictor_comparisons.csv`: paired online-vs-oracle deltas when both modes
   are run.
 - `timeseries.csv`: per-step precision, verdict, reducer, and MPC search
@@ -291,14 +334,18 @@ Near-term research hypotheses:
 
 - **Predictive abstraction control:** choose the first certified reducer by
   minimizing predicted future verdict imprecision, then replan at the next
-  overflow. This should reduce inconclusive and false-alarm rates at the same
-  generator budget compared with static order-reduction heuristics.
+  overflow. The current evidence supports a precision claim most strongly:
+  focused rollout reduces robot trigger width and interval-hull MSE at the same
+  generator budget compared with strong static order-reduction heuristics.
+  False-alarm improvements should be stated cautiously because rates are already
+  low for the strongest baselines.
 - **Information-aware preservation:** calibration generators and
   near-threshold trigger directions should be preserved preferentially because
   their future influence differs from old independent measurement noise.
 - **Prediction robustness:** the online-vs-oracle gap should quantify how much
   value comes from better trace prediction and where robust or tube-style
-  predictors would matter.
+  predictors would matter. The latest evidence suggests this is future work
+  rather than the current headline.
 - **Artifact-ready evaluation:** TACAS artifact expectations favor
   reproducible scripts, stable data artifacts, documented smoke tests, and
   representative subsets. The current CLI, figure generator, and small smoke
@@ -307,13 +354,14 @@ Near-term research hypotheses:
 Potential extensions for a TACAS submission:
 
 - Add one more monitor family with different dynamics or trigger geometry to
-  show the policy is not robot-specific.
+  show the policy is not robot-specific and not already saturated by the static
+  reducers.
 - Add a predictor ablation beyond constant-input extrapolation, such as a
   conservative tube predictor, while preserving the rule that predictions never
   justify soundness.
-- Compare against a learned or tuned static scoring policy to separate the
-  benefit of semantics-aware scoring from the benefit of receding-horizon
-  planning.
+- Compare against a learned or tuned static scoring policy, and train a learned
+  selector against the focused rollout labels, to separate the benefit of
+  semantics-aware scoring from the benefit of receding-horizon planning.
 - Formalize a policy interface theorem: if every candidate reducer returns a
   sound enclosure under budget and protected generator requirements are
   enforced, then any predictive selector over those candidates preserves
@@ -332,6 +380,9 @@ Useful sources for the paper trail:
 - Scott et al., "Set operations and order reductions for constrained
   zonotopes," Automatica 2022.
 - TACAS 2026 artifact guidance, <https://etaps.org/2026/conferences/tacas/>.
+- RTLola framework overview, "Stream-based monitoring with RTLola,"
+  Science of Computer Programming 253, 2026, DOI
+  `10.1016/j.scico.2026.103495`.
 
 ## Current Scope
 

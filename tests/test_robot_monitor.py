@@ -16,7 +16,10 @@ from pzr.control.policies import (
     StaticReductionPolicy,
 )
 from pzr.core.zonotope import GeneratorKind
-from pzr.experiments.benchmark import wide_rollout_reducer_factories
+from pzr.experiments.benchmark import (
+    focused_geometry_reducer_factories,
+    wide_rollout_reducer_factories,
+)
 from pzr.experiments.run_robot import run_robot_experiment
 from pzr.reduction.reducers import (
     BoxReducer,
@@ -353,6 +356,39 @@ def test_wide_rollout_default_candidates_exclude_box_first_action() -> None:
     assert "box" not in names
     assert "no_reduction" not in names
     assert {"girard", "combastel", "keep_norm"} <= set(names)
+
+
+def test_focused_geometry_default_candidates_are_regularized() -> None:
+    names = [factory().name for factory in focused_geometry_reducer_factories()]
+
+    assert names == ["girard", "girard_slack1", "keep_trigger", "keep_norm"]
+    assert "box" not in names
+    assert "pca" not in names
+
+
+def test_sequence_mpc_uses_box_only_as_fallback() -> None:
+    monitor = OmnidirectionalRobotMonitor()
+    trace = generate_robot_trace(12, seed=11)
+    state = monitor.initial_state()
+    for measurement in trace[:8]:
+        state = monitor.step(state, measurement).state
+
+    policy = SequenceMPCPolicy(
+        reducers=(FailingReducer(),),
+        fallback_reducer=ProtectedReducer(BoxReducer()),
+        budget=6,
+        horizon=2,
+        cost=WeightedZonotopeCost(
+            CostWeights(trigger_width=1.0, straddling=20.0),
+            triggers=monitor.triggers,
+        ),
+    )
+
+    decision = policy.reduce_state(monitor, state, trace[8:10])
+
+    assert decision.reducer_name == "box"
+    assert decision.predicted_sequence[0] == "box"
+    assert decision.state.zonotope.generator_count <= 6
 
 
 def test_rollout_mpc_policy_records_future_box_fallback() -> None:

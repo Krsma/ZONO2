@@ -79,7 +79,14 @@ def _make_parser() -> argparse.ArgumentParser:
         scenario.add_argument("--bootstrap-seed", type=int, default=0)
         scenario.add_argument(
             "--method-set",
-            choices=("extended", "paper", "paper_plus_ours", "paper_plus_wide"),
+            choices=(
+                "extended",
+                "paper",
+                "paper_plus_focused",
+                "paper_plus_mpc_ablation",
+                "paper_plus_ours",
+                "paper_plus_wide",
+            ),
             default="extended",
         )
         scenario.add_argument("--no-reference", action="store_true")
@@ -94,20 +101,31 @@ def _default_out_dir(scenario: str) -> Path:
 
 
 def _selected_methods(method_set: str):
+    if method_set == "paper_plus_ours":
+        method_set = "paper_plus_focused"
+    elif method_set == "paper_plus_wide":
+        method_set = "paper_plus_mpc_ablation"
     if method_set == "extended":
         return None
     if method_set == "paper":
         return paper_baseline_methods()
-    if method_set == "paper_plus_ours":
-        ours = tuple(
-            method for method in default_methods() if method.name == "mpc_rollout_girard"
-        )
-        return (*paper_baseline_methods(), *ours)
-    if method_set == "paper_plus_wide":
+    if method_set == "paper_plus_focused":
         ours = tuple(
             method
             for method in default_methods()
-            if method.name in {"mpc_rollout_girard", "mpc_rollout_wide"}
+            if method.name in {"mpc_focused_fixed_girard", "mpc_focused_sequence"}
+        )
+        return (*paper_baseline_methods(), *ours)
+    if method_set == "paper_plus_mpc_ablation":
+        ours = tuple(
+            method
+            for method in default_methods()
+            if method.name
+            in {
+                "mpc_focused_fixed_girard",
+                "mpc_wide_fixed_girard",
+                "mpc_focused_sequence",
+            }
         )
         return (*paper_baseline_methods(), *ours)
     raise ValueError(f"unknown method set: {method_set}")

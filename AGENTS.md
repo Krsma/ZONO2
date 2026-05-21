@@ -21,10 +21,11 @@ Tests are in `tests/` and follow the same domain split as the package. Research 
 - `pytest`: run the full test suite configured by `pyproject.toml`.
 - `pzr-benchmark robot --length 200 --budget 8 --horizon 4 --seeds 30 --out results/robot`: run the default paper-style robot benchmark and write CSV/JSON artifacts.
 - `pzr-benchmark robot --length 200 --budget 8 --horizon 4 --seeds 30 --predictor-mode both --out results/robot`: run both online and oracle predictor modes for ablation.
-- `pzr-benchmark robot_simple --length 200 --budget 8 --horizon 4 --seeds 30 --method-set paper_plus_ours --out results/robot-simple`: run the two-axis motivating robot with paper baselines plus the focused rollout MPC method.
+- `pzr-benchmark robot_simple --length 200 --budget 8 --horizon 4 --seeds 30 --method-set paper_plus_focused --out results/robot-simple`: run the two-axis motivating robot with paper baselines plus the focused MPC methods.
 - `pzr-benchmark thermostat --length 200 --budget 8 --horizon 4 --seeds 30 --out results/thermostat`: run the non-robot thermostat benchmark.
-- `pzr-paper-figures --method-set paper_plus_wide --seeds 10 --length 200 --budget 8 --out results/paper-figures`: regenerate Figures 3--5 style CSV summaries and PNG/PDF plots.
+- `pzr-paper-figures --method-set paper_plus_mpc_ablation --seeds 10 --length 200 --budget 8 --out results/paper-figures`: regenerate Figures 3--5 style CSV summaries and PNG/PDF plots.
 - `pzr-run-experiments --profile smoke --out results/experiment-suite-smoke --force`: run the full suite, learned-policy distillation, aggregate diagnostics, and figure smoke path.
+- `pzr-run-experiments --profile paper --out results/tacas-main --force --method-set paper_plus_mpc_ablation --length 300 --budget 8 --horizon 6 --seeds 50 --bootstrap-samples 5000 --figure-seeds 20 --figure-length 300 --figure-budgets "8,10,12,16,20" --figure-fpr-length 2000 --distill-epochs 300`: preferred comprehensive overnight TACAS-style evaluation.
 - `python -m pzr.experiments.cli robot --quiet --length 8 --budget 6 --horizon 2 --seeds 1 --bootstrap-samples 20 --out /tmp/pzr-smoke`: useful when smoke-testing the CLI without relying on the console script or writing into `results/`.
 
 ## Coding Style & Naming Conventions
@@ -52,14 +53,16 @@ tables/plots, and `analysis_notes.json` where those artifacts are produced.
 
 The default benchmark suite currently includes optional `reference`, static
 reducers (`box`, `girard`, `girard7`, `combastel`, `methA`, `scott`, `pca`,
-`adaptive`, `keep_norm`, `keep_calibration_aware`), and four MPC methods built
+`adaptive`, `keep_norm`, `keep_calibration_aware`), and five MPC methods built
 from three selector styles:
 
 - `mpc`: chooses one reducer and reuses it across predicted horizon overflows.
-- `mpc_sequence`: searches reducer choices at each predicted overflow.
-- `mpc_rollout_girard`: searches focused first reductions, then rolls out future
-  overflows with protected Girard and protected box as fallback.
-- `mpc_rollout_wide`: searches broad protected precision reducers as first
+- `mpc_sequence`: searches broad reducer choices at each predicted overflow.
+- `mpc_focused_sequence`: searches focused geometry-regularized reducer choices
+  at each predicted overflow, with protected box as fallback only.
+- `mpc_focused_fixed_girard`: searches focused first reductions, then rolls out
+  future overflows with protected Girard and protected box as fallback.
+- `mpc_wide_fixed_girard`: searches broad protected precision reducers as first
   reductions, excluding box as a first action, then uses the same protected
   Girard rollout and protected box fallback.
 
@@ -68,8 +71,9 @@ Benchmark runs write `raw_runs.csv`, `summary.csv`, `comparisons.csv`,
 `decision_features.csv`, `selection_summary.csv`,
 `predicted_sequence_summary.csv`, `config.json`, and `report.json`. Summaries
 are grouped by scenario, predictor mode, method, and metric; comparisons use
-`mpc_rollout_wide` as the preferred MPC baseline when it is present, then fall
-back to `mpc_rollout_girard`, `mpc_sequence`, and `mpc`.
+`mpc_focused_sequence` as the preferred MPC baseline when it is present, then
+fall back to `mpc_focused_fixed_girard`, `mpc_wide_fixed_girard`,
+`mpc_sequence`, and `mpc`.
 
 Selection diagnostics are data-driven from existing run artifacts:
 `selection_summary.csv` counts first selected reducer labels, while
@@ -79,9 +83,10 @@ double-counting the baseline reruns and emits `analysis_notes.json` with metric
 winners, soundness checks, and warning flags.
 
 The benchmark CLI and figure generator support method sets `paper`,
-`paper_plus_ours`, `paper_plus_wide`, and `extended`. Use `paper` for exact
-static-baseline replication, `paper_plus_ours` for the focused TACAS story, and
-`paper_plus_wide` for the broader rollout ablation.
+`paper_plus_focused`, `paper_plus_mpc_ablation`, and `extended`. The legacy
+aliases `paper_plus_ours` and `paper_plus_wide` are still accepted. Use `paper`
+for exact static-baseline replication, `paper_plus_focused` for the focused
+TACAS story, and `paper_plus_mpc_ablation` for broader MPC ablations.
 
 ## Commit & Pull Request Guidelines
 
@@ -98,5 +103,5 @@ may change monitor state. Preserve required generator metadata through
 
 Do not add `IdentityReducer` or `no_reduction` back into default experiment or
 learned-policy candidate sets unless the task explicitly reopens no-op
-experiments. Keep protected box out of `mpc_rollout_wide` first-action
+experiments. Keep protected box out of `mpc_wide_fixed_girard` first-action
 candidates; it is currently an emergency fallback only.

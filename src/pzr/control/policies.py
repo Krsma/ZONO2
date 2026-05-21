@@ -131,6 +131,7 @@ class SequenceMPCPolicy(Generic[InputT]):
     budget: int
     horizon: int
     cost: WeightedZonotopeCost
+    fallback_reducer: Reducer | None = None
 
     def reduce_state(
         self,
@@ -234,12 +235,30 @@ class SequenceMPCPolicy(Generic[InputT]):
                     first_reducer,
                 )
             if not any_child:
-                pruned_sequences += 1
+                if self.fallback_reducer is None:
+                    pruned_sequences += 1
+                    return
+                reduced = try_reduce(self.fallback_reducer, next_state)
+                if reduced is None:
+                    pruned_sequences += 1
+                    return
+                reduced_state, _ = reduced
+                rollout(
+                    index + 1,
+                    reduced_state,
+                    total_cost + self.cost(reduced_state, step_result.verdicts),
+                    (*sequence, self.fallback_reducer.name),
+                    first_state,
+                    first_result,
+                    first_reducer,
+                )
 
+        normal_first_success = False
         for reducer in self.reducers:
             reduced = try_reduce(reducer, state, ctx)
             if reduced is None:
                 continue
+            normal_first_success = True
             first_state, first_result = reduced
             rollout(
                 0,
@@ -250,6 +269,19 @@ class SequenceMPCPolicy(Generic[InputT]):
                 first_result,
                 reducer.name,
             )
+        if not normal_first_success and self.fallback_reducer is not None:
+            reduced = try_reduce(self.fallback_reducer, state, ctx)
+            if reduced is not None:
+                first_state, first_result = reduced
+                rollout(
+                    0,
+                    first_state,
+                    self.cost(first_state),
+                    (self.fallback_reducer.name,),
+                    first_state,
+                    first_result,
+                    self.fallback_reducer.name,
+                )
 
         if best is None:
             raise ValueError("no candidate reducer sequence could produce a certified budgeted state")

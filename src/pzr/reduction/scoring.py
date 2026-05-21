@@ -6,6 +6,7 @@ import numpy as np
 from numpy.typing import NDArray
 
 from pzr.core.zonotope import GeneratorKind, Zonotope
+from pzr.monitoring.base import trigger_straddles_threshold
 from pzr.reduction.base import ReductionContext
 
 
@@ -36,6 +37,33 @@ def threshold_risk_scores(
         distance = abs(zonotope.center[trigger.state_index] - trigger.threshold)
         influence = np.abs(zonotope.generators[trigger.state_index, :])
         scores += influence / (distance + eps)
+    return scores
+
+
+def trigger_influence_scores(
+    zonotope: Zonotope,
+    context: ReductionContext | None = None,
+    *,
+    straddling_bonus: float = 2.0,
+) -> NDArray[np.float64]:
+    """Score generators by absolute influence on monitored trigger dimensions."""
+
+    if zonotope.generator_count == 0:
+        return np.zeros(0)
+    if context is None or not context.triggers:
+        return norm_scores(zonotope, context)
+
+    lower, upper = zonotope.interval_bounds()
+    scores = np.zeros(zonotope.generator_count)
+    for trigger in context.triggers:
+        weight = 1.0
+        if trigger_straddles_threshold(
+            float(lower[trigger.state_index]),
+            float(upper[trigger.state_index]),
+            trigger,
+        ):
+            weight += straddling_bonus
+        scores += weight * np.abs(zonotope.generators[trigger.state_index, :])
     return scores
 
 

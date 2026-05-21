@@ -56,7 +56,7 @@ PROFILES = {
         budget=8,
         horizon=2,
         seeds=1,
-        method_set="paper_plus_wide",
+        method_set="paper_plus_mpc_ablation",
         predictor_mode="both",
         bootstrap_samples=10,
         figure_seeds=1,
@@ -72,7 +72,7 @@ PROFILES = {
         budget=8,
         horizon=4,
         seeds=5,
-        method_set="paper_plus_wide",
+        method_set="paper_plus_mpc_ablation",
         predictor_mode="both",
         bootstrap_samples=200,
         figure_seeds=3,
@@ -88,7 +88,7 @@ PROFILES = {
         budget=8,
         horizon=4,
         seeds=30,
-        method_set="paper_plus_wide",
+        method_set="paper_plus_mpc_ablation",
         predictor_mode="both",
         bootstrap_samples=1000,
         figure_seeds=10,
@@ -296,7 +296,7 @@ def _train_learned_policy(
     train_policy(
         argparse.Namespace(
             data=training_data,
-            expert_method="mpc_rollout_wide",
+            expert_method="mpc_focused_sequence",
             predictor_mode="online",
             out=checkpoint,
             seed=0,
@@ -439,10 +439,10 @@ def _warning_flags(raw: pd.DataFrame, predicted: pd.DataFrame) -> list[str]:
         if checks[key]:
             flags.append(f"{key}={checks[key]}")
     if not predicted.empty:
-        wide = predicted[predicted["method"] == "mpc_rollout_wide"]
+        wide = predicted[predicted["method"] == "mpc_wide_fixed_girard"]
         first_box = _sum_column(wide, "first_action_box_count")
         if first_box:
-            flags.append(f"mpc_rollout_wide_first_action_box_count={first_box}")
+            flags.append(f"mpc_wide_fixed_girard_first_action_box_count={first_box}")
     return flags
 
 
@@ -563,7 +563,14 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--seeds", type=int, default=None)
     parser.add_argument(
         "--method-set",
-        choices=("paper", "paper_plus_ours", "paper_plus_wide", "extended"),
+        choices=(
+            "paper",
+            "paper_plus_focused",
+            "paper_plus_mpc_ablation",
+            "paper_plus_ours",
+            "paper_plus_wide",
+            "extended",
+        ),
         default=None,
     )
     parser.add_argument("--bootstrap-samples", type=int, default=None)

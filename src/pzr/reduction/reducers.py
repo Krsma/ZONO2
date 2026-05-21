@@ -16,7 +16,11 @@ from pzr.core.zonotope import (
     Zonotope,
 )
 from pzr.reduction.base import Reducer, ReductionContext
-from pzr.reduction.scoring import calibration_aware_scores, norm_scores
+from pzr.reduction.scoring import (
+    calibration_aware_scores,
+    norm_scores,
+    trigger_influence_scores,
+)
 
 ScoreFunction = Callable[[Zonotope, ReductionContext | None], NDArray[np.float64]]
 
@@ -215,6 +219,51 @@ class TargetBudgetReducer:
 
 
 @dataclass(frozen=True)
+class BudgetSlackReducer:
+    """Reducer wrapper that deliberately leaves generator budget headroom."""
+
+    base: Reducer
+    slack: int
+    name: str = ""
+
+    def __post_init__(self) -> None:
+        if self.slack < 0:
+            raise ValueError("slack must be non-negative")
+        if not self.name:
+            object.__setattr__(self, "name", f"{self.base.name}_slack{self.slack}")
+
+    def reduce(
+        self,
+        zonotope: Zonotope,
+        budget: int,
+        context: ReductionContext | None = None,
+    ) -> ReductionResult:
+        if budget < 0:
+            raise ValueError("budget must be non-negative")
+        effective_budget = max(0, budget - self.slack)
+        result = self.base.reduce(zonotope, effective_budget, context)
+        certificate = _certificate(
+            self.name,
+            zonotope,
+            result.reduced,
+            "Applied wrapped reducer with deliberate generator budget slack.",
+            {
+                "base_reducer": self.base.name,
+                "requested_budget": budget,
+                "effective_budget": effective_budget,
+                "slack": self.slack,
+                "base_certificate": result.certificate.details,
+            },
+        )
+        return ReductionResult(
+            zonotope,
+            result.reduced,
+            certificate,
+            {"base": self.base.name, "slack": self.slack, "base_stats": result.stats},
+        )
+
+
+@dataclass(frozen=True)
 class BoxReducer:
     """Reduce a zonotope to its interval hull represented as an axis-aligned box."""
 
@@ -261,6 +310,10 @@ class ScoredKeepReducer:
     @classmethod
     def calibration_aware(cls) -> "ScoredKeepReducer":
         return cls(score=calibration_aware_scores, name="keep_calibration_aware")
+
+    @classmethod
+    def trigger_influence(cls) -> "ScoredKeepReducer":
+        return cls(score=trigger_influence_scores, name="keep_trigger")
 
     def reduce(
         self,

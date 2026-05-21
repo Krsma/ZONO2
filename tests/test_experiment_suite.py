@@ -117,7 +117,7 @@ def test_paper_figures_can_include_learned_policy(tmp_path) -> None:
             "--out",
             str(tmp_path / "figures"),
             "--method-set",
-            "paper_plus_wide",
+            "paper_plus_mpc_ablation",
             "--learned-policy",
             str(checkpoint),
             "--seeds",

@@ -69,9 +69,13 @@ def test_paper_figures_smoke_writes_summaries_and_figures(tmp_path) -> None:
     assert (tmp_path / "data" / "analysis_notes.json").exists()
 
 
-def test_paper_figures_paper_plus_wide_includes_both_rollout_methods() -> None:
-    methods = _selected_methods("paper_plus_wide")
+def test_paper_figures_paper_plus_mpc_ablation_includes_mpc_methods() -> None:
+    methods = _selected_methods("paper_plus_mpc_ablation")
 
-    assert "mpc_rollout_girard" in {method.name for method in methods}
-    assert "mpc_rollout_wide" in {method.name for method in methods}
-    assert METHOD_LABELS["mpc_rollout_wide"] == "MPC rollout wide (ours)"
+    assert "mpc_focused_fixed_girard" in {method.name for method in methods}
+    assert "mpc_wide_fixed_girard" in {method.name for method in methods}
+    assert "mpc_focused_sequence" in {method.name for method in methods}
+    assert (
+        METHOD_LABELS["mpc_wide_fixed_girard"]
+        == "MPC wide first-action, fixed Girard future"
+    )

@@ -14,18 +14,19 @@ from pzr.learning.features import (
     DECISION_FEATURE_NAMES,
     DECISION_FEATURE_SCHEMA_VERSION,
 )
+from pzr.learning.dagger import (
+    aggregate_dagger_rows,
+    class_balanced_indices,
+    load_dagger_iterations,
+)
 from pzr.learning.policy import _build_mlp
 
 DEFAULT_CANDIDATE_REDUCER_NAMES = (
     "box",
     "girard",
-    "combastel",
-    "methA",
-    "scott",
-    "pca",
-    "adaptive",
+    "girard_slack1",
+    "keep_trigger",
     "keep_norm",
-    "keep_calibration_aware",
 )
 
 
@@ -34,6 +35,9 @@ def main(argv: Sequence[str] | None = None) -> int:
     args = parser.parse_args(argv)
     if args.command == "train":
         train_policy(args)
+        return 0
+    if args.command == "dagger":
+        train_dagger_policy(args)
         return 0
     raise ValueError(f"unsupported command: {args.command}")
 
@@ -76,6 +80,11 @@ def train_policy(args: argparse.Namespace) -> None:
     class_names = _ordered_classes(rows["chosen_reducer_label"].astype(str).tolist())
     class_to_index = {name: index for index, name in enumerate(class_names)}
     labels = rows["chosen_reducer_label"].astype(str).map(class_to_index).to_numpy(dtype=np.int64)
+    if getattr(args, "class_balanced", False):
+        selected = class_balanced_indices(rows["chosen_reducer_label"].astype(str), args.seed)
+        rows = rows.iloc[selected].reset_index(drop=True)
+        features = features[selected]
+        labels = labels[selected]
     train_idx, val_idx = _train_validation_split(rows, args.validation_fraction, args.seed)
 
     mean = np.mean(features[train_idx], axis=0)
@@ -125,8 +134,13 @@ def train_policy(args: argparse.Namespace) -> None:
             "weight_decay": args.weight_decay,
             "validation_fraction": args.validation_fraction,
             "row_count": int(rows.shape[0]),
+            "class_balanced": bool(getattr(args, "class_balanced", False)),
+            "training_mode": getattr(args, "training_mode", "distillation"),
         },
     }
+    dagger_metadata = getattr(args, "dagger_metadata", None)
+    if dagger_metadata is not None:
+        checkpoint["dagger"] = dagger_metadata
     torch.save(checkpoint, out)
     metrics = {
         "schema_version": DECISION_FEATURE_SCHEMA_VERSION,
@@ -135,6 +149,8 @@ def train_policy(args: argparse.Namespace) -> None:
         "expert_method": args.expert_method,
         "predictor_mode": args.predictor_mode,
         "row_count": int(rows.shape[0]),
+        "class_balanced": bool(getattr(args, "class_balanced", False)),
+        "training_mode": getattr(args, "training_mode", "distillation"),
         "train_row_count": int(len(train_idx)),
         "validation_row_count": int(len(val_idx)),
         "class_counts": {
@@ -154,6 +170,53 @@ def train_policy(args: argparse.Namespace) -> None:
     )
 
 
+def train_dagger_policy(args: argparse.Namespace) -> None:
+    """Aggregate DAgger iterations and train a reducer-ranking checkpoint."""
+
+    iterations = load_dagger_iterations(
+        args.data,
+        expert_method=args.expert_method,
+        predictor_mode=args.predictor_mode,
+    )
+    aggregate = aggregate_dagger_rows(iterations)
+    if aggregate.empty:
+        raise ValueError("DAgger aggregation produced no rows")
+    out = Path(args.out)
+    aggregate_path = args.aggregate_out or out.with_suffix(".dagger_dataset.csv")
+    aggregate_path.parent.mkdir(parents=True, exist_ok=True)
+    aggregate.to_csv(aggregate_path, index=False)
+    train_policy(
+        argparse.Namespace(
+            data=aggregate_path,
+            expert_method=args.expert_method,
+            predictor_mode=args.predictor_mode,
+            out=out,
+            seed=args.seed,
+            epochs=args.epochs,
+            batch_size=args.batch_size,
+            lr=args.lr,
+            weight_decay=args.weight_decay,
+            validation_fraction=args.validation_fraction,
+            hidden_sizes=args.hidden_sizes,
+            class_balanced=True,
+            training_mode="dagger",
+            dagger_metadata={
+                "iteration_count": len(iterations),
+                "aggregate_dataset": str(aggregate_path),
+                "source_rows": [
+                    {
+                        "iteration": iteration.iteration,
+                        "row_count": int(iteration.rows.shape[0]),
+                        "expert_policy": iteration.expert_policy,
+                        "learner_policy": iteration.learner_policy,
+                    }
+                    for iteration in iterations
+                ],
+            },
+        )
+    )
+
+
 def _make_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         prog="pzr-distill-policy",
@@ -162,7 +225,7 @@ def _make_parser() -> argparse.ArgumentParser:
     subparsers = parser.add_subparsers(dest="command", required=True)
     train = subparsers.add_parser("train")
     train.add_argument("--data", required=True, type=Path)
-    train.add_argument("--expert-method", default="mpc_rollout_wide")
+    train.add_argument("--expert-method", default="mpc_focused_sequence")
     train.add_argument("--predictor-mode", choices=("online", "oracle"), default="online")
     train.add_argument("--out", required=True, type=Path)
     train.add_argument("--seed", type=int, default=0)
@@ -172,6 +235,20 @@ def _make_parser() -> argparse.ArgumentParser:
     train.add_argument("--weight-decay", type=float, default=0.0)
     train.add_argument("--validation-fraction", type=float, default=0.2)
     train.add_argument("--hidden-sizes", type=int, nargs="+", default=(64, 64))
+    train.add_argument("--class-balanced", action="store_true")
+    dagger = subparsers.add_parser("dagger")
+    dagger.add_argument("--data", required=True, type=Path, nargs="+")
+    dagger.add_argument("--expert-method", default="mpc_focused_sequence")
+    dagger.add_argument("--predictor-mode", choices=("online", "oracle"), default="online")
+    dagger.add_argument("--out", required=True, type=Path)
+    dagger.add_argument("--aggregate-out", type=Path, default=None)
+    dagger.add_argument("--seed", type=int, default=0)
+    dagger.add_argument("--epochs", type=int, default=200)
+    dagger.add_argument("--batch-size", type=int, default=64)
+    dagger.add_argument("--lr", type=float, default=1e-3)
+    dagger.add_argument("--weight-decay", type=float, default=0.0)
+    dagger.add_argument("--validation-fraction", type=float, default=0.2)
+    dagger.add_argument("--hidden-sizes", type=int, nargs="+", default=(64, 64))
     return parser
 
 

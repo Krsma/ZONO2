@@ -37,8 +37,11 @@ METHOD_LABELS = {
     "scott": "Scott",
     "pca": "PCA",
     "adaptive": "Adaptive",
-    "mpc_rollout_girard": "MPC rollout (ours)",
-    "mpc_rollout_wide": "MPC rollout wide (ours)",
+    "mpc_focused_fixed_girard": "MPC focused, fixed Girard future",
+    "mpc_wide_fixed_girard": "MPC wide first-action, fixed Girard future",
+    "mpc_focused_sequence": "MPC focused future sequence",
+    "mpc_rollout_girard": "MPC focused, fixed Girard future",
+    "mpc_rollout_wide": "MPC wide first-action, fixed Girard future",
     "learned_distilled": "Learned distilled",
 }
 
@@ -403,10 +406,10 @@ def _warning_flags(raw: pd.DataFrame, predicted: pd.DataFrame) -> list[str]:
         if value:
             flags.append(f"{column}={value}")
     if not predicted.empty:
-        wide = predicted[predicted["method"] == "mpc_rollout_wide"]
+        wide = predicted[predicted["method"] == "mpc_wide_fixed_girard"]
         first_box = _sum_column(wide, "first_action_box_count")
         if first_box:
-            flags.append(f"mpc_rollout_wide_first_action_box_count={first_box}")
+            flags.append(f"mpc_wide_fixed_girard_first_action_box_count={first_box}")
     return flags
 
 
@@ -680,7 +683,14 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--out", type=str, default="results/paper-figures")
     parser.add_argument(
         "--method-set",
-        choices=("paper", "paper_plus_ours", "paper_plus_wide", "extended"),
+        choices=(
+            "paper",
+            "paper_plus_focused",
+            "paper_plus_mpc_ablation",
+            "paper_plus_ours",
+            "paper_plus_wide",
+            "extended",
+        ),
         default="paper",
     )
     parser.add_argument("--seeds", type=int, default=10)
@@ -699,18 +709,29 @@ def _make_parser() -> argparse.ArgumentParser:
 
 
 def _selected_methods(method_set: str):
+    if method_set == "paper_plus_ours":
+        method_set = "paper_plus_focused"
+    elif method_set == "paper_plus_wide":
+        method_set = "paper_plus_mpc_ablation"
     if method_set == "paper":
         return paper_baseline_methods()
-    if method_set == "paper_plus_ours":
-        ours = tuple(
-            method for method in default_methods() if method.name == "mpc_rollout_girard"
-        )
-        return (*paper_baseline_methods(), *ours)
-    if method_set == "paper_plus_wide":
+    if method_set == "paper_plus_focused":
         ours = tuple(
             method
             for method in default_methods()
-            if method.name in {"mpc_rollout_girard", "mpc_rollout_wide"}
+            if method.name in {"mpc_focused_fixed_girard", "mpc_focused_sequence"}
+        )
+        return (*paper_baseline_methods(), *ours)
+    if method_set == "paper_plus_mpc_ablation":
+        ours = tuple(
+            method
+            for method in default_methods()
+            if method.name
+            in {
+                "mpc_focused_fixed_girard",
+                "mpc_wide_fixed_girard",
+                "mpc_focused_sequence",
+            }
         )
         return (*paper_baseline_methods(), *ours)
     if method_set == "extended":

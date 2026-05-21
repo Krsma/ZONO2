@@ -13,6 +13,7 @@ from pzr.reduction.paper_reducers import (
 )
 from pzr.reduction.reducers import (
     BoxReducer,
+    BudgetSlackReducer,
     IdentityReducer,
     ProtectedReducer,
     ScoredKeepReducer,
@@ -21,12 +22,14 @@ from pzr.reduction.reducers import (
 from pzr.reduction.scoring import (
     calibration_aware_scores,
     norm_scores,
+    trigger_influence_scores,
     threshold_risk_scores,
 )
 
 __all__ = [
     "BoxReducer",
     "AdaptiveReducer",
+    "BudgetSlackReducer",
     "CombastelReducer",
     "GirardReducer",
     "IdentityReducer",
@@ -43,4 +46,5 @@ __all__ = [
     "l2_scores",
     "norm_scores",
     "threshold_risk_scores",
+    "trigger_influence_scores",
 ]

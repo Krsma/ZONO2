@@ -8,6 +8,7 @@ from pzr.core.zonotope import (
     GeneratorRequirement,
     Zonotope,
 )
+from pzr.monitoring.base import TriggerSpec
 from pzr.reduction.paper_reducers import (
     AdaptiveReducer,
     CombastelReducer,
@@ -19,6 +20,7 @@ from pzr.reduction.paper_reducers import (
 from pzr.reduction.base import ReductionContext
 from pzr.reduction.reducers import (
     BoxReducer,
+    BudgetSlackReducer,
     IdentityReducer,
     ProtectedReducer,
     ScoredKeepReducer,
@@ -89,6 +91,33 @@ def test_scored_keep_reducer_respects_budget_and_preserves_calibration() -> None
         assert result.reduced.contains_in_interval_hull(point)
 
 
+def test_trigger_keep_reducer_prefers_trigger_influence() -> None:
+    metadata = tuple(
+        GeneratorMetadata(GeneratorKind.MEASUREMENT, f"epsilon@{index}")
+        for index in range(4)
+    )
+    zonotope = Zonotope(
+        [0.0, 0.0],
+        [[3.0, 0.2, 0.1, 0.1], [0.1, 2.0, 0.4, 0.3]],
+        metadata,
+    )
+    context = ReductionContext(
+        triggers=(TriggerSpec("x_above", state_index=0, threshold=0.0),)
+    )
+
+    result = ScoredKeepReducer.trigger_influence().reduce(
+        zonotope,
+        budget=3,
+        context=context,
+    )
+
+    assert result.certificate.is_sound
+    assert result.reduced.generator_count <= 3
+    assert any(meta.source == "epsilon@0" for meta in result.reduced.metadata)
+    for point in _sample_points(zonotope):
+        assert result.reduced.contains_in_interval_hull(point)
+
+
 def test_protected_reducer_preserves_required_generator_metadata() -> None:
     metadata = (
         GeneratorMetadata(GeneratorKind.CALIBRATION, "delta"),
@@ -128,6 +157,31 @@ def test_protected_reducer_fails_when_required_generators_exceed_budget() -> Non
 
     with pytest.raises(ValueError, match="cannot preserve"):
         ProtectedReducer(BoxReducer()).reduce(zonotope, budget=1, context=context)
+
+
+def test_budget_slack_reducer_reserves_headroom_and_preserves_metadata() -> None:
+    metadata = (
+        GeneratorMetadata(GeneratorKind.CALIBRATION, "delta"),
+        GeneratorMetadata(GeneratorKind.MEASUREMENT, "epsilon@1"),
+        GeneratorMetadata(GeneratorKind.MEASUREMENT, "epsilon@2"),
+        GeneratorMetadata(GeneratorKind.MEASUREMENT, "epsilon@3"),
+    )
+    zonotope = Zonotope(
+        [0.0, 0.0],
+        [[0.1, 2.0, 0.4, -0.2], [0.1, 0.1, 1.0, 0.7]],
+        metadata,
+    )
+    context = ReductionContext(
+        required_generators=(GeneratorRequirement(GeneratorKind.CALIBRATION, "delta"),)
+    )
+    reducer = BudgetSlackReducer(ProtectedReducer(GirardReducer()), slack=1, name="girard_slack1")
+
+    result = reducer.reduce(zonotope, budget=4, context=context)
+
+    assert result.certificate.is_sound
+    assert result.certificate.reducer == "girard_slack1"
+    assert result.reduced.generator_count <= 3
+    assert any(meta.source == "delta" for meta in result.reduced.metadata)
 
 
 def test_paper_reducers_respect_budget_and_contain_samples() -> None:

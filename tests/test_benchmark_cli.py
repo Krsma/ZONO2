@@ -56,8 +56,9 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
         "keep_calibration_aware",
         "mpc",
         "mpc_sequence",
-        "mpc_rollout_girard",
-        "mpc_rollout_wide",
+        "mpc_focused_sequence",
+        "mpc_focused_fixed_girard",
+        "mpc_wide_fixed_girard",
     }
     assert set(raw["seed"]) == {0, 1}
 
@@ -75,17 +76,25 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
 
     mpc = raw[
         raw["method"].isin(
-            {"mpc", "mpc_sequence", "mpc_rollout_girard", "mpc_rollout_wide"}
+            {
+                "mpc",
+                "mpc_sequence",
+                "mpc_focused_sequence",
+                "mpc_focused_fixed_girard",
+                "mpc_wide_fixed_girard",
+            }
         )
     ]
     chosen_total = (
         mpc["chosen_box_count"]
         + mpc["chosen_girard_count"]
+        + mpc["chosen_girard_slack1_count"]
         + mpc["chosen_combastel_count"]
         + mpc["chosen_methA_count"]
         + mpc["chosen_scott_count"]
         + mpc["chosen_pca_count"]
         + mpc["chosen_adaptive_count"]
+        + mpc["chosen_keep_trigger_count"]
         + mpc["chosen_keep_norm_count"]
         + mpc["chosen_keep_calibration_aware_count"]
         + mpc["chosen_other_count"]
@@ -134,7 +143,7 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
 
     sequences = pd.read_csv(tmp_path / "predicted_sequence_summary.csv")
     assert {"first_action_box_count", "future_box_count"} <= set(sequences.columns)
-    wide_sequences = sequences[sequences["method"] == "mpc_rollout_wide"]
+    wide_sequences = sequences[sequences["method"] == "mpc_wide_fixed_girard"]
     assert not wide_sequences.empty
     assert (wide_sequences["first_action_box_count"] == 0).all()
 
@@ -150,7 +159,7 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
 
     comparisons = pd.read_csv(tmp_path / "comparisons.csv")
     assert {"method", "baseline", "metric", "wilcoxon_p_value"} <= set(comparisons.columns)
-    assert set(comparisons["baseline"]) == {"mpc_rollout_wide"}
+    assert set(comparisons["baseline"]) == {"mpc_focused_sequence"}
 
     config = json.loads((tmp_path / "config.json").read_text(encoding="utf-8"))
     assert config["length"] == 8
@@ -159,8 +168,8 @@ def test_benchmark_cli_writes_paper_style_artifacts(tmp_path) -> None:
     assert config["seeds"] == [0, 1]
 
 
-def test_paper_plus_wide_method_set_adds_both_rollout_mpc_methods() -> None:
-    methods = _selected_methods("paper_plus_wide")
+def test_paper_plus_mpc_ablation_method_set_adds_mpc_methods() -> None:
+    methods = _selected_methods("paper_plus_mpc_ablation")
 
     assert {method.name for method in methods} == {
         "box",
@@ -170,16 +179,18 @@ def test_paper_plus_wide_method_set_adds_both_rollout_mpc_methods() -> None:
         "scott",
         "pca",
         "adaptive",
-        "mpc_rollout_girard",
-        "mpc_rollout_wide",
+        "mpc_focused_sequence",
+        "mpc_focused_fixed_girard",
+        "mpc_wide_fixed_girard",
     }
 
 
-def test_paper_plus_ours_method_set_keeps_focused_rollout_only() -> None:
-    methods = _selected_methods("paper_plus_ours")
+def test_paper_plus_focused_method_set_keeps_focused_methods_only() -> None:
+    methods = _selected_methods("paper_plus_focused")
 
-    assert "mpc_rollout_girard" in {method.name for method in methods}
-    assert "mpc_rollout_wide" not in {method.name for method in methods}
+    assert "mpc_focused_fixed_girard" in {method.name for method in methods}
+    assert "mpc_focused_sequence" in {method.name for method in methods}
+    assert "mpc_wide_fixed_girard" not in {method.name for method in methods}
 
 
 def test_benchmark_cli_can_skip_reference(tmp_path) -> None:

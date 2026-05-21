@@ -7,6 +7,7 @@ import pytest
 from pzr.benchmarks.robot import OmnidirectionalRobotMonitor, generate_robot_trace
 from pzr.experiments.cli import main as benchmark_main
 from pzr.learning.distill_cli import main as distill_main
+from pzr.learning.dagger import aggregate_dagger_rows, class_balanced_indices, load_dagger_iterations
 from pzr.learning.features import (
     DECISION_FEATURE_NAMES,
     DECISION_FEATURE_SCHEMA_VERSION,
@@ -69,7 +70,7 @@ def test_benchmark_writes_non_empty_decision_features(tmp_path) -> None:
     assert {"chosen_reducer_label", "predicted_sequence", *DECISION_FEATURE_NAMES} <= set(
         decisions.columns
     )
-    assert (decisions["method"] == "mpc_rollout_wide").any()
+    assert (decisions["method"] == "mpc_focused_sequence").any()
     assert "no_reduction" not in set(decisions["chosen_reducer_label"])
     assert not (decisions["no_op_selected"] == True).any()
     assert (decisions["generator_count"] > decisions["budget"]).all()
@@ -77,7 +78,7 @@ def test_benchmark_writes_non_empty_decision_features(tmp_path) -> None:
     selection = pd.read_csv(tmp_path / "selection_summary.csv")
     assert not selection.empty
     sequences = pd.read_csv(tmp_path / "predicted_sequence_summary.csv")
-    wide_sequences = sequences[sequences["method"] == "mpc_rollout_wide"]
+    wide_sequences = sequences[sequences["method"] == "mpc_wide_fixed_girard"]
     assert not wide_sequences.empty
     assert (wide_sequences["first_action_box_count"] == 0).all()
 
@@ -109,6 +110,42 @@ def test_distill_cli_trains_tiny_policy_from_decision_rows(tmp_path) -> None:
     saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
     assert saved["schema_version"] == DECISION_FEATURE_SCHEMA_VERSION
     assert saved["feature_names"] == list(DECISION_FEATURE_NAMES)
+
+
+def test_dagger_aggregates_iterations_and_trains_balanced_checkpoint(tmp_path) -> None:
+    first = tmp_path / "iter0.csv"
+    second = tmp_path / "iter1.csv"
+    _write_synthetic_decisions(first)
+    _write_synthetic_decisions(second)
+    iterations = load_dagger_iterations((first, second))
+    aggregate = aggregate_dagger_rows(iterations)
+
+    assert set(aggregate["dagger_iteration"]) == {0, 1}
+    sampled = class_balanced_indices(["box", "girard", "girard"], seed=0)
+    assert sampled.shape == (4,)
+
+    checkpoint = tmp_path / "dagger.pt"
+    exit_code = distill_main(
+        [
+            "dagger",
+            "--data",
+            str(first),
+            str(second),
+            "--out",
+            str(checkpoint),
+            "--epochs",
+            "5",
+            "--batch-size",
+            "4",
+        ]
+    )
+
+    assert exit_code == 0
+    saved = torch.load(checkpoint, map_location="cpu", weights_only=False)
+    assert saved["training_config"]["training_mode"] == "dagger"
+    assert saved["training_config"]["class_balanced"] is True
+    assert saved["dagger"]["iteration_count"] == 2
+    assert checkpoint.with_suffix(".dagger_dataset.csv").exists()
 
 
 def test_learned_policy_returns_certified_budgeted_state_and_falls_back(tmp_path) -> None:
@@ -155,7 +192,7 @@ def test_benchmark_cli_can_evaluate_learned_policy(tmp_path) -> None:
         [
             "robot",
             "--method-set",
-            "paper_plus_wide",
+            "paper_plus_mpc_ablation",
             "--learned-policy",
             str(checkpoint),
             "--length",
@@ -182,11 +219,13 @@ def test_benchmark_cli_can_evaluate_learned_policy(tmp_path) -> None:
     chosen_total = (
         learned["chosen_box_count"]
         + learned["chosen_girard_count"]
+        + learned["chosen_girard_slack1_count"]
         + learned["chosen_combastel_count"]
         + learned["chosen_methA_count"]
         + learned["chosen_scott_count"]
         + learned["chosen_pca_count"]
         + learned["chosen_adaptive_count"]
+        + learned["chosen_keep_trigger_count"]
         + learned["chosen_keep_norm_count"]
         + learned["chosen_keep_calibration_aware_count"]
         + learned["chosen_other_count"]
@@ -207,8 +246,8 @@ def _write_synthetic_decisions(path) -> None:
                     **features,
                     "feature_schema_version": DECISION_FEATURE_SCHEMA_VERSION,
                     "scenario": "synthetic",
-                    "method": "mpc_rollout_wide",
-                    "method_kind": "mpc_rollout",
+                    "method": "mpc_focused_sequence",
+                    "method_kind": "mpc_sequence",
                     "seed": seed,
                     "length": 3,
                     "budget": 6,

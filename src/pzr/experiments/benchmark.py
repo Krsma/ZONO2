@@ -44,6 +44,7 @@ from pzr.reduction.paper_reducers import (
 )
 from pzr.reduction.reducers import (
     BoxReducer,
+    BudgetSlackReducer,
     ProtectedReducer,
     ScoredKeepReducer,
     TargetBudgetReducer,
@@ -244,8 +245,14 @@ class MethodSpec:
     def sequence_mpc(
         name: str,
         reducer_factories: tuple[Callable[[], Reducer], ...],
+        fallback_reducer_factory: Callable[[], Reducer] | None = None,
     ) -> "MethodSpec":
-        return MethodSpec(name, "mpc_sequence", mpc_reducer_factories=reducer_factories)
+        return MethodSpec(
+            name,
+            "mpc_sequence",
+            mpc_reducer_factories=reducer_factories,
+            mpc_fallback_reducer_factory=fallback_reducer_factory,
+        )
 
     @staticmethod
     def rollout_mpc(
@@ -384,21 +391,8 @@ def default_methods() -> tuple[MethodSpec, ...]:
         _protected(ScoredKeepReducer.by_norm),
         _protected(ScoredKeepReducer.calibration_aware),
     )
-    rollout_candidates = (
-        _protected(GirardReducer),
-        _protected(ScoredKeepReducer.by_norm),
-        _protected(ScoredKeepReducer.calibration_aware),
-    )
-    wide_rollout_candidates = (
-        _protected(GirardReducer),
-        _protected(CombastelReducer),
-        _protected(MethAReducer),
-        _protected(ScottReducer),
-        _protected(PcaReducer),
-        _protected(AdaptiveReducer),
-        _protected(ScoredKeepReducer.by_norm),
-        _protected(ScoredKeepReducer.calibration_aware),
-    )
+    focused_candidates = focused_geometry_reducer_factories()
+    wide_rollout_candidates = wide_rollout_reducer_factories()
     return (
         MethodSpec.static("box", _protected(BoxReducer)),
         MethodSpec.static("girard", _protected(GirardReducer)),
@@ -418,14 +412,19 @@ def default_methods() -> tuple[MethodSpec, ...]:
         ),
         MethodSpec.mpc("mpc", mpc_candidates),
         MethodSpec.sequence_mpc("mpc_sequence", mpc_candidates),
+        MethodSpec.sequence_mpc(
+            "mpc_focused_sequence",
+            focused_candidates,
+            _protected(BoxReducer),
+        ),
         MethodSpec.rollout_mpc(
-            "mpc_rollout_girard",
-            rollout_candidates,
+            "mpc_focused_fixed_girard",
+            focused_candidates,
             _protected(GirardReducer),
             _protected(BoxReducer),
         ),
         MethodSpec.rollout_mpc(
-            "mpc_rollout_wide",
+            "mpc_wide_fixed_girard",
             wide_rollout_candidates,
             _protected(GirardReducer),
             _protected(BoxReducer),
@@ -433,8 +432,19 @@ def default_methods() -> tuple[MethodSpec, ...]:
     )
 
 
+def focused_geometry_reducer_factories() -> tuple[Callable[[], Reducer], ...]:
+    """Protected geometry-regularized candidates for focused MPC methods."""
+
+    return (
+        _protected(GirardReducer),
+        _budget_slack(_protected(GirardReducer), 1, "girard_slack1"),
+        _protected(ScoredKeepReducer.trigger_influence),
+        _protected(ScoredKeepReducer.by_norm),
+    )
+
+
 def wide_rollout_reducer_factories() -> tuple[Callable[[], Reducer], ...]:
-    """Protected precision candidates used by wide rollout and learned policies."""
+    """Protected precision candidates used by wide fixed-tail rollout and learned policies."""
 
     return (
         _protected(GirardReducer),
@@ -451,7 +461,7 @@ def wide_rollout_reducer_factories() -> tuple[Callable[[], Reducer], ...]:
 def learned_distilled_method(policy_path: str | Path) -> MethodSpec:
     """Create the benchmark method spec for a distilled learned policy."""
 
-    return MethodSpec.learned(policy_path, wide_rollout_reducer_factories())
+    return MethodSpec.learned(policy_path, focused_geometry_reducer_factories())
 
 
 def paper_baseline_methods() -> tuple[MethodSpec, ...]:
@@ -482,6 +492,17 @@ def _target_budget(
 ) -> Callable[[], Reducer]:
     def make() -> Reducer:
         return TargetBudgetReducer(factory(), target_budget, name=name)
+
+    return make
+
+
+def _budget_slack(
+    factory: Callable[[], Reducer],
+    slack: int,
+    name: str,
+) -> Callable[[], Reducer]:
+    def make() -> Reducer:
+        return BudgetSlackReducer(factory(), slack, name=name)
 
     return make
 
@@ -680,8 +701,9 @@ def compare_against_mpc(raw: pd.DataFrame) -> pd.DataFrame:
             (
                 candidate
                 for candidate in (
-                    "mpc_rollout_wide",
-                    "mpc_rollout_girard",
+                    "mpc_focused_sequence",
+                    "mpc_focused_fixed_girard",
+                    "mpc_wide_fixed_girard",
                     "mpc_sequence",
                     "mpc",
                 )
@@ -1450,6 +1472,11 @@ def _make_policy(
             budget=config.budget,
             horizon=config.horizon,
             cost=cost,
+            fallback_reducer=(
+                method.mpc_fallback_reducer_factory()
+                if method.mpc_fallback_reducer_factory is not None
+                else None
+            ),
         )
     if method.kind == "mpc_rollout":
         if method.mpc_base_reducer_factory is None:
@@ -1673,11 +1700,13 @@ class _MetricAccumulator:
             "reduction_failure_count": self.reduction_failure_count,
             "chosen_box_count": self.chosen_reducers["box"],
             "chosen_girard_count": self.chosen_reducers["girard"],
+            "chosen_girard_slack1_count": self.chosen_reducers["girard_slack1"],
             "chosen_combastel_count": self.chosen_reducers["combastel"],
             "chosen_methA_count": self.chosen_reducers["methA"],
             "chosen_scott_count": self.chosen_reducers["scott"],
             "chosen_pca_count": self.chosen_reducers["pca"],
             "chosen_adaptive_count": self.chosen_reducers["adaptive"],
+            "chosen_keep_trigger_count": self.chosen_reducers["keep_trigger"],
             "chosen_keep_norm_count": self.chosen_reducers["keep_norm"],
             "chosen_keep_calibration_aware_count": self.chosen_reducers[
                 "keep_calibration_aware"
@@ -1690,11 +1719,13 @@ class _MetricAccumulator:
                 not in {
                     "box",
                     "girard",
+                    "girard_slack1",
                     "combastel",
                     "methA",
                     "scott",
                     "pca",
                     "adaptive",
+                    "keep_trigger",
                     "keep_norm",
                     "keep_calibration_aware",
                     "no_reduction",
