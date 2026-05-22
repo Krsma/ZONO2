@@ -67,7 +67,11 @@ def test_corl_smoke_suite_writes_headline_artifacts(tmp_path) -> None:
 
     raw = pd.read_csv(out / "raw_episodes.csv")
     assert {"reference_unbounded", "nominal_no_monitor", "learned_dagger"} <= set(raw["method"])
+    assert set(raw["seed"]) == {1}
     assert (raw[raw["method"] != "reference_unbounded"]["budget_violation_count"] == 0).all()
+
+    dagger = pd.read_csv(out / "dagger_dataset.csv")
+    assert set(dagger["seed"]) == {0}
 
     headline = pd.read_csv(out / "headline_table.csv")
     assert {

@@ -190,6 +190,7 @@ def run_corl_suite(args: argparse.Namespace) -> Path:
             "kind": "heldout_evaluation",
             "episodes": len(episode_rows),
             "eval_seeds": profile.eval_seeds,
+            "eval_seed_start": profile.train_seeds,
         }
     )
 
@@ -299,7 +300,7 @@ def _run_evaluation(
     monitor_rows: list[dict[str, Any]] = []
     decision_rows: list[dict[str, Any]] = []
     for method in methods:
-        for seed in range(profile.eval_seeds):
+        for seed in range(profile.train_seeds, profile.train_seeds + profile.eval_seeds):
             client = make_env_client(
                 profile=args.profile,
                 safe_control_gym_root=args.safe_control_gym_root,
