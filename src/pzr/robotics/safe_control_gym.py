@@ -275,12 +275,20 @@ class DirectSafeControlGymClient:
 class SidecarSafeControlGymClient:
     """JSON-lines sidecar client for running safe-control-gym in another Python."""
 
-    def __init__(self, python: str | Path, root: str | Path) -> None:
+    def __init__(
+        self,
+        python: str | Path,
+        root: str | Path,
+        scenario_config: str | Path | None = None,
+    ) -> None:
         self.python = str(python)
         self.root = str(root)
         worker = Path(__file__).with_name("safe_control_worker.py")
+        command = [self.python, str(worker), "--safe-control-gym-root", self.root]
+        if scenario_config is not None:
+            command.extend(["--scenario-config", str(scenario_config)])
         self._process = subprocess.Popen(
-            [self.python, str(worker), "--safe-control-gym-root", self.root],
+            command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
             stderr=subprocess.PIPE,
@@ -327,11 +335,16 @@ class SidecarSafeControlGymClient:
             raise RuntimeError("sidecar worker pipes are closed")
         self._process.stdin.write(json.dumps(payload) + "\n")
         self._process.stdin.flush()
-        line = self._process.stdout.readline()
-        if not line:
-            stderr = self._process.stderr.read() if self._process.stderr is not None else ""
-            raise RuntimeError(f"safe-control-gym sidecar stopped: {stderr}")
-        response = json.loads(line)
+        response: dict[str, Any] | None = None
+        while response is None:
+            line = self._process.stdout.readline()
+            if not line:
+                stderr = self._process.stderr.read() if self._process.stderr is not None else ""
+                raise RuntimeError(f"safe-control-gym sidecar stopped: {stderr}")
+            try:
+                response = json.loads(line)
+            except json.JSONDecodeError:
+                continue
         if not response.get("ok", False):
             raise RuntimeError(response.get("error", "safe-control-gym sidecar request failed"))
         return response
@@ -342,6 +355,7 @@ def make_env_client(
     profile: str,
     safe_control_gym_root: str | Path | None,
     safe_control_python: str | Path | None,
+    safe_control_config: str | Path | None = None,
 ) -> IrosEnvClient:
     """Create the requested environment client."""
 
@@ -351,7 +365,7 @@ def make_env_client(
         root = safe_control_gym_root or os.environ.get("PZR_SAFE_CONTROL_GYM_ROOT")
         if root is None:
             raise RuntimeError("--safe-control-python requires --safe-control-gym-root or PZR_SAFE_CONTROL_GYM_ROOT")
-        return SidecarSafeControlGymClient(safe_control_python, root)
+        return SidecarSafeControlGymClient(safe_control_python, root, safe_control_config)
     return DirectSafeControlGymClient(safe_control_gym_root)
 
 
@@ -360,6 +374,7 @@ def preflight_safe_control_gym(
     profile: str,
     safe_control_gym_root: str | Path | None,
     safe_control_python: str | Path | None,
+    safe_control_config: str | Path | None = None,
 ) -> PreflightResult:
     """Run setup checks for the requested CoRL environment path."""
 
@@ -379,14 +394,37 @@ def preflight_safe_control_gym(
         }
         return PreflightResult(all(checks.values()), checks, ("fake CoRL smoke environment is available",))
     if safe_control_python is not None:
+        root = safe_control_gym_root or os.environ.get("PZR_SAFE_CONTROL_GYM_ROOT")
         checks = {
             "safe_control_python_exists": Path(safe_control_python).exists(),
-            "safe_control_gym_root_exists": bool(safe_control_gym_root) and Path(safe_control_gym_root).exists(),
+            "safe_control_gym_root_exists": bool(root) and Path(root).exists(),
+            "sidecar_reset": False,
+            "sidecar_step": False,
             "torch": torch_ok,
         }
-        ok = all(checks.values())
-        messages = ("sidecar configuration is syntactically valid",) if ok else ("sidecar configuration is incomplete",)
-        return PreflightResult(ok, checks, messages)
+        messages: list[str] = []
+        if not checks["safe_control_python_exists"]:
+            messages.append(f"safe-control sidecar Python is missing: {safe_control_python}")
+        if not checks["safe_control_gym_root_exists"]:
+            messages.append(
+                "safe-control-gym root is missing; pass --safe-control-gym-root or set PZR_SAFE_CONTROL_GYM_ROOT"
+            )
+        if messages:
+            return PreflightResult(False, checks, tuple(messages))
+        client = SidecarSafeControlGymClient(safe_control_python, root, safe_control_config)
+        try:
+            snapshot = client.reset(0)
+            checks["sidecar_reset"] = snapshot.pose.shape == (3,) and snapshot.velocity.shape == (3,)
+            command = client.nominal_command(snapshot)
+            next_snapshot = client.step(command)
+            checks["sidecar_step"] = next_snapshot.pose.shape == (3,) and next_snapshot.velocity.shape == (3,)
+        except Exception as exc:
+            messages.append(f"safe-control-gym sidecar reset/step failed: {exc}")
+        finally:
+            client.close()
+        if not messages:
+            messages.append("safe-control-gym sidecar reset and step succeeded")
+        return PreflightResult(all(checks.values()), checks, tuple(messages))
     direct = DirectSafeControlGymClient(safe_control_gym_root)
     result = direct.preflight()
     checks = dict(result.checks)

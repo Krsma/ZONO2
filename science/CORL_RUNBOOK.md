@@ -2,63 +2,97 @@
 
 ## safe-control-gym Setup
 
-The CoRL headline suite expects the safe-control-gym IROS task to be installed
-outside this repository. The upstream project documents Python 3.10 setup:
+The CoRL headline suite can run the safe-control-gym IROS task through a
+sidecar Python environment. This avoids forcing the main PZR Python 3.11+
+environment to carry the older simulator dependency stack.
+
+The local checkout used for validation is:
 
 ```bash
-git clone https://github.com/utiasDSL/safe-control-gym.git external/safe-control-gym
-cd external/safe-control-gym
-git checkout beta-iros-competition
+external/miniconda3/bin/conda --version
+# conda 26.3.2
 
-conda create -n pzr-safe-control python=3.10 -y
-conda activate pzr-safe-control
-python -m pip install --upgrade pip
-python -m pip install -e .
+external/miniconda3/envs/pzr-safe-control/bin/python --version
+# Python 3.10.20
 ```
 
-This repository requires Python 3.11 or newer. If safe-control-gym imports in
-the same environment, install this package there too:
+To recreate it from scratch:
 
 ```bash
-cd /home/vlkr/Faks/phd/ZONO2
+mkdir -p /tmp/pzr-downloads external/conda-home
+curl -L https://repo.anaconda.com/miniconda/Miniconda3-latest-Linux-x86_64.sh \
+  -o /tmp/pzr-downloads/Miniconda3-latest-Linux-x86_64.sh
+
+HOME=/home/vlkr/Faks/phd/ZONO2/external/conda-home \
+bash /tmp/pzr-downloads/Miniconda3-latest-Linux-x86_64.sh \
+  -b -p /home/vlkr/Faks/phd/ZONO2/external/miniconda3
+
+HOME=/home/vlkr/Faks/phd/ZONO2/external/conda-home \
+external/miniconda3/bin/conda create -y -n pzr-safe-control \
+  -c conda-forge python=3.10 pip gmp compilers swig
+```
+
+Install the competition branch and the minimal runtime packages used by the
+sidecar:
+
+```bash
+git clone --branch beta-iros-competition \
+  https://github.com/learnsyslab/safe-control-gym.git \
+  external/safe-control-gym
+
+HOME=/home/vlkr/Faks/phd/ZONO2/external/conda-home \
+external/miniconda3/envs/pzr-safe-control/bin/python -m pip install \
+  --upgrade pip setuptools wheel poetry-core numpy==1.26.4 scipy PyYAML munch \
+  matplotlib Pillow imageio dict-deep pandas scikit-optimize termcolor rich \
+  casadi pybullet gym==0.23.1
+
+HOME=/home/vlkr/Faks/phd/ZONO2/external/conda-home \
+external/miniconda3/envs/pzr-safe-control/bin/python -m pip install \
+  -e external/safe-control-gym --no-deps --no-build-isolation
+```
+
+The main PZR environment still needs the project package plus learning/test
+dependencies:
+
+```bash
 python -m pip install -e ".[dev,learning]"
-export PZR_SAFE_CONTROL_GYM_ROOT=/home/vlkr/Faks/phd/ZONO2/external/safe-control-gym
 ```
 
-If dependency versions conflict, use a sidecar Python executable from the
-safe-control-gym environment:
+Use these paths for the current sidecar setup:
 
 ```bash
 export PZR_SAFE_CONTROL_GYM_ROOT=/home/vlkr/Faks/phd/ZONO2/external/safe-control-gym
-export PZR_SAFE_CONTROL_PYTHON=/path/to/pzr-safe-control/bin/python
+export PZR_SAFE_CONTROL_PYTHON=/home/vlkr/Faks/phd/ZONO2/external/miniconda3/envs/pzr-safe-control/bin/python
+export PZR_SAFE_CONTROL_CONFIG=competition/level3.yaml
 ```
 
 ## Preflight
 
-Run preflight before starting an overnight job:
-
-```bash
-pzr-run-corl --preflight --safe-control-gym-root "$PZR_SAFE_CONTROL_GYM_ROOT"
-```
-
-For the sidecar path:
+Run sidecar preflight before starting an overnight job:
 
 ```bash
 pzr-run-corl \
   --preflight \
   --safe-control-gym-root "$PZR_SAFE_CONTROL_GYM_ROOT" \
-  --safe-control-python "$PZR_SAFE_CONTROL_PYTHON"
+  --safe-control-python "$PZR_SAFE_CONTROL_PYTHON" \
+  --safe-control-config "$PZR_SAFE_CONTROL_CONFIG"
 ```
 
-The current implementation has a deterministic fake environment for smoke tests
-and a fail-fast safe-control-gym boundary. If the concrete beta IROS task factory
-is not detected, preflight exits nonzero with setup details rather than writing
-headline artifacts from the wrong simulator.
+Expected sidecar checks are `safe_control_python_exists`,
+`safe_control_gym_root_exists`, `sidecar_reset`, `sidecar_step`, and `torch`.
+All should be true before running a headline job.
 
 ## Smoke Test
 
 ```bash
-pzr-run-corl --profile smoke --out /tmp/pzr-corl-smoke --force --no-archive
+pzr-run-corl \
+  --profile smoke \
+  --safe-control-gym-root "$PZR_SAFE_CONTROL_GYM_ROOT" \
+  --safe-control-python "$PZR_SAFE_CONTROL_PYTHON" \
+  --safe-control-config "$PZR_SAFE_CONTROL_CONFIG" \
+  --out /tmp/pzr-corl-real-smoke \
+  --force \
+  --no-archive
 ```
 
 Expected core outputs:
@@ -78,29 +112,14 @@ Expected core outputs:
 
 ```bash
 mkdir -p results/logs
+export PZR_SAFE_CONTROL_GYM_ROOT=/home/vlkr/Faks/phd/ZONO2/external/safe-control-gym
+export PZR_SAFE_CONTROL_PYTHON=/home/vlkr/Faks/phd/ZONO2/external/miniconda3/envs/pzr-safe-control/bin/python
 
-PZR_SAFE_CONTROL_GYM_ROOT=/home/vlkr/Faks/phd/ZONO2/external/safe-control-gym \
 nohup pzr-run-corl \
   --profile overnight \
-  --out results/corl-main-$(date +%Y%m%d) \
-  --force \
-  --budget 8 \
-  --horizon 6 \
-  --max-steps 1000 \
-  --train-seeds 20 \
-  --eval-seeds 50 \
-  --dagger-iterations 3 \
-  --bootstrap-samples 5000 \
-  > results/logs/corl-main-$(date +%Y%m%d).log 2>&1 &
-```
-
-With sidecar Python:
-
-```bash
-PZR_SAFE_CONTROL_GYM_ROOT=/home/vlkr/Faks/phd/ZONO2/external/safe-control-gym \
-nohup pzr-run-corl \
-  --profile overnight \
-  --safe-control-python /path/to/pzr-safe-control/bin/python \
+  --safe-control-gym-root "$PZR_SAFE_CONTROL_GYM_ROOT" \
+  --safe-control-python "$PZR_SAFE_CONTROL_PYTHON" \
+  --safe-control-config competition/level3.yaml \
   --out results/corl-main-$(date +%Y%m%d) \
   --force \
   --budget 8 \

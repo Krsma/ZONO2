@@ -126,6 +126,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             profile=args.profile,
             safe_control_gym_root=args.safe_control_gym_root,
             safe_control_python=args.safe_control_python,
+            safe_control_config=args.safe_control_config,
         )
         print(json.dumps(result.to_dict(), indent=2, sort_keys=True))
         return 0 if result.ok else 2
@@ -150,6 +151,7 @@ def run_corl_suite(args: argparse.Namespace) -> Path:
         profile=args.profile,
         safe_control_gym_root=args.safe_control_gym_root,
         safe_control_python=args.safe_control_python,
+        safe_control_config=args.safe_control_config,
     )
     if not preflight.ok:
         raise RuntimeError(
@@ -242,6 +244,7 @@ def _run_dagger_training(
                 profile=args.profile,
                 safe_control_gym_root=args.safe_control_gym_root,
                 safe_control_python=args.safe_control_python,
+                safe_control_config=args.safe_control_config,
             )
             try:
                 _, _, _, decisions = _run_episode(
@@ -301,6 +304,7 @@ def _run_evaluation(
                 profile=args.profile,
                 safe_control_gym_root=args.safe_control_gym_root,
                 safe_control_python=args.safe_control_python,
+                safe_control_config=args.safe_control_config,
             )
             try:
                 episode, interventions, monitor, decisions = _run_episode(
@@ -961,6 +965,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--preflight", action="store_true")
     parser.add_argument("--safe-control-gym-root", type=str, default=None)
     parser.add_argument("--safe-control-python", type=str, default=None)
+    parser.add_argument("--safe-control-config", type=str, default=None)
     parser.add_argument("--bootstrap-seed", type=int, default=0)
     parser.add_argument("--budget", type=int, default=None)
     parser.add_argument("--horizon", type=int, default=None)

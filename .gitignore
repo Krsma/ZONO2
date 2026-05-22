@@ -11,6 +11,7 @@ results/
 
 # Local virtual environments and build outputs
 .venv/
+external/
 build/
 dist/
 *.egg-info/
