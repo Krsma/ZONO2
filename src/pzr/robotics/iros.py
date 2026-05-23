@@ -97,6 +97,7 @@ class IrosObservation:
     target_gate_index: int = 0
     command: NDArray[np.float64] | None = None
     reference_state: NDArray[np.float64] | None = None
+    bias_radius: NDArray[np.float64] | None = None
     noise_radius: NDArray[np.float64] | None = None
     time: float = 0.0
 
@@ -107,6 +108,7 @@ class IrosObservation:
         target_gate_index: int = 0,
         command: ArrayLike | None = None,
         reference_state: ArrayLike | None = None,
+        bias_radius: ArrayLike | None = None,
         noise_radius: ArrayLike | None = None,
         time: float = 0.0,
     ) -> None:
@@ -125,8 +127,10 @@ class IrosObservation:
             if reference_state is None
             else np.asarray(reference_state, dtype=float).reshape(-1),
         )
-        radius = None if noise_radius is None else np.asarray(noise_radius, dtype=float).reshape(6)
-        object.__setattr__(self, "noise_radius", radius)
+        bias = None if bias_radius is None else np.asarray(bias_radius, dtype=float).reshape(6)
+        noise = None if noise_radius is None else np.asarray(noise_radius, dtype=float).reshape(6)
+        object.__setattr__(self, "bias_radius", bias)
+        object.__setattr__(self, "noise_radius", noise)
         object.__setattr__(self, "time", float(time))
 
 
@@ -150,8 +154,16 @@ class NoisySensorModel:
         return self._bias.copy()
 
     @property
+    def bias_radius(self) -> NDArray[np.float64]:
+        return np.abs(_six_vector(self.bias_bound))
+
+    @property
+    def noise_radius(self) -> NDArray[np.float64]:
+        return np.abs(_six_vector(self.noise_bound))
+
+    @property
     def radius(self) -> NDArray[np.float64]:
-        return np.abs(_six_vector(self.bias_bound)) + np.abs(_six_vector(self.noise_bound))
+        return self.bias_radius + self.noise_radius
 
     def observe(
         self,
@@ -175,7 +187,8 @@ class NoisySensorModel:
             target_gate_index=target_gate_index,
             command=command,
             reference_state=reference_state,
-            noise_radius=self.radius,
+            bias_radius=self.bias_radius,
+            noise_radius=self.noise_radius,
             time=time,
         )
 
@@ -195,6 +208,7 @@ class IrosGateMonitor:
     scenario: IrosScenario
     measurement_noise_scale: float = 0.0
     overlap: float = 0.0
+    stream_memory_decay: float = 0.0
     generator_memory_decay: float = 0.0
 
     @property
@@ -206,13 +220,6 @@ class IrosGateMonitor:
                 OBSTACLE_CLEARANCE,
                 self.scenario.min_obstacle_clearance,
                 direction="below",
-                overlap=self.overlap,
-            ),
-            TriggerSpec(
-                "corridor_violation",
-                CORRIDOR_DEVIATION,
-                self.scenario.corridor_radius,
-                direction="above",
                 overlap=self.overlap,
             ),
             TriggerSpec("altitude_low_violation", ALTITUDE_LOW_MARGIN, 0.0, direction="below", overlap=self.overlap),
@@ -251,18 +258,28 @@ class IrosGateMonitor:
         payload = state.payload
         if not isinstance(payload, IrosGatePayload):
             raise TypeError("IROS gate monitor payload has the wrong type")
-        center = iros_stream_values(self.scenario, measurement)
-        radius = self._stream_radius(measurement)
-        generators, metadata = _axis_generators(
-            radius,
-            source_prefix=f"iros_noise@{state.step + 1}",
-            include_bias=True,
+        current_center = iros_stream_values(self.scenario, measurement)
+        bias_radius = self._stream_radius(measurement, radius_kind="bias")
+        noise_radius = self._stream_radius(measurement, radius_kind="noise")
+        bias_generators, bias_metadata = _calibration_generator(
+            bias_radius,
+            source="iros_sensor_bias",
         )
-        if self.generator_memory_decay > 0.0 and state.zonotope.generator_count:
+        noise_generators, noise_metadata = _axis_generators(
+            noise_radius,
+            source_prefix=f"iros_noise@{state.step + 1}",
+        )
+        generators = np.hstack([bias_generators, noise_generators])
+        metadata = (*bias_metadata, *noise_metadata)
+        memory_decay = max(float(self.stream_memory_decay), float(self.generator_memory_decay))
+        if memory_decay > 0.0 and state.step > 0 and state.zonotope.generator_count:
+            memory_decay = min(memory_decay, 1.0)
             old = state.zonotope.age_generators()
-            memory = float(self.generator_memory_decay)
-            generators = np.hstack([memory * old.generators, generators])
+            center = memory_decay * state.zonotope.center + (1.0 - memory_decay) * current_center
+            generators = np.hstack([memory_decay * old.generators, (1.0 - memory_decay) * generators])
             metadata = (*tuple(_memory_metadata(meta) for meta in old.metadata), *metadata)
+        else:
+            center = current_center
         gates_passed = payload.gates_passed
         gate = self.scenario.gate(measurement.target_gate_index)
         if np.linalg.norm(measurement.pose - gate.center) <= self.scenario.gate_pass_radius:
@@ -279,12 +296,21 @@ class IrosGateMonitor:
         point = Zonotope(iros_stream_values(self.scenario, observation))
         return evaluate_triggers(point, self.triggers)
 
-    def _stream_radius(self, measurement: IrosObservation) -> NDArray[np.float64]:
-        source_radius = (
-            np.full(6, self.measurement_noise_scale, dtype=float)
-            if measurement.noise_radius is None
-            else np.asarray(measurement.noise_radius, dtype=float).reshape(6)
-        )
+    def _stream_radius(self, measurement: IrosObservation, *, radius_kind: str) -> NDArray[np.float64]:
+        if radius_kind == "bias":
+            source_radius = (
+                np.zeros(6, dtype=float)
+                if measurement.bias_radius is None
+                else np.asarray(measurement.bias_radius, dtype=float).reshape(6)
+            )
+        elif radius_kind == "noise":
+            source_radius = (
+                np.full(6, self.measurement_noise_scale, dtype=float)
+                if measurement.noise_radius is None
+                else np.asarray(measurement.noise_radius, dtype=float).reshape(6)
+            )
+        else:
+            raise ValueError("radius_kind must be 'bias' or 'noise'")
         pose_r = source_radius[:3]
         velocity_r = source_radius[3:]
         position_radius = float(np.linalg.norm(pose_r))
@@ -369,6 +395,7 @@ class InterventionManager:
         monitor_verdicts: Sequence[Verdict],
         oracle_verdicts: Sequence[Verdict],
         *,
+        fallback_command: ArrayLike | None = None,
         gates_passed: int = 0,
         time: float | None = None,
         reducer_name: str | None = None,
@@ -414,7 +441,10 @@ class InterventionManager:
             ),
             collision_count=(
                 self._metrics.collision_count
-                + int(_verdict_named_violation(oracle_verdicts, "collision_risk"))
+                + int(
+                    _verdict_named_violation(oracle_verdicts, "collision_risk")
+                    or _verdict_named_violation(oracle_verdicts, "simulator_collision")
+                )
             ),
             constraint_violation_count=(
                 self._metrics.constraint_violation_count + int(oracle_violated)
@@ -433,7 +463,12 @@ class InterventionManager:
             ),
             reducer_choices=dict(self._reducer_choices),
         )
-        return self.fallback_command.copy() if use_fallback else np.asarray(nominal_command, dtype=float).reshape(-1)
+        fallback = (
+            self.fallback_command
+            if fallback_command is None
+            else np.asarray(fallback_command, dtype=float).reshape(-1)
+        )
+        return fallback.copy() if use_fallback else np.asarray(nominal_command, dtype=float).reshape(-1)
 
 
 def iros_stream_values(
@@ -458,7 +493,6 @@ def iros_stream_values(
     speed = float(np.linalg.norm(velocity))
     safety_margin = min(
         obstacle_clearance - scenario.min_obstacle_clearance,
-        scenario.corridor_radius - corridor_deviation,
         altitude_low_margin,
         altitude_high_margin,
         scenario.speed_max - speed,
@@ -516,21 +550,23 @@ def _axis_generators(
     radius: NDArray[np.float64],
     *,
     source_prefix: str,
-    include_bias: bool,
 ) -> tuple[NDArray[np.float64], tuple[GeneratorMetadata, ...]]:
     active = [index for index, value in enumerate(radius) if abs(value) > 1e-12]
-    generators = np.zeros((radius.size, len(active) + int(include_bias)), dtype=float)
+    generators = np.zeros((radius.size, len(active)), dtype=float)
     metadata: list[GeneratorMetadata] = []
-    if include_bias:
-        generators[:, 0] = radius
-        metadata.append(GeneratorMetadata(GeneratorKind.CALIBRATION, "iros_sensor_bias", 0))
-        offset = 1
-    else:
-        offset = 0
-    for column, axis in enumerate(active, start=offset):
+    for column, axis in enumerate(active):
         generators[axis, column] = radius[axis]
         metadata.append(GeneratorMetadata(GeneratorKind.MEASUREMENT, f"{source_prefix}_axis_{axis}", 0))
     return generators, tuple(metadata)
+
+
+def _calibration_generator(
+    radius: NDArray[np.float64],
+    *,
+    source: str,
+) -> tuple[NDArray[np.float64], tuple[GeneratorMetadata, ...]]:
+    generators = np.asarray(radius, dtype=float).reshape(-1, 1)
+    return generators, (GeneratorMetadata(GeneratorKind.CALIBRATION, source, 0),)
 
 
 def _six_vector(value: float | Sequence[float]) -> NDArray[np.float64]:

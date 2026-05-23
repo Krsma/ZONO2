@@ -280,18 +280,30 @@ class SidecarSafeControlGymClient:
         python: str | Path,
         root: str | Path,
         scenario_config: str | Path | None = None,
+        *,
+        controller_mode: str = "firmware",
     ) -> None:
         self.python = str(python)
         self.root = str(root)
+        if controller_mode not in {"firmware", "debug_pid"}:
+            raise ValueError("controller_mode must be 'firmware' or 'debug_pid'")
+        self.controller_mode = controller_mode
         worker = Path(__file__).with_name("safe_control_worker.py")
-        command = [self.python, str(worker), "--safe-control-gym-root", self.root]
+        command = [
+            self.python,
+            str(worker),
+            "--safe-control-gym-root",
+            self.root,
+            "--controller-mode",
+            self.controller_mode,
+        ]
         if scenario_config is not None:
             command.extend(["--scenario-config", str(scenario_config)])
         self._process = subprocess.Popen(
             command,
             stdin=subprocess.PIPE,
             stdout=subprocess.PIPE,
-            stderr=subprocess.PIPE,
+            stderr=None,
             text=True,
         )
         self._scenario: IrosScenario | None = None
@@ -304,23 +316,29 @@ class SidecarSafeControlGymClient:
 
     @property
     def action_dimension(self) -> int:
-        return 3
+        return 6
 
     def reset(self, seed: int) -> IrosEnvSnapshot:
         response = self._request({"command": "reset", "seed": seed})
         self._scenario = _scenario_from_payload(response["scenario"])
         return _snapshot_from_payload(response["snapshot"])
 
+    def status(self) -> dict[str, Any]:
+        return self._request({"command": "status"})
+
     def step(self, command: ArrayLike) -> IrosEnvSnapshot:
         response = self._request({"command": "step", "action": np.asarray(command).tolist()})
         return _snapshot_from_payload(response["snapshot"])
 
     def nominal_command(self, snapshot: IrosEnvSnapshot) -> NDArray[np.float64]:
-        gate = self.scenario.gate(snapshot.target_gate_index)
-        return 2.8 * (gate.center - snapshot.pose) - 0.8 * snapshot.velocity
+        _ = snapshot
+        response = self._request({"command": "nominal"})
+        return np.asarray(response["command"], dtype=float)
 
     def fallback_command(self, snapshot: IrosEnvSnapshot) -> NDArray[np.float64]:
-        return -1.2 * snapshot.velocity
+        _ = snapshot
+        response = self._request({"command": "fallback"})
+        return np.asarray(response["command"], dtype=float)
 
     def close(self) -> None:
         if self._process.poll() is None:
@@ -356,16 +374,25 @@ def make_env_client(
     safe_control_gym_root: str | Path | None,
     safe_control_python: str | Path | None,
     safe_control_config: str | Path | None = None,
+    safe_control_controller_mode: str = "firmware",
+    allow_debug_pid: bool = False,
 ) -> IrosEnvClient:
     """Create the requested environment client."""
 
     if profile == "smoke" and safe_control_gym_root is None and safe_control_python is None:
         return FakeIrosEnvClient(max_steps=40)
     if safe_control_python is not None:
+        if safe_control_controller_mode != "firmware" and not allow_debug_pid:
+            raise RuntimeError("debug_pid sidecar mode requires --allow-debug-pid and is diagnostic only")
         root = safe_control_gym_root or os.environ.get("PZR_SAFE_CONTROL_GYM_ROOT")
         if root is None:
             raise RuntimeError("--safe-control-python requires --safe-control-gym-root or PZR_SAFE_CONTROL_GYM_ROOT")
-        return SidecarSafeControlGymClient(safe_control_python, root, safe_control_config)
+        return SidecarSafeControlGymClient(
+            safe_control_python,
+            root,
+            safe_control_config,
+            controller_mode=safe_control_controller_mode,
+        )
     return DirectSafeControlGymClient(safe_control_gym_root)
 
 
@@ -375,6 +402,8 @@ def preflight_safe_control_gym(
     safe_control_gym_root: str | Path | None,
     safe_control_python: str | Path | None,
     safe_control_config: str | Path | None = None,
+    safe_control_controller_mode: str = "firmware",
+    allow_debug_pid: bool = False,
 ) -> PreflightResult:
     """Run setup checks for the requested CoRL environment path."""
 
@@ -392,17 +421,28 @@ def preflight_safe_control_gym(
             "snapshot_pose_velocity": snapshot.pose.shape == (3,) and snapshot.velocity.shape == (3,),
             "torch": torch_ok,
         }
-        return PreflightResult(all(checks.values()), checks, ("fake CoRL smoke environment is available",))
+        required = checks["fake_env_reset"] and checks["geometry"] and checks["snapshot_pose_velocity"]
+        return PreflightResult(required, checks, ("fake CoRL smoke environment is available",))
     if safe_control_python is not None:
         root = safe_control_gym_root or os.environ.get("PZR_SAFE_CONTROL_GYM_ROOT")
         checks = {
             "safe_control_python_exists": Path(safe_control_python).exists(),
             "safe_control_gym_root_exists": bool(root) and Path(root).exists(),
+            "sidecar_controller_firmware": safe_control_controller_mode == "firmware",
+            "debug_pid_explicitly_allowed": allow_debug_pid or safe_control_controller_mode == "firmware",
+            "pycffirmware_available": False,
+            "firmware_wrapper_available": False,
+            "firmware_reset": False,
+            "firmware_step": False,
             "sidecar_reset": False,
             "sidecar_step": False,
             "torch": torch_ok,
         }
         messages: list[str] = []
+        if safe_control_controller_mode not in {"firmware", "debug_pid"}:
+            messages.append("safe-control controller mode must be 'firmware' or 'debug_pid'")
+        if safe_control_controller_mode != "firmware" and not allow_debug_pid:
+            messages.append("debug_pid sidecar mode is diagnostic only; pass --allow-debug-pid to use it")
         if not checks["safe_control_python_exists"]:
             messages.append(f"safe-control sidecar Python is missing: {safe_control_python}")
         if not checks["safe_control_gym_root_exists"]:
@@ -411,25 +451,54 @@ def preflight_safe_control_gym(
             )
         if messages:
             return PreflightResult(False, checks, tuple(messages))
-        client = SidecarSafeControlGymClient(safe_control_python, root, safe_control_config)
+        client = SidecarSafeControlGymClient(
+            safe_control_python,
+            root,
+            safe_control_config,
+            controller_mode=safe_control_controller_mode,
+        )
         try:
+            status = client.status()
+            checks["pycffirmware_available"] = bool(status.get("pycffirmware_available", False))
+            checks["firmware_wrapper_available"] = bool(status.get("firmware_wrapper_available", False))
             snapshot = client.reset(0)
             checks["sidecar_reset"] = snapshot.pose.shape == (3,) and snapshot.velocity.shape == (3,)
             command = client.nominal_command(snapshot)
             next_snapshot = client.step(command)
             checks["sidecar_step"] = next_snapshot.pose.shape == (3,) and next_snapshot.velocity.shape == (3,)
+            checks["firmware_reset"] = checks["sidecar_reset"] and safe_control_controller_mode == "firmware"
+            checks["firmware_step"] = checks["sidecar_step"] and safe_control_controller_mode == "firmware"
         except Exception as exc:
             messages.append(f"safe-control-gym sidecar reset/step failed: {exc}")
         finally:
             client.close()
         if not messages:
-            messages.append("safe-control-gym sidecar reset and step succeeded")
-        return PreflightResult(all(checks.values()), checks, tuple(messages))
+            if safe_control_controller_mode == "firmware":
+                messages.append("safe-control-gym firmware sidecar reset and step succeeded")
+            else:
+                messages.append("safe-control-gym debug PID sidecar reset and step succeeded (diagnostic only)")
+        headline_required = (
+            checks["safe_control_python_exists"]
+            and checks["safe_control_gym_root_exists"]
+            and checks["sidecar_reset"]
+            and checks["sidecar_step"]
+            and checks["debug_pid_explicitly_allowed"]
+        )
+        if safe_control_controller_mode == "firmware":
+            headline_required = (
+                headline_required
+                and checks["sidecar_controller_firmware"]
+                and checks["pycffirmware_available"]
+                and checks["firmware_wrapper_available"]
+                and checks["firmware_reset"]
+                and checks["firmware_step"]
+            )
+        return PreflightResult(bool(headline_required), checks, tuple(messages))
     direct = DirectSafeControlGymClient(safe_control_gym_root)
     result = direct.preflight()
     checks = dict(result.checks)
     checks["torch"] = torch_ok
-    return PreflightResult(result.ok and torch_ok, checks, result.messages)
+    return PreflightResult(result.ok, checks, result.messages)
 
 
 def _scenario_from_payload(payload: dict[str, Any]) -> IrosScenario:

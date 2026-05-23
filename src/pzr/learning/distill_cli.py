@@ -120,7 +120,9 @@ def train_policy(args: argparse.Namespace) -> None:
         "model_state": model.state_dict(),
         "feature_names": list(feature_names),
         "class_names": list(class_names),
-        "candidate_reducer_names": list(DEFAULT_CANDIDATE_REDUCER_NAMES),
+        "candidate_reducer_names": list(
+            getattr(args, "candidate_reducer_names", DEFAULT_CANDIDATE_REDUCER_NAMES)
+        ),
         "normalizer_mean": mean.tolist(),
         "normalizer_std": std.tolist(),
         "hidden_sizes": list(hidden_sizes),
