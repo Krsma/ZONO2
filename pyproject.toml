@@ -20,6 +20,7 @@ pzr-benchmark = "pzr.experiments.cli:main"
 pzr-paper-figures = "pzr.experiments.paper_figures:main"
 pzr-run-experiments = "pzr.experiments.suite:main"
 pzr-run-corl = "pzr.experiments.corl_suite:main"
+pzr-train-corl-controller = "pzr.experiments.corl_learning:main"
 pzr-distill-policy = "pzr.learning.distill_cli:main"
 
 [project.optional-dependencies]
