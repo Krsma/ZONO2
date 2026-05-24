@@ -376,11 +376,12 @@ def make_env_client(
     safe_control_config: str | Path | None = None,
     safe_control_controller_mode: str = "firmware",
     allow_debug_pid: bool = False,
+    fake_max_steps: int | None = None,
 ) -> IrosEnvClient:
     """Create the requested environment client."""
 
     if profile == "smoke" and safe_control_gym_root is None and safe_control_python is None:
-        return FakeIrosEnvClient(max_steps=40)
+        return FakeIrosEnvClient(max_steps=40 if fake_max_steps is None else int(fake_max_steps))
     if safe_control_python is not None:
         if safe_control_controller_mode != "firmware" and not allow_debug_pid:
             raise RuntimeError("debug_pid sidecar mode requires --allow-debug-pid and is diagnostic only")

@@ -64,8 +64,7 @@ class ActorCritic(nn.Module if nn is not None else object):  # type: ignore[misc
             raw_action = dist.mean if deterministic else dist.sample()
             log_prob = dist.log_prob(raw_action).sum(dim=-1)
             value = self.value(obs)
-        action = torch.clamp(raw_action, -1.0, 1.0).cpu().numpy()[0]
-        return action.astype(float), float(log_prob.item()), float(value.item())
+        return raw_action.cpu().numpy()[0].astype(float), float(log_prob.item()), float(value.item())
 
 
 @dataclass
@@ -214,7 +213,8 @@ class PPOTrainer:
                 self.optimizer.step()
 
                 with torch.no_grad():
-                    approx_kl = (old_log_probs - new_log_probs).mean()
+                    log_ratio = new_log_probs - old_log_probs
+                    approx_kl = torch.mean((torch.exp(log_ratio) - 1.0) - log_ratio)
                 stats["policy_loss"].append(float(policy_loss.item()))
                 stats["value_loss"].append(float(value_loss.item()))
                 stats["entropy"].append(float(entropy.item()))

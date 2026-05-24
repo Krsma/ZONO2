@@ -9,8 +9,10 @@ import numpy as np
 import pandas as pd
 import pytest
 
+import pzr.experiments.corl_suite as corl_suite
 from pzr.experiments.corl_suite import main as corl_main
-from pzr.robotics.safe_control_gym import SidecarSafeControlGymClient, preflight_safe_control_gym
+from pzr.robotics import Gate, IrosScenario
+from pzr.robotics.safe_control_gym import IrosEnvSnapshot, SidecarSafeControlGymClient, preflight_safe_control_gym
 
 
 def test_corl_preflight_smoke_uses_fake_environment() -> None:
@@ -277,7 +279,7 @@ def test_corl_calibration_smoke_writes_recommendations(tmp_path) -> None:
     assert "recommended_config_id" in recommendations
 
 
-def test_sidecar_payload_infers_completion_and_yaml_bounds(monkeypatch) -> None:
+def test_sidecar_payload_uses_official_completion_and_yaml_bounds(monkeypatch) -> None:
     monkeypatch.setitem(
         sys.modules,
         "pybullet",
@@ -306,18 +308,157 @@ def test_sidecar_payload_infers_completion_and_yaml_bounds(monkeypatch) -> None:
             ]
         }
     }
-    info = {"current_target_gate_id": -1}
+    info = {"current_target_gate_id": -1, "task_completed": False}
     obs = np.asarray([0.0, 0.0, 0.0, 0.0, 2.2, 0.0], dtype=float)
 
     snapshot = _snapshot_payload(Env(), obs, info, done=True, time=1.5, config=config)
+    completed = _snapshot_payload(
+        Env(),
+        obs,
+        {"current_target_gate_id": 2, "task_completed": True},
+        done=False,
+        time=1.5,
+        config=config,
+    )
     scenario = _scenario_payload(Env(), {}, config)
 
-    assert snapshot["task_completed"]
+    assert not snapshot["task_completed"]
     assert snapshot["gates_passed"] == 4
+    assert completed["task_completed"]
     assert snapshot["constraint_violation"]
     assert scenario["altitude_min"] == -0.1
     assert scenario["altitude_max"] == 2.0
     assert scenario["corridor_radius"] == 3.0
+
+
+class _AllGatesWithoutOfficialCompletionClient:
+    action_dimension = 3
+
+    def __init__(self, *, official_completion: bool = False) -> None:
+        self._official_completion = official_completion
+        self._scenario = IrosScenario(gates=(Gate([0.0, 0.0, 1.0], 0.8, 0.8),))
+
+    @property
+    def scenario(self) -> IrosScenario:
+        return self._scenario
+
+    def reset(self, seed: int) -> IrosEnvSnapshot:
+        return IrosEnvSnapshot(
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            target_gate_index=0,
+            gates_passed=0,
+            task_completed=False,
+            done=False,
+            time=0.0,
+            info={},
+        )
+
+    def step(self, command) -> IrosEnvSnapshot:
+        return IrosEnvSnapshot(
+            [0.0, 0.0, 1.0],
+            [0.0, 0.0, 0.0],
+            target_gate_index=0,
+            gates_passed=1,
+            task_completed=self._official_completion,
+            done=True,
+            time=0.05,
+            info={},
+        )
+
+    def nominal_command(self, snapshot: IrosEnvSnapshot) -> np.ndarray:
+        return np.zeros(3)
+
+    def fallback_command(self, snapshot: IrosEnvSnapshot) -> np.ndarray:
+        return np.zeros(3)
+
+    def close(self) -> None:
+        pass
+
+
+def test_episode_completion_requires_official_task_completion() -> None:
+    profile = corl_suite.PROFILES["smoke"]
+
+    episode, _, _, _, _ = corl_suite._run_episode(
+        _AllGatesWithoutOfficialCompletionClient(official_completion=False),
+        profile,
+        "nominal_no_monitor",
+        seed=0,
+        phase="eval",
+    )
+
+    assert episode["gates_passed"] == 1
+    assert not episode["task_completed"]
+    assert np.isnan(episode["time_to_target"])
+
+    completed, _, _, _, _ = corl_suite._run_episode(
+        _AllGatesWithoutOfficialCompletionClient(official_completion=True),
+        profile,
+        "nominal_no_monitor",
+        seed=0,
+        phase="eval",
+    )
+
+    assert completed["task_completed"]
+    assert completed["time_to_target"] == pytest.approx(0.05)
+
+
+def test_corl_suite_writes_failure_artifacts_without_fake_episode_row(tmp_path, monkeypatch) -> None:
+    out = tmp_path / "corl-failed"
+
+    class FailingClient(_AllGatesWithoutOfficialCompletionClient):
+        def reset(self, seed: int) -> IrosEnvSnapshot:
+            raise RuntimeError("environment reset failed")
+
+    monkeypatch.setattr(corl_suite, "make_env_client", lambda **kwargs: FailingClient())
+
+    with pytest.raises(RuntimeError, match="environment reset failed"):
+        corl_main(
+            [
+                "--profile",
+                "smoke",
+                "--out",
+                str(out),
+                "--force",
+                "--learned-mode",
+                "none",
+                "--method-set",
+                "core",
+                "--eval-seeds",
+                "1",
+                "--train-seeds",
+                "0",
+                "--no-archive",
+            ]
+        )
+
+    for name in (
+        "failure_events.csv",
+        "analysis_notes.json",
+        "manifest.json",
+        "progress.jsonl",
+        "artifact_index.csv",
+        "raw_episodes.csv",
+    ):
+        assert (out / name).stat().st_size > 0
+
+    failures = pd.read_csv(out / "failure_events.csv")
+    assert not failures.empty
+    assert {"episode_execution", "suite_abort"} <= set(failures["event_type"])
+
+    raw = pd.read_csv(out / "raw_episodes.csv")
+    assert raw.empty
+    assert not ((raw["method"] == "nominal_no_monitor") & (raw["seed"] == 0)).any()
+
+    notes = json.loads((out / "analysis_notes.json").read_text(encoding="utf-8"))
+    assert not notes["paper_usable"]
+    assert "failure_events.csv is nonempty" in notes["paper_usable_reasons"]
+
+    manifest = json.loads((out / "manifest.json").read_text(encoding="utf-8"))
+    assert manifest["status"] == "failed"
+    progress = (out / "progress.jsonl").read_text(encoding="utf-8")
+    assert "evaluation_seed_failed" in progress
+    assert "suite_failed" in progress
 
 
 def test_safe_control_sidecar_nominal_climbs_when_local_checkout_exists() -> None:

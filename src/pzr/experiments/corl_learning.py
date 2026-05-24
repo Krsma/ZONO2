@@ -10,6 +10,7 @@ import shutil
 import subprocess
 import sys
 import traceback
+import warnings
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
 from pathlib import Path
@@ -18,6 +19,11 @@ from typing import Any, Sequence
 
 import numpy as np
 import pandas as pd
+
+try:
+    import gymnasium as gym
+except ImportError:  # pragma: no cover - exercised when optional extra is absent.
+    gym = None  # type: ignore[assignment]
 
 from pzr.control.policies import ReductionDecision, StaticReductionPolicy
 from pzr.experiments.benchmark import BenchmarkConfig, MethodSpec, _make_policy, wide_rollout_reducer_factories
@@ -47,6 +53,8 @@ SHIELD_METHODS = {
     "ppo_shield_girard": "ppo_shield_girard",
     "ppo_shield_pzr": "ppo_shield_pzr",
 }
+
+PPO_BACKENDS = ("sb3", "custom")
 
 TRAINING_CURVE_COLUMNS = (
     "method",
@@ -203,10 +211,14 @@ class ControllerRuntime:
     previous_command: np.ndarray | None = None
     previous_shield_active: bool = False
     episode: EpisodeAccumulator | None = None
+    episode_seed_base: int | None = None
 
-    def reset(self, seed: int | None = None) -> np.ndarray:
+    def reset(self, seed: int | None = None, *, preserve_seed_base: bool = False) -> np.ndarray:
+        episode_index = 0 if self.episode is None else int(self.episode.episode_index)
         if seed is not None:
             self.seed = int(seed)
+            if not preserve_seed_base:
+                self.episode_seed_base = int(seed)
         self.snapshot = self.client.reset(self.seed)
         self.monitor = IrosGateMonitor(
             self.client.scenario,
@@ -221,7 +233,7 @@ class ControllerRuntime:
         self.policy = _make_shield_policy(self.method, self.monitor, self.profile)
         self.previous_command = np.zeros(3, dtype=float)
         self.previous_shield_active = False
-        self.episode = EpisodeAccumulator()
+        self.episode = EpisodeAccumulator(episode_index=episode_index)
         return encode_observation(
             self.client.scenario,
             self.snapshot,
@@ -234,6 +246,7 @@ class ControllerRuntime:
         policy_action: np.ndarray,
         *,
         environment_steps: int,
+        auto_reset: bool = True,
     ) -> tuple[np.ndarray, float, bool, dict[str, Any], dict[str, Any] | None]:
         if self.snapshot is None or self.monitor is None or self.sensor is None or self.episode is None:
             raise RuntimeError("controller runtime must be reset before stepping")
@@ -365,8 +378,10 @@ class ControllerRuntime:
         episode_row = self.finish_episode(environment_steps, partial=False) if done else None
         if done:
             episode.episode_index += 1
-            next_observation = self.reset(self.seed + episode.episode_index)
-            self.episode.episode_index = episode.episode_index
+            if auto_reset:
+                seed_base = self.seed if self.episode_seed_base is None else self.episode_seed_base
+                next_observation = self.reset(seed_base + episode.episode_index, preserve_seed_base=True)
+                self.episode.episode_index = episode.episode_index
         _ = reduction_seconds
         return next_observation, reward, done, row, episode_row
 
@@ -414,6 +429,93 @@ class WorkerResult:
     stderr_log: Path
 
 
+class Sb3ControllerEnv(gym.Env if gym is not None else object):  # type: ignore[misc]
+    """Gymnasium adapter that records the existing CoRL controller artifacts."""
+
+    metadata = {"render_modes": ()}
+
+    def __init__(
+        self,
+        args: argparse.Namespace,
+        profile: CorlLearningProfile,
+        method: str,
+        seed: int,
+        phase: str,
+        artifacts: dict[str, list[dict[str, Any]]],
+        episode_sink: list[dict[str, Any]],
+        *,
+        environment_steps: int = 0,
+        training: bool = True,
+    ) -> None:
+        gym, spaces = _require_gymnasium()
+        self._gym = gym
+        self.args = args
+        self.profile = profile
+        self.method = method
+        self.seed = int(seed)
+        self.phase = phase
+        self.artifacts = artifacts
+        self.episode_sink = episode_sink
+        self.training = bool(training)
+        self.environment_steps = int(environment_steps)
+        self.client = make_env_client(
+            profile="smoke" if args.profile == "smoke" else "overnight",
+            safe_control_gym_root=args.safe_control_gym_root,
+            safe_control_python=args.safe_control_python,
+            safe_control_config=args.safe_control_config,
+            safe_control_controller_mode=args.safe_control_controller_mode,
+            allow_debug_pid=args.allow_debug_pid,
+            fake_max_steps=profile.max_episode_steps,
+        )
+        self.runtime = ControllerRuntime(
+            self.client,
+            profile,
+            method,
+            self.seed,
+            phase,
+            residual_scale=args.residual_scale,
+            accel_clip=args.accel_clip,
+        )
+        self.action_space = spaces.Box(low=-1.0, high=1.0, shape=(3,), dtype=np.float32)
+        self.observation_space = spaces.Box(low=-np.inf, high=np.inf, shape=(26,), dtype=np.float32)
+        self.step_rewards: list[float] = []
+        self._closed = False
+
+    def reset(self, *, seed: int | None = None, options: dict[str, Any] | None = None) -> tuple[np.ndarray, dict[str, Any]]:
+        _ = options
+        if seed is not None:
+            self.seed = int(seed)
+        reset_seed = self.seed
+        if seed is None and self.runtime.episode is not None and self.runtime.episode.step:
+            seed_base = self.runtime.seed if self.runtime.episode_seed_base is None else self.runtime.episode_seed_base
+            reset_seed = int(seed_base + self.runtime.episode.episode_index)
+        observation = self.runtime.reset(reset_seed, preserve_seed_base=(seed is None))
+        self.seed = int(self.runtime.seed)
+        return observation, {}
+
+    def step(self, action: np.ndarray) -> tuple[np.ndarray, float, bool, bool, dict[str, Any]]:
+        step = self.environment_steps + 1 if self.training else self.environment_steps
+        observation, reward, done, row, episode_row = self.runtime.step(
+            action,
+            environment_steps=step,
+            auto_reset=False,
+        )
+        self.artifacts["shield_timeseries"].append(row)
+        self.step_rewards.append(float(reward))
+        if self.training:
+            self.environment_steps += 1
+            if self.args.debug_raise_after_steps is not None and self.environment_steps >= self.args.debug_raise_after_steps:
+                raise RuntimeError("debug controller-training failure")
+        if episode_row is not None:
+            self.episode_sink.append(episode_row)
+        return observation, float(reward), bool(done), False, {}
+
+    def close(self) -> None:
+        if not self._closed:
+            self.client.close()
+            self._closed = True
+
+
 def main(argv: Sequence[str] | None = None) -> int:
     args = _make_parser().parse_args(argv)
     run_corl_controller_training(args)
@@ -454,6 +556,8 @@ def _run_serial_corl_controller_training(args: argparse.Namespace) -> Path:
         "methods": list(methods),
         "python": platform.python_version(),
         "platform": platform.platform(),
+        "ppo_backend": args.ppo_backend,
+        "ppo": _ppo_manifest_config(args),
         "status": "running",
         "steps": [],
     }
@@ -544,6 +648,8 @@ def _run_parallel_corl_controller_training(args: argparse.Namespace) -> Path:
         "methods": list(methods),
         "python": platform.python_version(),
         "platform": platform.platform(),
+        "ppo_backend": args.ppo_backend,
+        "ppo": _ppo_manifest_config(args),
         "status": "running",
         "preflight": preflight.to_dict(),
         "steps": [],
@@ -588,6 +694,17 @@ def _worker_specs(args: argparse.Namespace, methods: Sequence[str], out_dir: Pat
     ]
 
 
+def _ppo_manifest_config(args: argparse.Namespace) -> dict[str, Any]:
+    return {
+        "backend": args.ppo_backend,
+        "requested_total_steps": int(args.total_steps),
+        "requested_eval_interval": int(args.eval_interval),
+        "requested_rollout_steps": int(args.rollout_steps),
+        "minibatch_size": int(args.minibatch_size),
+        "update_epochs": int(args.update_epochs),
+    }
+
+
 def _worker_command(args: argparse.Namespace, method: str, method_index: int, worker_dir: Path) -> list[str]:
     command = [
         sys.executable,
@@ -604,6 +721,8 @@ def _worker_command(args: argparse.Namespace, method: str, method_index: int, wo
         "1",
         "--worker-threads",
         str(args.worker_threads),
+        "--ppo-backend",
+        str(args.ppo_backend),
         "--method-index-offset",
         str(method_index),
         "--skip-preflight",
@@ -714,6 +833,7 @@ def _worker_env(worker_threads: int) -> dict[str, str]:
     for name in ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         env[name] = thread_value
     env["TORCH_NUM_THREADS"] = thread_value
+    env.setdefault("MPLCONFIGDIR", "/tmp")
     src_root = Path(__file__).resolve().parents[2]
     pythonpath = env.get("PYTHONPATH")
     if pythonpath:
@@ -735,6 +855,41 @@ def _apply_worker_thread_caps(worker_threads: int) -> None:
         torch.set_num_threads(int(worker_threads))
     except Exception:
         pass
+
+
+def _require_gymnasium() -> tuple[Any, Any]:
+    if gym is None:
+        raise ImportError(
+            "Gymnasium is required for the SB3 PPO backend. "
+            "Install the learning extra with `python -m pip install -e .[learning]`."
+        )
+    return gym, gym.spaces
+
+
+def _require_sb3_ppo() -> Any:
+    os.environ.setdefault("MPLCONFIGDIR", "/tmp")
+    with warnings.catch_warnings():
+        warnings.simplefilter("ignore", UserWarning)
+        try:
+            from stable_baselines3 import PPO as Sb3PPO
+        except ImportError as exc:
+            raise ImportError(
+                "Stable-Baselines3 is required for the default PPO backend. "
+                "Install the learning extra with `python -m pip install -e .[learning]` "
+                "or pass `--ppo-backend custom`."
+            ) from exc
+    return Sb3PPO
+
+
+def _sb3_loss_stats(model: Any) -> dict[str, float]:
+    values = getattr(model.logger, "name_to_value", {})
+    entropy_loss = values.get("train/entropy_loss", np.nan)
+    return {
+        "policy_loss": float(values.get("train/policy_gradient_loss", np.nan)),
+        "value_loss": float(values.get("train/value_loss", np.nan)),
+        "entropy": float(-entropy_loss) if np.isfinite(entropy_loss) else float(np.nan),
+        "approx_kl": float(values.get("train/approx_kl", np.nan)),
+    }
 
 
 def _aggregate_worker_artifacts(
@@ -776,7 +931,7 @@ def _aggregate_worker_artifacts(
                 artifacts[key].extend(pd.read_csv(path).to_dict("records"))
         checkpoint_dir = spec.worker_dir / "policy_checkpoints"
         if checkpoint_dir.exists():
-            for checkpoint in checkpoint_dir.glob("*.pt"):
+            for checkpoint in (*checkpoint_dir.glob("*.pt"), *checkpoint_dir.glob("*.zip")):
                 shutil.copy2(checkpoint, out_dir / "policy_checkpoints" / checkpoint.name)
         for step in worker_manifest.get("steps", []):
             step = dict(step)
@@ -927,6 +1082,11 @@ def _train_one_method(
     artifacts: dict[str, list[dict[str, Any]]],
     manifest: dict[str, Any],
 ) -> None:
+    if args.ppo_backend == "sb3":
+        _train_one_method_sb3(args, profile, method, method_index, out_dir, artifacts, manifest)
+        return
+    if args.ppo_backend != "custom":
+        raise ValueError(f"unsupported PPO backend: {args.ppo_backend}")
     seed = int(args.seed + 1000 * method_index)
     client = make_env_client(
         profile="smoke" if args.profile == "smoke" else "overnight",
@@ -935,6 +1095,7 @@ def _train_one_method(
         safe_control_config=args.safe_control_config,
         safe_control_controller_mode=args.safe_control_controller_mode,
         allow_debug_pid=args.allow_debug_pid,
+        fake_max_steps=profile.max_episode_steps,
     )
     try:
         runtime = ControllerRuntime(
@@ -965,6 +1126,9 @@ def _train_one_method(
         update = 0
         completed_since_update = 0
         episode_rows_since_update: list[dict[str, Any]] = []
+        best_eval_score: tuple[float, ...] | None = None
+        best_eval_checkpoint: Path | None = None
+        best_eval_steps: int | None = None
         while total_steps < int(args.total_steps):
             rollout = RolloutBuffer.empty()
             rewards: list[float] = []
@@ -1009,6 +1173,17 @@ def _train_one_method(
                 eval_rows, eval_timeseries = _evaluate_method(args, profile, method, trainer, seed + 50_000, total_steps)
                 artifacts["eval_episodes"].extend(eval_rows)
                 artifacts["shield_timeseries"].extend(eval_timeseries)
+                best_eval_score, best_eval_checkpoint, best_eval_steps = _maybe_update_best_eval_checkpoint(
+                    out_dir,
+                    method,
+                    checkpoint,
+                    total_steps,
+                    eval_rows,
+                    best_eval_score,
+                    best_eval_checkpoint,
+                    best_eval_steps,
+                    ".pt",
+                )
                 next_eval += int(args.eval_interval)
         final = out_dir / "policy_checkpoints" / f"{method}_final.pt"
         trainer.save(final, metadata={"method": method, "environment_steps": total_steps, "final": True})
@@ -1017,13 +1192,146 @@ def _train_one_method(
         manifest["steps"].append(
             {
                 "kind": "ppo_training",
+                "ppo_backend": "custom",
                 "method": method,
                 "environment_steps": total_steps,
                 "final_checkpoint": str(final.relative_to(out_dir)),
+                "best_eval_checkpoint": "" if best_eval_checkpoint is None else str(best_eval_checkpoint.relative_to(out_dir)),
+                "best_eval_environment_steps": best_eval_steps,
             }
         )
     finally:
         client.close()
+
+
+def _train_one_method_sb3(
+    args: argparse.Namespace,
+    profile: CorlLearningProfile,
+    method: str,
+    method_index: int,
+    out_dir: Path,
+    artifacts: dict[str, list[dict[str, Any]]],
+    manifest: dict[str, Any],
+) -> None:
+    sb3_ppo = _require_sb3_ppo()
+    seed = int(args.seed + 1000 * method_index)
+    episode_rows_since_update: list[dict[str, Any]] = []
+    env = Sb3ControllerEnv(
+        args,
+        profile,
+        method,
+        seed,
+        "train",
+        artifacts,
+        artifacts["raw_train_episodes"],
+        training=True,
+    )
+    try:
+        n_steps = max(2, min(int(args.rollout_steps), int(args.eval_interval), int(args.total_steps)))
+        batch_size = min(max(2, int(args.minibatch_size)), n_steps)
+        model = sb3_ppo(
+            "MlpPolicy",
+            env,
+            learning_rate=float(args.learning_rate),
+            n_steps=n_steps,
+            batch_size=batch_size,
+            n_epochs=int(args.update_epochs),
+            gamma=float(args.gamma),
+            gae_lambda=float(args.gae_lambda),
+            clip_range=float(args.clip_ratio),
+            ent_coef=float(args.entropy_coefficient),
+            vf_coef=float(args.value_coefficient),
+            max_grad_norm=float(args.max_grad_norm),
+            seed=seed,
+            device="cpu",
+            verbose=0,
+            policy_kwargs={"net_arch": list(PPOConfig().hidden_sizes)},
+        )
+        total_steps = 0
+        next_eval = int(args.eval_interval)
+        update = 0
+        eval_checkpoints: list[int] = []
+        best_eval_score: tuple[float, ...] | None = None
+        best_eval_checkpoint: Path | None = None
+        best_eval_steps: int | None = None
+        while total_steps < int(args.total_steps):
+            target = min(next_eval, int(args.total_steps))
+            chunk_steps = max(1, target - total_steps)
+            row_start = len(artifacts["shield_timeseries"])
+            reward_start = len(env.step_rewards)
+            episode_start = len(artifacts["raw_train_episodes"])
+            model.learn(
+                total_timesteps=chunk_steps,
+                reset_num_timesteps=(total_steps == 0),
+                progress_bar=False,
+            )
+            total_steps = int(model.num_timesteps)
+            update += 1
+            episode_rows_since_update = artifacts["raw_train_episodes"][episode_start:]
+            rows = artifacts["shield_timeseries"][row_start:]
+            rewards = env.step_rewards[reward_start:]
+            shield_flags = [bool(row["shield_active"]) for row in rows]
+            artifacts["training_curve"].append(
+                _training_curve_row(
+                    method,
+                    update,
+                    total_steps,
+                    len(episode_rows_since_update),
+                    episode_rows_since_update,
+                    rewards,
+                    shield_flags,
+                    _sb3_loss_stats(model),
+                )
+            )
+            if total_steps >= next_eval or total_steps >= int(args.total_steps):
+                checkpoint = out_dir / "policy_checkpoints" / f"{method}_step{total_steps}.zip"
+                model.save(checkpoint)
+                eval_rows, eval_timeseries = _evaluate_method_sb3(
+                    args,
+                    profile,
+                    method,
+                    model,
+                    seed + 50_000,
+                    total_steps,
+                )
+                artifacts["eval_episodes"].extend(eval_rows)
+                artifacts["shield_timeseries"].extend(eval_timeseries)
+                eval_checkpoints.append(total_steps)
+                best_eval_score, best_eval_checkpoint, best_eval_steps = _maybe_update_best_eval_checkpoint(
+                    out_dir,
+                    method,
+                    checkpoint,
+                    total_steps,
+                    eval_rows,
+                    best_eval_score,
+                    best_eval_checkpoint,
+                    best_eval_steps,
+                    ".zip",
+                )
+                while next_eval <= total_steps:
+                    next_eval += int(args.eval_interval)
+        final = out_dir / "policy_checkpoints" / f"{method}_final.zip"
+        model.save(final)
+        if env.runtime.episode is not None and env.runtime.episode.step:
+            artifacts["raw_train_episodes"].append(env.runtime.finish_episode(total_steps, partial=True))
+        manifest["steps"].append(
+            {
+                "kind": "ppo_training",
+                "ppo_backend": "sb3",
+                "method": method,
+                "environment_steps": total_steps,
+                "requested_total_steps": int(args.total_steps),
+                "actual_total_steps": total_steps,
+                "rollout_steps": n_steps,
+                "requested_eval_interval": int(args.eval_interval),
+                "actual_eval_checkpoints": eval_checkpoints,
+                "final_checkpoint": str(final.relative_to(out_dir)),
+                "best_eval_checkpoint": "" if best_eval_checkpoint is None else str(best_eval_checkpoint.relative_to(out_dir)),
+                "best_eval_environment_steps": best_eval_steps,
+            }
+        )
+    finally:
+        env.close()
 
 
 def _evaluate_method(
@@ -1044,6 +1352,7 @@ def _evaluate_method(
             safe_control_config=args.safe_control_config,
             safe_control_controller_mode=args.safe_control_controller_mode,
             allow_debug_pid=args.allow_debug_pid,
+            fake_max_steps=profile.max_episode_steps,
         )
         try:
             seed = seed_start + offset
@@ -1075,6 +1384,90 @@ def _evaluate_method(
         finally:
             client.close()
     return episode_rows, timeseries_rows
+
+
+def _evaluate_method_sb3(
+    args: argparse.Namespace,
+    profile: CorlLearningProfile,
+    method: str,
+    model: Any,
+    seed_start: int,
+    environment_steps: int,
+) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
+    episode_rows: list[dict[str, Any]] = []
+    timeseries_rows: list[dict[str, Any]] = []
+    for offset in range(int(args.eval_seeds)):
+        client = make_env_client(
+            profile="smoke" if args.profile == "smoke" else "overnight",
+            safe_control_gym_root=args.safe_control_gym_root,
+            safe_control_python=args.safe_control_python,
+            safe_control_config=args.safe_control_config,
+            safe_control_controller_mode=args.safe_control_controller_mode,
+            allow_debug_pid=args.allow_debug_pid,
+            fake_max_steps=profile.max_episode_steps,
+        )
+        try:
+            seed = seed_start + offset
+            runtime = ControllerRuntime(
+                client,
+                profile,
+                method,
+                seed,
+                "eval",
+                residual_scale=args.residual_scale,
+                accel_clip=args.accel_clip,
+            )
+            observation = runtime.reset(seed)
+            done = False
+            local_steps = 0
+            while not done and local_steps < profile.max_episode_steps:
+                action, _ = model.predict(observation, deterministic=True)
+                observation, _, done, row, episode_row = runtime.step(
+                    action,
+                    environment_steps=environment_steps,
+                )
+                timeseries_rows.append(row)
+                local_steps += 1
+                if episode_row is not None:
+                    episode_row["environment_steps"] = environment_steps
+                    episode_rows.append(episode_row)
+            if runtime.episode is not None and runtime.episode.step:
+                episode_rows.append(runtime.finish_episode(environment_steps, partial=not done))
+        finally:
+            client.close()
+    return episode_rows, timeseries_rows
+
+
+def _maybe_update_best_eval_checkpoint(
+    out_dir: Path,
+    method: str,
+    checkpoint: Path,
+    environment_steps: int,
+    eval_rows: Sequence[dict[str, Any]],
+    best_score: tuple[float, ...] | None,
+    best_checkpoint: Path | None,
+    best_steps: int | None,
+    suffix: str,
+) -> tuple[tuple[float, ...] | None, Path | None, int | None]:
+    score = _eval_score(eval_rows)
+    if best_score is not None and score <= best_score:
+        return best_score, best_checkpoint, best_steps
+    best_path = out_dir / "policy_checkpoints" / f"{method}_best_eval{suffix}"
+    shutil.copy2(checkpoint, best_path)
+    return score, best_path, int(environment_steps)
+
+
+def _eval_score(rows: Sequence[dict[str, Any]]) -> tuple[float, ...]:
+    if not rows:
+        return (float("-inf"), float("-inf"), float("-inf"), float("-inf"), float("-inf"))
+    frame = pd.DataFrame(rows)
+    return (
+        float(frame["task_completed"].astype(float).mean()),
+        float(frame["gates_passed"].astype(float).mean()),
+        -float(frame["collision"].astype(float).mean()),
+        -float(frame["constraint_violation"].astype(float).mean()),
+        float(frame["reward"].astype(float).mean()),
+    )
 
 
 def _training_curve_row(
@@ -1184,8 +1577,10 @@ def _write_learning_artifacts(
     eval_episodes.to_csv(out_dir / "eval_episodes.csv", index=False)
     shield.to_csv(out_dir / "shield_timeseries.csv", index=False)
     failures.to_csv(out_dir / "failure_events.csv", index=False)
+    notes = _analysis_notes(training, train_episodes, eval_episodes, shield, failures)
+    _add_execution_warnings(notes, args, manifest)
     (out_dir / "analysis_notes.json").write_text(
-        json.dumps(_json_safe(_analysis_notes(training, train_episodes, eval_episodes, shield, failures)), indent=2, sort_keys=True),
+        json.dumps(_json_safe(notes), indent=2, sort_keys=True),
         encoding="utf-8",
     )
     (out_dir / "config.json").write_text(
@@ -1219,6 +1614,8 @@ def _analysis_notes(
 ) -> dict[str, Any]:
     notes: dict[str, Any] = {
         "primary_metrics": {},
+        "final_metrics": {},
+        "best_checkpoint_metrics": {},
         "level0_success_gate": {
             "unshielded_nontrivial_gate_progress": False,
             "shielded_variant_reduces_unsafe_training": False,
@@ -1234,6 +1631,11 @@ def _analysis_notes(
                 "mean_gates_passed": float(group["gates_passed"].astype(float).mean()),
                 "shield_intervention_rate": float(group["shield_rate"].astype(float).mean()),
             }
+        if float(eval_episodes["gates_passed"].astype(float).max()) <= 0.0:
+            notes["warning_flags"].append("heldout_eval_zero_gate_progress")
+        final_metrics, best_metrics = _checkpoint_eval_metrics(eval_episodes)
+        notes["final_metrics"] = final_metrics
+        notes["best_checkpoint_metrics"] = best_metrics
     if not train_episodes.empty and "ppo_unshielded" in set(train_episodes["method"]):
         unshielded = train_episodes[train_episodes["method"] == "ppo_unshielded"]
         notes["level0_success_gate"]["unshielded_nontrivial_gate_progress"] = bool(
@@ -1258,6 +1660,70 @@ def _analysis_notes(
     if not failures.empty:
         notes["warning_flags"].append(f"failure_event_count={failures.shape[0]}")
     return notes
+
+
+def _checkpoint_eval_metrics(eval_episodes: pd.DataFrame) -> tuple[dict[str, Any], dict[str, Any]]:
+    final_metrics: dict[str, Any] = {}
+    best_metrics: dict[str, Any] = {}
+    required = {
+        "method",
+        "environment_steps",
+        "task_completed",
+        "collision",
+        "constraint_violation",
+        "gates_passed",
+        "reward",
+        "shield_rate",
+    }
+    if not required <= set(eval_episodes.columns):
+        return final_metrics, best_metrics
+    for method, method_group in eval_episodes.groupby("method", sort=True):
+        checkpoint_rows: list[dict[str, Any]] = []
+        for environment_steps, checkpoint_group in method_group.groupby("environment_steps", sort=True):
+            checkpoint_rows.append(_eval_checkpoint_row(method, int(environment_steps), checkpoint_group))
+        if not checkpoint_rows:
+            continue
+        final_metrics[str(method)] = max(checkpoint_rows, key=lambda row: int(row["environment_steps"]))
+        best_metrics[str(method)] = max(
+            checkpoint_rows,
+            key=lambda row: (
+                float(row["heldout_completion_rate"]),
+                float(row["mean_gates_passed"]),
+                -float(row["heldout_collision_rate"]),
+                -float(row["heldout_constraint_violation_rate"]),
+                float(row["mean_reward"]),
+            ),
+        )
+    return final_metrics, best_metrics
+
+
+def _eval_checkpoint_row(method: str, environment_steps: int, group: pd.DataFrame) -> dict[str, Any]:
+    return {
+        "method": method,
+        "environment_steps": int(environment_steps),
+        "episode_count": int(group.shape[0]),
+        "heldout_completion_rate": float(group["task_completed"].astype(float).mean()),
+        "heldout_collision_rate": float(group["collision"].astype(float).mean()),
+        "heldout_constraint_violation_rate": float(group["constraint_violation"].astype(float).mean()),
+        "mean_gates_passed": float(group["gates_passed"].astype(float).mean()),
+        "max_gates_passed": int(group["gates_passed"].astype(int).max()),
+        "mean_reward": float(group["reward"].astype(float).mean()),
+        "shield_intervention_rate": float(group["shield_rate"].astype(float).mean()),
+    }
+
+
+def _add_execution_warnings(notes: dict[str, Any], args: argparse.Namespace, manifest: dict[str, Any]) -> None:
+    warnings_list = notes.setdefault("warning_flags", [])
+    if args.ppo_backend != "sb3":
+        return
+    rounded_steps = [
+        step
+        for step in manifest.get("steps", [])
+        if step.get("ppo_backend") == "sb3"
+        and int(step.get("environment_steps", 0)) > int(step.get("requested_total_steps", args.total_steps))
+    ]
+    if rounded_steps and "sb3_actual_steps_exceed_requested_total_steps" not in warnings_list:
+        warnings_list.append("sb3_actual_steps_exceed_requested_total_steps")
 
 
 def _controller_failure_event(
@@ -1332,6 +1798,7 @@ def _make_parser() -> argparse.ArgumentParser:
     parser.add_argument("--method-set", type=str, default="unshielded,shield_box,shield_girard,shield_pzr")
     parser.add_argument("--jobs", type=int, default=1)
     parser.add_argument("--worker-threads", type=int, default=1)
+    parser.add_argument("--ppo-backend", choices=PPO_BACKENDS, default="sb3")
     parser.add_argument("--total-steps", type=int, default=200_000)
     parser.add_argument("--eval-interval", type=int, default=10_000)
     parser.add_argument("--eval-seeds", type=int, default=10)

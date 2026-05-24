@@ -391,11 +391,7 @@ def _snapshot_payload(
     else:
         collision_flag = bool(collision)
     bounds_violation = _state_bounds_violated(obs, config)
-    task_completed = (
-        bool(info.get("task_completed", False))
-        or target_gate < 0
-        or (bool(done) and gates_passed >= num_gates)
-    )
+    task_completed = bool(info.get("task_completed", False))
     return {
         "pose": _pose_from_obs(obs).tolist(),
         "velocity": _velocity_from_obs(obs).tolist(),

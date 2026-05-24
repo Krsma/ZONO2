@@ -9,7 +9,7 @@ import platform
 import shutil
 import tarfile
 import traceback
-from dataclasses import asdict, dataclass, replace
+from dataclasses import asdict, dataclass, field, replace
 from datetime import datetime, timezone
 from pathlib import Path
 from time import perf_counter
@@ -136,6 +136,7 @@ FAILURE_EVENT_COLUMNS = (
     "method_kind",
     "seed",
     "step",
+    "elapsed_seconds",
     "event_type",
     "exception_type",
     "message",
@@ -143,6 +144,117 @@ FAILURE_EVENT_COLUMNS = (
     "generator_count",
     "candidate_reducer_names",
 )
+
+SNAPSHOT_METADATA_COLUMNS = (
+    "controller_mode",
+    "pycffirmware_available",
+    "ctrl_freq",
+    "firmware_freq",
+    "episode_len_sec",
+    "simulator_time",
+)
+
+EPISODE_COLUMNS = (
+    "phase",
+    "scenario",
+    "method",
+    "method_kind",
+    "seed",
+    "budget",
+    "horizon",
+    "sensor_bias_bound",
+    "sensor_noise_bound",
+    "stream_memory_decay",
+    "fallback_hold_steps",
+    *SNAPSHOT_METADATA_COLUMNS,
+    "steps",
+    "total_seconds",
+    "task_completed",
+    "gates_passed",
+    "collision_count",
+    "collision_episode",
+    "constraint_violation_count",
+    "constraint_violation_episode",
+    "fallback_activation_count",
+    "fallback_duration",
+    "fallback_duration_fraction",
+    "spurious_intervention_count",
+    "spurious_intervention_rate",
+    "justified_intervention_count",
+    "justified_intervention_rate",
+    "missed_violation_count",
+    "missed_violation_rate",
+    "time_to_target",
+    "mean_reducer_latency_ms",
+    "budget_violation_count",
+    "unsound_certificate_count",
+    "reduction_failure_count",
+    "reducer_choices",
+)
+
+INTERVENTION_COLUMNS = (
+    "phase",
+    "method",
+    "method_kind",
+    "seed",
+    "step",
+    "sensor_bias_bound",
+    "sensor_noise_bound",
+    "stream_memory_decay",
+    "fallback_hold_steps",
+    "time",
+    *SNAPSHOT_METADATA_COLUMNS,
+    "monitor_triggered",
+    "oracle_violated",
+    "monitor_trigger_names",
+    "oracle_trigger_names",
+    "fallback_active",
+    "collision",
+    "constraint_violation",
+    "gates_passed",
+    "task_completed",
+    "pose_x",
+    "pose_y",
+    "pose_z",
+    "velocity_x",
+    "velocity_y",
+    "velocity_z",
+    *(f"stream_{name}" for name in IROS_STREAM_NAMES),
+)
+
+MONITOR_COLUMNS = (
+    "phase",
+    "method",
+    "method_kind",
+    "seed",
+    "step",
+    "sensor_bias_bound",
+    "sensor_noise_bound",
+    "stream_memory_decay",
+    "fallback_hold_steps",
+    "generator_count",
+    "budget",
+    "budget_violation",
+    "reduction_applied",
+    "reducer_name",
+    "reduction_seconds",
+    "unsound_certificate",
+    "predicted_cost",
+    "predicted_sequence",
+    "evaluated_sequence_count",
+    "pruned_sequence_count",
+)
+
+
+@dataclass
+class CorlRunBuffer:
+    """Rows accumulated before writing CoRL artifacts."""
+
+    episode_rows: list[dict[str, Any]] = field(default_factory=list)
+    intervention_rows: list[dict[str, Any]] = field(default_factory=list)
+    monitor_rows: list[dict[str, Any]] = field(default_factory=list)
+    decision_rows: list[dict[str, Any]] = field(default_factory=list)
+    failure_rows: list[dict[str, Any]] = field(default_factory=list)
 
 
 def main(argv: Sequence[str] | None = None) -> int:
@@ -379,20 +491,6 @@ def run_corl_suite(args: argparse.Namespace) -> Path:
     out_dir.mkdir(parents=True, exist_ok=True)
     (out_dir / "learning").mkdir(parents=True, exist_ok=True)
 
-    preflight = preflight_safe_control_gym(
-        profile=args.profile,
-        safe_control_gym_root=args.safe_control_gym_root,
-        safe_control_python=args.safe_control_python,
-        safe_control_config=args.safe_control_config,
-        safe_control_controller_mode=args.safe_control_controller_mode,
-        allow_debug_pid=args.allow_debug_pid,
-    )
-    if not preflight.ok:
-        raise RuntimeError(
-            "CoRL preflight failed:\n"
-            + "\n".join(f"- {message}" for message in preflight.messages)
-        )
-
     manifest: dict[str, Any] = {
         "suite": "pzr_corl_suite",
         "created_at_utc": datetime.now(timezone.utc).isoformat(),
@@ -403,77 +501,158 @@ def run_corl_suite(args: argparse.Namespace) -> Path:
         "learned_mode": args.learned_mode,
         "python": platform.python_version(),
         "platform": platform.platform(),
-        "preflight": preflight.to_dict(),
+        "preflight": {},
         "steps": [],
+        "status": "running",
     }
-
-    _log_progress(
-        out_dir,
-        "suite_start",
-        profile=args.profile,
-        dagger_expert=args.dagger_expert,
-        method_set=args.method_set,
-        learned_mode=args.learned_mode,
-    )
+    buffer = CorlRunBuffer()
     checkpoint: Path | None = None
     label_quality = _dagger_label_quality(pd.DataFrame())
-    failure_rows: list[dict[str, Any]] = []
-    if args.learned_mode == "dagger":
-        training_rows, training_failures = _run_dagger_training(args, profile, out_dir)
-        failure_rows.extend(training_failures)
-        label_summary = _dagger_label_summary(training_rows)
-        label_summary.to_csv(out_dir / "learning" / "dagger_label_summary.csv", index=False)
-        label_quality = _dagger_label_quality(label_summary)
-        checkpoint = out_dir / "learning" / "dagger_final.pt"
+
+    try:
+        preflight = preflight_safe_control_gym(
+            profile=args.profile,
+            safe_control_gym_root=args.safe_control_gym_root,
+            safe_control_python=args.safe_control_python,
+            safe_control_config=args.safe_control_config,
+            safe_control_controller_mode=args.safe_control_controller_mode,
+            allow_debug_pid=args.allow_debug_pid,
+        )
+        manifest["preflight"] = preflight.to_dict()
+        if not preflight.ok:
+            raise RuntimeError(
+                "CoRL preflight failed:\n"
+                + "\n".join(f"- {message}" for message in preflight.messages)
+            )
+
+        _log_progress(
+            out_dir,
+            "suite_start",
+            profile=args.profile,
+            dagger_expert=args.dagger_expert,
+            method_set=args.method_set,
+            learned_mode=args.learned_mode,
+        )
+
+        if args.learned_mode == "dagger":
+            training_rows, training_failures = _run_dagger_training(args, profile, out_dir)
+            buffer.failure_rows.extend(training_failures)
+            label_summary = _dagger_label_summary(training_rows)
+            label_summary.to_csv(out_dir / "learning" / "dagger_label_summary.csv", index=False)
+            label_quality = _dagger_label_quality(label_summary)
+            checkpoint = out_dir / "learning" / "dagger_final.pt"
+            manifest["steps"].append(
+                {
+                    "kind": "dagger_training",
+                    "rows": int(training_rows.shape[0]),
+                    "checkpoint": "learning/dagger_final.pt",
+                    "expert": args.dagger_expert,
+                    "label_quality": label_quality,
+                }
+            )
+        elif args.learned_mode == "checkpoint":
+            if args.learned_checkpoint is None:
+                raise ValueError("--learned-mode checkpoint requires --learned-checkpoint")
+            checkpoint = Path(args.learned_checkpoint)
+            if not checkpoint.exists():
+                raise FileNotFoundError(f"learned checkpoint does not exist: {checkpoint}")
+            manifest["steps"].append(
+                {
+                    "kind": "learned_checkpoint",
+                    "checkpoint": str(checkpoint),
+                }
+            )
+        else:
+            _empty_dagger_label_summary().to_csv(out_dir / "learning" / "dagger_label_summary.csv", index=False)
+
+        _log_progress(out_dir, "evaluation_start", checkpoint="" if checkpoint is None else str(checkpoint))
+        episode_rows, intervention_rows, monitor_rows, decision_rows, evaluation_failures = _run_evaluation(
+            args,
+            profile,
+            checkpoint,
+            out_dir,
+            label_quality=label_quality,
+            failure_sink=buffer.failure_rows,
+        )
+        buffer.episode_rows.extend(episode_rows)
+        buffer.intervention_rows.extend(intervention_rows)
+        buffer.monitor_rows.extend(monitor_rows)
+        buffer.decision_rows.extend(decision_rows)
+        buffer.failure_rows.extend(evaluation_failures)
         manifest["steps"].append(
             {
-                "kind": "dagger_training",
-                "rows": int(training_rows.shape[0]),
-                "checkpoint": "learning/dagger_final.pt",
-                "expert": args.dagger_expert,
-                "label_quality": label_quality,
+                "kind": "heldout_evaluation",
+                "episodes": len(episode_rows),
+                "expected_episodes": _expected_evaluation_episodes(args, profile, checkpoint, label_quality),
+                "eval_seeds": profile.eval_seeds,
+                "eval_seed_start": profile.train_seeds,
             }
         )
-    elif args.learned_mode == "checkpoint":
-        if args.learned_checkpoint is None:
-            raise ValueError("--learned-mode checkpoint requires --learned-checkpoint")
-        checkpoint = Path(args.learned_checkpoint)
-        if not checkpoint.exists():
-            raise FileNotFoundError(f"learned checkpoint does not exist: {checkpoint}")
-        manifest["steps"].append(
-            {
-                "kind": "learned_checkpoint",
-                "checkpoint": str(checkpoint),
-            }
+        notes = _write_corl_artifacts(
+            out_dir,
+            args,
+            profile,
+            manifest,
+            buffer,
+            label_quality=label_quality,
+            checkpoint=checkpoint,
+            status="success",
         )
-    else:
-        _empty_dagger_label_summary().to_csv(out_dir / "learning" / "dagger_label_summary.csv", index=False)
+        _log_progress(out_dir, "suite_complete", out=str(out_dir))
+    except Exception as exc:
+        buffer.failure_rows.append(
+            _failure_event(
+                phase="suite",
+                method="",
+                method_kind="",
+                seed=-1,
+                step=-1,
+                event_type="suite_abort",
+                exc=exc,
+            )
+        )
+        _log_progress(
+            out_dir,
+            "suite_failed",
+            exception_type=type(exc).__name__,
+            message=str(exc),
+        )
+        _write_corl_artifacts(
+            out_dir,
+            args,
+            profile,
+            manifest,
+            buffer,
+            label_quality=label_quality,
+            checkpoint=checkpoint,
+            status="failed",
+        )
+        raise
+    if not args.no_archive:
+        _write_archive(out_dir, out_dir.with_suffix(".tar.gz"))
+    if args.fail_on_unusable and not bool(notes.get("paper_usable", False)):
+        reasons = notes.get("paper_usable_reasons", [])
+        reason_text = "\n".join(f"- {reason}" for reason in reasons)
+        raise RuntimeError(f"CoRL run is not usable as headline evidence:\n{reason_text}")
+    return out_dir
 
-    _log_progress(out_dir, "evaluation_start", checkpoint="" if checkpoint is None else str(checkpoint))
-    episode_rows, intervention_rows, monitor_rows, decision_rows, evaluation_failures = _run_evaluation(
-        args,
-        profile,
-        checkpoint,
-        out_dir,
-        label_quality=label_quality,
-    )
-    failure_rows.extend(evaluation_failures)
-    manifest["steps"].append(
-        {
-            "kind": "heldout_evaluation",
-            "episodes": len(episode_rows),
-            "eval_seeds": profile.eval_seeds,
-            "eval_seed_start": profile.train_seeds,
-        }
-    )
 
-    raw = pd.DataFrame(episode_rows)
-    interventions = pd.DataFrame(intervention_rows)
-    monitor = pd.DataFrame(monitor_rows)
-    decisions = pd.DataFrame(decision_rows)
-    if decisions.empty:
-        decisions = _empty_decision_features()
-    failures = pd.DataFrame(failure_rows, columns=FAILURE_EVENT_COLUMNS)
+def _write_corl_artifacts(
+    out_dir: Path,
+    args: argparse.Namespace,
+    profile: CorlProfile,
+    manifest: dict[str, Any],
+    buffer: CorlRunBuffer,
+    *,
+    label_quality: dict[str, Any],
+    checkpoint: Path | None,
+    status: str,
+) -> dict[str, Any]:
+    raw = _rows_frame(buffer.episode_rows, EPISODE_COLUMNS)
+    interventions = _rows_frame(buffer.intervention_rows, INTERVENTION_COLUMNS)
+    monitor = _rows_frame(buffer.monitor_rows, MONITOR_COLUMNS)
+    decisions = _rows_frame(buffer.decision_rows, tuple(_empty_decision_features().columns))
+    failures = _rows_frame(buffer.failure_rows, FAILURE_EVENT_COLUMNS)
     selection = _selection_summary(decisions)
     sequence_summary = _sequence_summary(decisions)
     headline = _headline_table(raw, profile.bootstrap_samples, seed=args.bootstrap_seed)
@@ -485,7 +664,14 @@ def run_corl_suite(args: argparse.Namespace) -> Path:
         interventions=interventions,
         monitor=monitor,
         decisions=decisions,
+        expected_episodes=_expected_evaluation_episodes(args, profile, checkpoint, label_quality),
     )
+    notes["status"] = status
+    manifest["status"] = status
+    manifest["failure_event_count"] = int(failures.shape[0])
+    manifest["updated_at_utc"] = datetime.now(timezone.utc).isoformat()
+    if status != "success":
+        manifest["failed_at_utc"] = manifest["updated_at_utc"]
 
     raw.to_csv(out_dir / "raw_episodes.csv", index=False)
     interventions.to_csv(out_dir / "intervention_timeseries.csv", index=False)
@@ -505,19 +691,40 @@ def run_corl_suite(args: argparse.Namespace) -> Path:
         json.dumps(_json_safe({"profile": asdict(profile), "args": vars(args)}), indent=2, sort_keys=True),
         encoding="utf-8",
     )
+    learning_dir = out_dir / "learning"
+    learning_dir.mkdir(parents=True, exist_ok=True)
+    label_summary = learning_dir / "dagger_label_summary.csv"
+    if not label_summary.exists():
+        _empty_dagger_label_summary().to_csv(label_summary, index=False)
     (out_dir / "manifest.json").write_text(
         json.dumps(_json_safe(manifest), indent=2, sort_keys=True),
         encoding="utf-8",
     )
-    _log_progress(out_dir, "suite_complete", out=str(out_dir))
     _write_artifact_index(out_dir, out_dir / "artifact_index.csv")
-    if not args.no_archive:
-        _write_archive(out_dir, out_dir.with_suffix(".tar.gz"))
-    if args.fail_on_unusable and not bool(notes.get("paper_usable", False)):
-        reasons = notes.get("paper_usable_reasons", [])
-        reason_text = "\n".join(f"- {reason}" for reason in reasons)
-        raise RuntimeError(f"CoRL run is not usable as headline evidence:\n{reason_text}")
-    return out_dir
+    return notes
+
+
+def _rows_frame(rows: Sequence[dict[str, Any]], columns: Sequence[str]) -> pd.DataFrame:
+    if not rows:
+        return pd.DataFrame(columns=columns)
+    frame = pd.DataFrame(rows)
+    for column in columns:
+        if column not in frame:
+            frame[column] = np.nan
+    extras = [column for column in frame.columns if column not in columns]
+    return frame[list(columns) + extras]
+
+
+def _expected_evaluation_episodes(
+    args: argparse.Namespace,
+    profile: CorlProfile,
+    checkpoint: Path | None,
+    label_quality: dict[str, Any],
+) -> int:
+    try:
+        return len(_evaluation_methods(args, checkpoint, label_quality)) * profile.eval_seeds
+    except Exception:
+        return profile.eval_seeds
 
 
 def _run_dagger_training(
@@ -636,14 +843,9 @@ def _run_evaluation(
     out_dir: Path,
     *,
     label_quality: dict[str, Any],
+    failure_sink: list[dict[str, Any]] | None = None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]], list[dict[str, Any]]]:
-    methods = (
-        "nominal_no_monitor",
-        "reference_unbounded",
-        *_headline_methods(args.method_set),
-    )
-    if _include_learned_method(args, checkpoint, label_quality):
-        methods = (*methods, _learned_method(checkpoint, args.dagger_expert))
+    methods = _evaluation_methods(args, checkpoint, label_quality)
     raw_rows: list[dict[str, Any]] = []
     intervention_rows: list[dict[str, Any]] = []
     monitor_rows: list[dict[str, Any]] = []
@@ -660,15 +862,16 @@ def _run_evaluation(
                 method=method_name,
                 seed=seed,
             )
-            client = make_env_client(
-                profile=args.profile,
-                safe_control_gym_root=args.safe_control_gym_root,
-                safe_control_python=args.safe_control_python,
-                safe_control_config=args.safe_control_config,
-                safe_control_controller_mode=args.safe_control_controller_mode,
-                allow_debug_pid=args.allow_debug_pid,
-            )
+            client: IrosEnvClient | None = None
             try:
+                client = make_env_client(
+                    profile=args.profile,
+                    safe_control_gym_root=args.safe_control_gym_root,
+                    safe_control_python=args.safe_control_python,
+                    safe_control_config=args.safe_control_config,
+                    safe_control_controller_mode=args.safe_control_controller_mode,
+                    allow_debug_pid=args.allow_debug_pid,
+                )
                 episode, interventions, monitor, decisions, failures = _run_episode(
                     client,
                     profile,
@@ -676,13 +879,43 @@ def _run_evaluation(
                     seed,
                     phase="eval",
                 )
+            except Exception as exc:
+                failure = _failure_event(
+                    phase="eval",
+                    method=method_name,
+                    method_kind=str(method if isinstance(method, str) else method.kind),
+                    seed=seed,
+                    step=-1,
+                    elapsed_seconds=perf_counter() - seed_start,
+                    event_type="episode_execution",
+                    exc=exc,
+                    candidate_reducer_names=() if isinstance(method, str) else _method_candidate_names(method),
+                )
+                if failure_sink is None:
+                    failure_rows.append(failure)
+                else:
+                    failure_sink.append(failure)
+                _log_progress(
+                    out_dir,
+                    "evaluation_seed_failed",
+                    method=method_name,
+                    seed=seed,
+                    elapsed_seconds=perf_counter() - seed_start,
+                    exception_type=type(exc).__name__,
+                    message=str(exc),
+                )
+                raise
             finally:
-                client.close()
+                if client is not None:
+                    client.close()
             raw_rows.append(episode)
             intervention_rows.extend(interventions)
             monitor_rows.extend(monitor)
             decision_rows.extend(decisions)
-            failure_rows.extend(failures)
+            if failure_sink is None:
+                failure_rows.extend(failures)
+            else:
+                failure_sink.extend(failures)
             _log_progress(
                 out_dir,
                 "evaluation_seed_complete",
@@ -693,6 +926,21 @@ def _run_evaluation(
                 elapsed_seconds=perf_counter() - seed_start,
             )
     return raw_rows, intervention_rows, monitor_rows, decision_rows, failure_rows
+
+
+def _evaluation_methods(
+    args: argparse.Namespace,
+    checkpoint: Path | None,
+    label_quality: dict[str, Any],
+) -> tuple[MethodSpec | str, ...]:
+    methods: tuple[MethodSpec | str, ...] = (
+        "nominal_no_monitor",
+        "reference_unbounded",
+        *_headline_methods(args.method_set),
+    )
+    if _include_learned_method(args, checkpoint, label_quality):
+        methods = (*methods, _learned_method(checkpoint, args.dagger_expert))
+    return methods
 
 
 def _violated_trigger_names(verdicts: Sequence[Any]) -> list[str]:
@@ -721,6 +969,7 @@ def _failure_event(
     step: int,
     event_type: str,
     exc: BaseException,
+    elapsed_seconds: float | None = None,
     generator_count: int | None = None,
     candidate_reducer_names: Sequence[str] = (),
 ) -> dict[str, Any]:
@@ -730,6 +979,7 @@ def _failure_event(
         "method_kind": method_kind,
         "seed": int(seed),
         "step": int(step),
+        "elapsed_seconds": "" if elapsed_seconds is None else float(elapsed_seconds),
         "event_type": event_type,
         "exception_type": type(exc).__name__,
         "message": str(exc),
@@ -799,6 +1049,7 @@ def _run_episode(
     constraint_count = 0
     reduction_failure_count = 0
     start = perf_counter()
+    task_completion_time = snapshot.time if snapshot.task_completed else None
 
     for step in range(profile.max_steps):
         nominal = client.nominal_command(snapshot)
@@ -934,6 +1185,7 @@ def _run_episode(
                 reducer_latency_seconds=reduction_seconds,
                 budget_violation=state.zonotope.generator_count > profile.budget and method_name != "reference_unbounded",
                 unsound_certificate=unsound,
+                task_completed=snapshot.task_completed,
             )
             budget_violation = state.zonotope.generator_count > profile.budget and method_name != "reference_unbounded"
             fallback_active = not np.allclose(command, nominal)
@@ -997,12 +1249,16 @@ def _run_episode(
             }
         )
         snapshot = next_snapshot
+        if task_completion_time is None and snapshot.task_completed:
+            task_completion_time = snapshot.time
         if snapshot.done:
             break
 
     metrics = manager.metrics
     duration = max(1, len(interventions))
-    completed = snapshot.task_completed or metrics.task_completed
+    completed = bool(snapshot.task_completed)
+    if completed and task_completion_time is None:
+        task_completion_time = snapshot.time
     episode = {
         "phase": phase,
         "scenario": "iros_gate",
@@ -1033,11 +1289,7 @@ def _run_episode(
         "justified_intervention_rate": metrics.justified_intervention_count / duration,
         "missed_violation_count": metrics.missed_violation_count,
         "missed_violation_rate": metrics.missed_violation_rate,
-        "time_to_target": (
-            metrics.time_to_target
-            if metrics.time_to_target is not None
-            else (snapshot.time if completed else np.nan)
-        ),
+        "time_to_target": task_completion_time if completed else np.nan,
         "mean_reducer_latency_ms": 1000.0 * metrics.reducer_latency_seconds / max(1, sum(metrics.reducer_choices.values())),
         "budget_violation_count": int(sum(row["budget_violation"] for row in monitor_rows)),
         "unsound_certificate_count": int(sum(row["unsound_certificate"] for row in monitor_rows)),
@@ -1630,6 +1882,8 @@ def _calibration_recommendations(summary: pd.DataFrame, failures: pd.DataFrame) 
 
 
 def _headline_table(raw: pd.DataFrame, bootstrap_samples: int, *, seed: int) -> pd.DataFrame:
+    if raw.empty:
+        return pd.DataFrame(columns=_headline_columns())
     rows: list[dict[str, Any]] = []
     for method, group in raw.groupby("method", sort=True):
         row: dict[str, Any] = {"method": method, "episode_count": int(group.shape[0])}
@@ -1655,6 +1909,24 @@ def _headline_table(raw: pd.DataFrame, bootstrap_samples: int, *, seed: int) -> 
         rows.append(row)
     result = pd.DataFrame(rows)
     return _add_deltas(result, "reference_unbounded", ("box", "girard"))
+
+
+def _headline_columns() -> tuple[str, ...]:
+    columns: list[str] = ["method", "episode_count"]
+    for metric in HEADLINE_METRICS:
+        if metric == "task_completed":
+            name = "task_completion_rate"
+        elif metric == "collision_episode":
+            name = "collision_rate"
+        elif metric == "constraint_violation_episode":
+            name = "constraint_violation_rate"
+        elif metric == "gates_passed":
+            name = "mean_gates_passed"
+        else:
+            name = metric
+        columns.extend((name, f"{name}_ci_low", f"{name}_ci_high"))
+    columns.extend(("budget_violation_count", "unsound_certificate_count", "reduction_failure_count"))
+    return tuple(columns)
 
 
 def _add_deltas(
@@ -1697,6 +1969,7 @@ def _analysis_notes(
     interventions: pd.DataFrame | None = None,
     monitor: pd.DataFrame | None = None,
     decisions: pd.DataFrame | None = None,
+    expected_episodes: int | None = None,
 ) -> dict[str, Any]:
     budgeted = raw[~raw["method"].isin({"reference_unbounded", "nominal_no_monitor"})]
     flags: list[str] = []
@@ -1707,12 +1980,25 @@ def _analysis_notes(
     failure_event_count = 0 if failures is None else int(failures.shape[0])
     if failure_event_count:
         flags.append(f"failure_event_count={failure_event_count}")
-    if not headline.empty and "mpc_focused_sequence" in set(headline["method"]):
+    if (
+        not headline.empty
+        and "mpc_focused_sequence" in set(headline["method"])
+        and "reference_unbounded" in set(headline["method"])
+    ):
         mpc = headline[headline["method"] == "mpc_focused_sequence"].iloc[0]
         ref = headline[headline["method"] == "reference_unbounded"].iloc[0]
         if float(mpc["missed_violation_rate"]) > float(ref["missed_violation_rate"]):
             flags.append("mpc_focused_sequence_increases_missed_violation_rate")
-    quality = _paper_usable_notes(raw, headline, failures, interventions, monitor, decisions, label_quality)
+    quality = _paper_usable_notes(
+        raw,
+        headline,
+        failures,
+        interventions,
+        monitor,
+        decisions,
+        label_quality,
+        expected_episodes=expected_episodes,
+    )
     if not quality["paper_usable"]:
         flags.append("paper_usable=false")
     if decisions is None or decisions.empty:
@@ -1735,6 +2021,8 @@ def _analysis_notes(
             "unsound_certificate_count": int(budgeted["unsound_certificate_count"].sum()) if not budgeted.empty else 0,
             "reduction_failure_count": int(budgeted["reduction_failure_count"].sum()) if not budgeted.empty else 0,
             "failure_event_count": failure_event_count,
+            "expected_episode_count": expected_episodes,
+            "actual_episode_count": int(raw.shape[0]),
         },
         "learning_label_quality": {} if label_quality is None else label_quality,
         "paper_usable": quality["paper_usable"],
@@ -1752,10 +2040,16 @@ def _paper_usable_notes(
     monitor: pd.DataFrame | None,
     decisions: pd.DataFrame | None,
     label_quality: dict[str, Any] | None,
+    *,
+    expected_episodes: int | None = None,
 ) -> dict[str, Any]:
     reasons: list[str] = []
     if raw.empty:
         reasons.append("no episode rows were produced")
+    if expected_episodes is not None and int(raw.shape[0]) != int(expected_episodes):
+        reasons.append(
+            f"expected {int(expected_episodes)} episode rows but found {int(raw.shape[0])}"
+        )
     nominal = raw[raw["method"] == "nominal_no_monitor"] if "method" in raw else pd.DataFrame()
     if nominal.empty:
         reasons.append("nominal controller baseline is missing")

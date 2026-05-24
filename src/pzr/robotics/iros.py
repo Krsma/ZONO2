@@ -402,6 +402,7 @@ class InterventionManager:
         reducer_latency_seconds: float = 0.0,
         budget_violation: bool = False,
         unsound_certificate: bool = False,
+        task_completed: bool = False,
     ) -> NDArray[np.float64]:
         monitor_triggered = any(verdict.status == "violation" for verdict in monitor_verdicts)
         oracle_violated = any(verdict.status == "violation" for verdict in oracle_verdicts)
@@ -415,10 +416,7 @@ class InterventionManager:
 
         activation = int(use_fallback and not self._previous_fallback)
         self._previous_fallback = use_fallback
-        task_completed = self._metrics.task_completed or (
-            self.expected_gate_count is not None
-            and gates_passed >= self.expected_gate_count
-        )
+        task_completed = self._metrics.task_completed or bool(task_completed)
         time_to_target = self._metrics.time_to_target
         if task_completed and time_to_target is None and time is not None:
             time_to_target = float(time)

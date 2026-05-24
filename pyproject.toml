@@ -26,6 +26,8 @@ pzr-distill-policy = "pzr.learning.distill_cli:main"
 [project.optional-dependencies]
 learning = [
     "torch>=2.0",
+    "gymnasium>=1,<2",
+    "stable-baselines3>=2.7,<3",
 ]
 dev = [
     "pytest>=8",

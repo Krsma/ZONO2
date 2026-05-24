@@ -127,9 +127,20 @@ def test_intervention_manager_counts_spurious_and_missed_violations() -> None:
     assert manager.metrics.missed_violation_count == 1
     assert manager.metrics.fallback_activation_count == 1
     assert manager.metrics.budget_violation_count == 1
-    assert manager.metrics.task_completed
-    assert manager.metrics.time_to_target == 2.5
+    assert not manager.metrics.task_completed
+    assert manager.metrics.time_to_target is None
     assert manager.metrics.reducer_choices == {"girard": 1}
+
+    manager.choose_command(
+        [1.0, 0.0, 0.0],
+        no_monitor_trigger,
+        safe_oracle,
+        gates_passed=1,
+        time=3.0,
+        task_completed=True,
+    )
+    assert manager.metrics.task_completed
+    assert manager.metrics.time_to_target == 3.0
 
 
 def test_level3_style_initial_state_is_not_a_corridor_violation() -> None:
