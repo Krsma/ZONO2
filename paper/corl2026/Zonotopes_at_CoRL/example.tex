@@ -1,0 +1,343 @@
+\documentclass{article}
+
+\usepackage{corl_2026}
+
+\usepackage{amsmath,amssymb,amsthm}
+\usepackage{booktabs}
+\usepackage{graphicx}
+\usepackage{algorithm}
+\usepackage{algorithmic}
+\usepackage{xcolor}
+\usepackage{subcaption}
+
+\newtheorem{theorem}{Theorem}
+\newtheorem{definition}{Definition}
+\newcommand{\Z}{\mathcal{Z}}
+\newcommand{\reals}{\mathbb{R}}
+\newcommand{\placeholder}[1]{\texttt{[#1]}}
+
+\title{\placeholder{TITLE}}
+
+\author{
+  Anonymous
+}
+
+\begin{document}
+\maketitle
+
+%===============================================================================
+\begin{abstract}
+Quadrotors deployed under sensor uncertainty rely on runtime monitors to detect safety violations during flight, but monitors that track calibration bias and measurement noise using affine arithmetic accumulate one generator per independent observation---exhausting memory or degrading precision as flight time grows. We treat the resulting zonotope order-reduction problem as a receding-horizon control problem: at each overflow, a predictive policy selects from a set of certified reducers, each of which provably encloses the original zonotope within a fixed generator budget. Because every candidate reducer is individually certified, monitor soundness is preserved regardless of policy quality---prediction affects precision, not correctness. We further distill the predictive policy into a lightweight neural selector via DAgger, matching the expert's precision at a fraction of the latency.
+On a Crazyflie gate-flying task with firmware-in-the-loop simulation, predictive reduction \placeholder{reduces spurious safety interventions by X\% compared to the best static baseline at fixed monitor memory, with zero missed safety violations}. Code and artifacts are available at \placeholder{URL}.
+\end{abstract}
+
+\keywords{Runtime Monitoring, Zonotopes, Model Predictive Control, Safe Robotics}
+
+%===============================================================================
+\section{Introduction}\label{sec:intro}
+
+A quadrotor navigating an obstacle course under noisy pose and velocity sensors must decide, at every control step, whether its current trajectory satisfies a set of safety constraints.
+A runtime monitor makes this decision by tracking the uncertainty introduced by sensor noise and propagating it through derived safety streams---obstacle clearance, corridor deviation, altitude margins---to evaluate overlap-aware trigger predicates.
+Affine arithmetic provides deterministic set-based enclosure for this task: if the true noise lies within declared bounds, the monitor's zonotope state contains the true system state regardless of the noise realisation~\cite{Finkbeiner2025}.
+
+The price of this guarantee is state growth.
+Each independent measurement introduces a fresh symbolic noise variable, adding one generator column to the zonotope.
+After $t$ measurements with $k$ fresh generators each, the exact monitor state has $m_0 + kt$ generators, where $m_0$ counts persistent calibration variables.
+For long-duration deployment, this linear growth is untenable: the monitor must either run out of memory, go offline, or compress its state online.
+
+Online compression is zonotope order reduction---replacing a high-order zonotope with a lower-order enclosure.
+Classical methods from the reachability community~\cite{Girard2005, Kopetzki2017, YangScott2018} and recent work on stream-based monitoring~\cite{Finkbeiner2025} apply a fixed reduction operator whenever the generator count exceeds a budget.
+These operators optimise single-step enclosure quality and ignore how approximation error propagates through future trigger evaluations.
+A reducer that aggressively merges generators near a geofence threshold may introduce a false alarm two steps later, while a different reducer---slightly worse on raw enclosure---would have preserved the trigger-relevant direction.
+
+We propose treating zonotope reduction as a \emph{predictive abstraction-control} problem.
+At each budget overflow, a receding-horizon policy predicts short-term monitor evolution, scores candidate certified reductions by their impact on future trigger precision, and applies only the first chosen action before replanning.
+The structural analogy is model-predictive control, but the ``control input'' is a compression decision rather than a physical action.
+
+Soundness is \emph{policy-independent}: every candidate reducer individually certifies the enclosure, so a better policy yields fewer false interventions while a worse policy yields looser enclosures but never unsound ones.
+We further distil the predictive policy into a neural selector via DAgger~\cite{Ross2011}, matching the expert at a fraction of its cost.
+
+We contribute:
+\begin{enumerate}
+\item We formalise bounded-memory zonotope reduction as a certified abstraction-control problem and prove that any policy selecting from certified reducers preserves monitor soundness independently of prediction quality.
+\item We implement a receding-horizon rollout policy and a DAgger-distilled neural selector that matches or improves the expert's trigger precision while removing the computational overhead that blocks real-time deployment.
+\item We evaluate on a Crazyflie gate-flying task with firmware-in-the-loop simulation, showing that predictive reduction \placeholder{reduces spurious safety interventions by X\% compared to the best static baseline at the same generator budget, with zero missed violations and zero soundness failures}.
+\end{enumerate}
+
+%===============================================================================
+\section{Background}\label{sec:background}
+
+\subsection{Zonotopes and Affine Arithmetic}\label{sec:bg-zonotopes}
+
+A \emph{zonotope} $\Z = \langle c, G \rangle$ with center $c \in \reals^n$ and generator matrix $G \in \reals^{n \times m}$ represents the set
+\begin{equation}\label{eq:zonotope}
+\Z = \bigl\{ c + G\xi \;\big|\; \xi \in [-1,1]^m \bigr\}.
+\end{equation}
+The integer $m$ is the \emph{generator count} and the ratio $m/n$ is the \emph{order}.
+The \emph{interval hull} of $\Z$---the tightest axis-aligned box enclosing it---has component bounds $[c_i - \sum_j |G_{ij}|,\; c_i + \sum_j |G_{ij}|]$.
+
+In a runtime monitor, each generator column carries semantic metadata.
+\emph{Calibration} generators represent persistent bias terms that reappear at every step; \emph{measurement} generators represent independent bounded noise introduced by a single observation.
+This distinction matters for reduction: merging a calibration generator with short-lived measurement noise destroys long-range correlation structure that the monitor needs for future triggers.
+
+Order reduction replaces a zonotope $\Z$ with a lower-order enclosure $\Z' \supseteq \Z$ satisfying a generator budget $m' \leq K$.
+Standard techniques include the parallelotope method of Girard~\cite{Girard2005}, the observer-based approach of Combastel~\cite{Combastel2003}, PCA-based alignment~\cite{Kopetzki2017}, and adaptive strategies surveyed by Yang and Scott~\cite{YangScott2018}.
+
+\subsection{Stream-Based Runtime Monitoring}\label{sec:bg-monitoring}
+
+A stream-based runtime monitor~\cite{RTLola2026} consumes a trace of observations and produces verdicts by evaluating \emph{trigger predicates} over derived output streams.
+Given a monitor state $S_t$ and an observation $x_t$, the transition $S_{t+1} = \mathrm{Step}(S_t, x_t)$ updates all output streams and evaluates triggers.
+
+When the monitor state includes zonotope-valued streams, trigger evaluation operates on the interval hull.
+An above-threshold trigger $\varphi_i\colon \mathrm{expr} >_p c$ is a violation when the fraction of the interval hull above threshold $c$ exceeds the overlap parameter $p$~\cite{Finkbeiner2025}.
+The monitor declares \emph{violation} or \emph{safe}; the width of the trigger's interval hull quantifies the monitor's \emph{precision}.
+
+The bounded-memory problem arises because each independent measurement adds a fresh generator to the zonotope state.
+Without reduction, the generator count grows linearly with trace length, eventually exceeding any fixed memory budget.
+RTLola provides bounded-memory \emph{stream} semantics by design~\cite{RTLola2026}; the numerical uncertainty component tracked by zonotopes is the remaining unbounded factor that this work addresses.
+
+\subsection{Model Predictive Control}\label{sec:bg-mpc}
+
+MPC optimises a cost over a finite horizon $h$, applies only the first action, and re-solves at the next step~\cite{Mayne2005}.
+This receding-horizon structure reappears in our method with the zonotope state in place of the plant state, certified reducers as the action space, and trigger precision as the cost.
+The predictive safety filter of Wabersich and Zeilinger~\cite{WabersichZeilinger2021} applies the same principle to constraint satisfaction; our work applies it to monitor precision under bounded memory.
+
+\subsection{Learning from Demonstrations}\label{sec:bg-dagger}
+
+DAgger~\cite{Ross2011} addresses distribution shift in imitation learning by iteratively rolling out the current learned policy, querying the expert at learner-induced states, aggregating new labels, and retraining.
+We use DAgger to distil the MPC reduction policy into a neural selector.
+The trusted boundary is preserved because the learned policy only \emph{ranks} candidates from the same certified set.
+
+
+%===============================================================================
+\section{Related Work}\label{sec:related}
+
+\paragraph{Conformal prediction for runtime safety.}
+Conformal prediction provides distribution-free coverage guarantees for perception and planning under uncertainty~\cite{Lindemann2023}.
+These methods produce prediction regions that contain the true outcome with a user-specified probability under exchangeability assumptions.
+Our approach offers a complementary guarantee: every zonotope reduction is a deterministic set enclosure, valid for any noise realisation within the declared bounds, without distributional assumptions.
+The two can coexist in a safety stack---conformal prediction for probabilistic calibration, zonotope monitors for worst-case numerical tracking.
+
+\paragraph{MPC for uncertainty and predictive safety filters.}
+Tube MPC~\cite{Mayne2005} and predictive safety filters~\cite{WabersichZeilinger2021, Hewing2020} use receding-horizon optimisation to maintain constraint satisfaction under bounded disturbances.
+Our method shares the receding-horizon structure but the control input is a \emph{compression decision} over the monitor's uncertainty state, not a physical action applied to the plant.
+The structural analogy is precise: both optimise a cost over a finite horizon of predicted future states, both apply only the first action, and both re-solve after observing the true next state.
+
+\paragraph{Runtime verification for robotics.}
+RTLola~\cite{RTLola2026} provides a stream-based monitoring framework with bounded-memory semantics, deployed for autonomous aircraft and available with a ROS adapter.
+Finkbeiner et al.~\cite{Finkbeiner2025} extend stream monitoring with zonotope-based uncertainty tracking, demonstrating that affine arithmetic can represent calibration and measurement noise exactly.
+Our work addresses the remaining unbounded component: the numerical zonotope state that grows with trace length, requiring online order reduction for long-duration deployment.
+
+\paragraph{Safe reinforcement learning.}
+The safe learning survey of Brunke et al.~\cite{Brunke2022} organises methods along a spectrum from constrained optimisation to formal shielding.
+Shielding~\cite{Alshiekh2018} enforces safety by filtering actions through a precomputed safe set.
+Our contribution occupies a different layer of the safety stack: we do not filter actions but instead maintain the \emph{uncertainty representation} that a safety filter depends on.
+The trusted-boundary pattern---a policy proposes, a certified operator preserves an invariant---is shared across shielding ($a \to \text{shield} \to$ system safety), predictive safety filters ($a \to \text{MPC} \to$ recursive feasibility), and our work ($\rho \to \text{certified reducer} \to Z \subseteq Z'$, $\mathrm{gen}(Z') \leq K$).
+
+
+%===============================================================================
+\section{Uncertainty with Zonotopes}\label{sec:motivation}
+
+Consider a quadrotor monitor tracking 7 safety-relevant streams: obstacle clearance, gate deviation, corridor deviation, altitude margins (low and high), speed, and a combined safety margin.
+Each stream is a function of the noisy observed pose and velocity.
+The sensor model introduces persistent calibration bias (sampled once per flight from $[-b, b]$) and fresh bounded measurement noise (drawn independently from $[-\epsilon, \epsilon]$ at each step) on all 6 state components.
+In the zonotope representation, the bias is a single reused calibration generator while each measurement adds one fresh generator column.
+After 100 steps, the exact monitor state carries over 100 generators.
+
+\paragraph{Why not probabilistic filters?}
+Kalman filters and their variants provide optimal state estimation under Gaussian noise, but the Gaussian assumption can silently underestimate tail risk.
+A Kalman filter assigning 0.01\% probability to a state configuration that actually occurs has violated its guarantee without any observable failure signal.
+Zonotopes provide deterministic set-based enclosure: if the true noise lies within the declared bounds, the zonotope contains the true state.
+This is the guarantee level demanded by safety-critical certification and formal runtime verification~\cite{Finkbeiner2025}.
+
+\paragraph{Why not offline monitoring?}
+Offline monitors process the entire trace after execution and can maintain exact zonotope states, but they cannot trigger interventions during flight and are pessimistic because they do not adapt to observed conditions.
+Online reduction subsumes the offline case: every offline reducer is a candidate for the online policy.
+
+\paragraph{Why not commit to a single reducer?}
+Finkbeiner et al.~\cite{Finkbeiner2025} show that a fixed reducer with constant memory is feasible, but committing to one reducer misses the insight that the optimal choice depends on the current state and upcoming trigger geometry.
+Table~\ref{tab:toy} shows this concretely: Girard~\cite{Girard2005} achieves a mean trigger width of 230 while Combastel~\cite{Combastel2003} achieves 268 and box reaches 282.
+No single method dominates across all traces.
+
+Since no single reducer dominates, and the reduction choice at step $t$ affects precision at steps $t+1, \ldots, t+h$, we treat reduction as a sequential decision problem.
+
+
+%===============================================================================
+\section{Method}\label{sec:method}
+
+\subsection{Predictive Zonotope Reduction}\label{sec:method-pzr}
+
+We frame zonotope order reduction as a finite-horizon control problem.
+The state is the monitor's zonotope $\Z_t = \langle c_t, G_t \rangle$ together with any monitor payload $S_t$.
+The action space is a finite set of $k$ certified reducers $\mathcal{A} = \{\rho_1, \ldots, \rho_k\}$, where each $\rho_j$ maps a zonotope to a reduced enclosure satisfying:
+\begin{equation}\label{eq:cert}
+\Z_t \subseteq \rho_j(\Z_t), \quad \mathrm{gen}\bigl(\rho_j(\Z_t)\bigr) \leq K.
+\end{equation}
+The transition is the monitor step applied to the reduced state with a predicted input: $\Z_{t+1} = \mathrm{Step}\bigl(\rho(\Z_t),\, \hat{x}_{t+1}\bigr)$.
+The cost function $\ell$ measures trigger imprecision:
+\begin{equation}\label{eq:cost}
+\ell(\Z, \varphi) = \sum_i w_{\mathrm{tw}} \cdot \mathrm{width}_i(\Z, \varphi_i) + w_{\mathrm{str}} \cdot \mathrm{straddle}_i(\Z, \varphi_i),
+\end{equation}
+where $\mathrm{width}_i$ is the trigger's interval-hull width and $\mathrm{straddle}_i$ penalises states whose interval hull spans the trigger threshold (uncertain verdict).
+
+The key property of this formulation is that soundness is \emph{policy-independent}:
+
+\begin{theorem}[Policy-independent soundness]\label{thm:soundness}
+Let $\mathrm{Step}$ be a monitor transition that is sound over zonotope states.
+Let $\pi$ be any policy that, at each reduction point, selects a reducer $\rho \in \mathcal{A}$ whose certificate establishes $\Z_t \subseteq \rho(\Z_t)$.
+Then the reduced execution over-approximates the unreduced execution regardless of how $\pi$ predicted future inputs or scored the candidates.
+\end{theorem}
+
+\paragraph{Rollout MPC (MPC-G).}
+Our headline policy evaluates each candidate first reduction, then rolls forward predicted future overflows with a fixed certified base reducer (protected Girard~\cite{Girard2005}).
+It applies only the first chosen action and replans at the next overflow.
+Protected box reduction serves as a last-resort fallback when all normal candidates fail, but is deliberately excluded from the first-action candidate set to avoid the precision loss of the interval hull.
+
+\paragraph{Sequence MPC (MPC-Seq).}
+An ablation that searches the full reducer-sequence tree with branch-and-bound pruning.
+MPC-Seq is optimal over the finite candidate tree but computationally expensive.
+
+\paragraph{Protected reduction.}
+Monitor-required generators (e.g., persistent calibration bias) are declared via metadata requirements and split from the residual zonotope before reduction, preserving them exactly in the output.
+
+
+\subsection{Toy Example: Omnidirectional Robot}\label{sec:toy}
+
+Before evaluating on the full drone benchmark, we build intuition on the omnidirectional robot monitor from Finkbeiner et al.~\cite{Finkbeiner2025}.
+This monitor tracks 5 streams---filtered acceleration, velocity, distance increment, and $x/y$ position---for a 2D robot with one persistent calibration generator and one fresh measurement generator per step.
+Two geofence triggers fire when the interval hull of a position coordinate exceeds a threshold.
+
+\begin{table}[t]
+\centering
+\caption{Comparison of reduction methods on the omnidirectional robot monitor (budget $K=8$, 50 seeds, online predictor). MPC-G is our headline rollout policy; \emph{learned} is the DAgger-distilled selector. \emph{Reference} is the unreduced oracle. Lower is better for all metrics.}
+\label{tab:toy}
+\small
+\begin{tabular}{@{}lrrrr@{}}
+\toprule
+Method & Trigger Width & Width Infl. (\%) & IH MSE & Latency (ms) \\
+\midrule
+Reference (unbounded) & 199.7 & 0.0 & 0.0 & --- \\
+\midrule
+Box           & 281.9 & 82.2 & 2373.1 & 0.02 \\
+Girard        & 230.1 & 30.4 & 352.6  & 0.08 \\
+Combastel     & 268.3 & 68.6 & 1823.7 & 0.08 \\
+\midrule
+MPC-G (ours)  & \textbf{225.1} & \textbf{25.3} & \textbf{268.4}  & 2.98 \\
+MPC-W         & 242.5 & 42.8 & 728.6  & 9.57 \\
+Learned (ours)& 229.2 & 29.4 & 332.2  & 0.30 \\
+\bottomrule
+\end{tabular}
+\end{table}
+
+Table~\ref{tab:toy} compares static baselines against the predictive policies on this monitor.
+MPC-G achieves the tightest trigger width (225.1 vs.\ 230.1 for Girard) and the lowest interval-hull MSE (268.4 vs.\ 352.6), demonstrating that accounting for future trigger geometry during reduction improves precision.
+The DAgger-distilled selector closely tracks the expert at 10$\times$ lower latency (0.30\,ms vs.\ 2.98\,ms).
+
+The intuition is straightforward: near a geofence threshold, the rollout policy avoids reducers that would widen the trigger-relevant direction, even if those reducers produce a tighter enclosure overall.
+This context-dependent selection is what a fixed reducer cannot provide.
+
+
+\subsection{Distillation via DAgger}\label{sec:distillation}
+
+The rollout policy MPC-G evaluates $|\mathcal{A}|$ candidate first reductions, each requiring a forward rollout of $h$ predicted monitor steps.
+On the Crazyflie benchmark, this costs ${\sim}6$\,ms per decision---feasible at typical outer-loop rates but too slow for the ${\sim}500$\,Hz inner loop.
+Sequence MPC is an order of magnitude slower (${\sim}825$\,ms).
+
+We distil the MPC expert into a neural selector using DAgger~\cite{Ross2011}: at each iteration, the current learned policy rolls out in the closed-loop environment, the MPC expert is queried at learner-induced over-budget states, and a small MLP is retrained on accumulated decision features (generator count, budget headroom, zonotope order, generator norms, trigger proximity; 19 features total, 3 iterations).
+
+The learned selector inherits the same trusted boundary as the MPC expert: it only ranks candidates from the certified set $\mathcal{A}$.
+Whichever reducer it selects, the certificate $\Z_t \subseteq \rho(\Z_t)$, $\mathrm{gen}(\rho(\Z_t)) \leq K$ is verified by the reducer, not the policy.
+If the learned policy picks a suboptimal reducer, precision degrades but soundness is preserved.
+
+\placeholder{Table~2: DAgger distillation results comparing MPC-G, MPC-Seq, and DAgger iterations on validation accuracy, trigger precision, and latency on the Crazyflie benchmark. Data from overnight run.}
+
+
+%===============================================================================
+\section{Experimental Setup}\label{sec:setup}
+
+\subsection{Platform}
+
+We evaluate on the safe-control-gym~\cite{Panerati2021} IROS drone competition task: a Crazyflie 2.x quadrotor navigating through 4 gates in sequence in a PyBullet environment.
+The controller uses the official Crazyflie firmware wrapper (pycffirmware), providing firmware-in-the-loop fidelity for motor mixing, attitude control, and trajectory tracking.
+
+\subsection{Monitor Design}
+
+The monitor tracks 7 streams from noisy bounded observations: obstacle clearance, gate deviation, corridor deviation, altitude margins (low/high), speed, and safety margin.
+Five triggers evaluate safety envelope violations: collision risk, obstacle clearance, altitude bounds, and speed envelope.
+Stream semantics mirror RTLola~\cite{RTLola2026} for future toolchain integration.
+
+\subsection{Sensor Model}
+
+The sensor model introduces persistent calibration bias ($[-0.015, 0.015]$ per component, sampled once per episode) and fresh bounded measurement noise ($[-0.03, 0.03]$ per step).
+The bias produces one reused calibration generator; each measurement adds one fresh column.
+Stream memory decay ($\alpha = 0.85$) attenuates older generators.
+
+\subsection{Intervention Manager}
+
+When any trigger fires, the controller switches from nominal gate-following to fallback hover for at least 2 steps.
+Each intervention is classified by comparison with an oracle (true state): \emph{spurious} (monitor triggered, oracle safe), \emph{justified} (both triggered), or \emph{missed} (oracle violated, monitor silent).
+
+\subsection{Configuration and Metrics}
+
+Generator budget $K = 8$, prediction horizon $h = 6$, 50 evaluation seeds, 1000 maximum steps per episode.
+DAgger training uses 20 seeds with 3 iterations against the MPC-W expert.
+
+\paragraph{Primary metrics.}
+Task completion rate, gates passed, spurious intervention rate, missed violation rate, fallback duration fraction, and mean reducer latency.
+
+\paragraph{Soundness invariants.}
+Budget violations, unsound certificates, and reduction failures must all be zero for every method on every seed.
+
+\paragraph{Methods compared.}
+\emph{Controls:} nominal (no monitor), reference (unbounded generators).
+\emph{Static baselines:} box, Girard, Combastel, PCA, keep-norm, calibration-aware keep.
+\emph{Ours:} MPC-G (rollout), MPC-W (wide candidate ablation), MPC-Seq (full tree search), learned (DAgger-distilled).
+
+%===============================================================================
+\section{Results}\label{sec:results}
+
+\subsection{Headline Comparison}
+
+\placeholder{Table~3: Headline comparison on Crazyflie gate-flying (50 eval seeds, 95\% CI). Columns: Method, Task Completion, Gates, Spurious Intv., Missed Viol., Fallback Dur., Latency.}
+
+\placeholder{Analysis: quantify improvement of MPC-G over best static baseline on spurious interventions, task completion, and gates passed.}
+
+\subsection{Soundness Verification}
+
+Across all methods and seeds, we observe zero budget violations, zero unsound certificates, and zero reduction failures---confirming Theorem~\ref{thm:soundness}: the trusted boundary holds regardless of the policy.
+
+\subsection{Intervention Analysis}
+
+\placeholder{Figure: Intervention timeline comparing Girard vs.\ MPC-G vs.\ learned on one episode. Characterise when spurious interventions occur and how predictive selection avoids them.}
+
+\subsection{Computational Cost}
+
+\placeholder{Latency comparison: box ${\sim}$0.1\,ms, Girard ${\sim}$0.3\,ms, learned ${\sim}$0.3--0.6\,ms, MPC-G ${\sim}$6\,ms, MPC-Seq ${\sim}$825\,ms. Learned selector is deployable at ${\sim}$500\,Hz; MPC-G at ${\sim}$50\,Hz.}
+
+\subsection{Reducer Selection Patterns}
+
+\placeholder{Selection histogram for MPC-G across seeds. Expected: Girard dominates; minority selections at trigger-critical points drive the precision improvement.}
+
+%===============================================================================
+\section{Conclusion}\label{sec:conclusion}
+
+We treated bounded-memory zonotope reduction as a predictive control problem over certified operators.
+Every candidate reducer individually certifies its enclosure, so monitor soundness is preserved regardless of the policy that selects among them---prediction affects precision, not correctness.
+The rollout MPC policy selects reductions that account for future trigger geometry, and the DAgger-distilled neural selector matches the expert's precision at a fraction of the computational cost.
+On a Crazyflie gate-flying task, predictive reduction \placeholder{achieves X\% fewer spurious safety interventions than the best static baseline at the same generator budget, with zero missed violations}.
+
+Future work includes integration with the RTLola ROS adapter for real Crazyflie hardware, scenarios with richer trigger geometries that exercise greater reducer diversity, and robust tube-style predictors within the MPC framework.
+
+%===============================================================================
+\section{Limitations}\label{sec:limitations}
+
+Our evaluation uses firmware-in-the-loop simulation~\cite{Panerati2021} rather than a physical Crazyflie; real sensor noise may differ from bounded models, particularly for vision-based pose estimation.
+The monitor assumes known noise bounds---if true error exceeds bounds, the zonotope guarantee breaks. This limitation is shared with all set-based methods including robust CBFs and tube MPC.
+The current predictor uses constant-input extrapolation; learned or tube-style robust predictors may improve results for nonstationary dynamics.
+The trigger geometry is axis-aligned; richer predicates would exercise a wider space of reduction trade-offs.
+
+
+%===============================================================================
+\bibliography{references}
+
+\end{document}

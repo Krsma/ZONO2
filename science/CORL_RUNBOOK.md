@@ -81,7 +81,7 @@ Use these paths for the current sidecar setup:
 ```bash
 export PZR_SAFE_CONTROL_GYM_ROOT=/home/vlkr/Faks/phd/ZONO2/external/safe-control-gym
 export PZR_SAFE_CONTROL_PYTHON=/home/vlkr/Faks/phd/ZONO2/external/miniconda3/envs/pzr-safe-control-fw/bin/python
-export PZR_SAFE_CONTROL_CONFIG=competition/level1.yaml
+export PZR_SAFE_CONTROL_CONFIG=competition/level0.yaml
 ```
 
 ## Preflight
@@ -156,15 +156,23 @@ pzr-run-corl \
   --calibration \
   --safe-control-gym-root "$PZR_SAFE_CONTROL_GYM_ROOT" \
   --safe-control-python "$PZR_SAFE_CONTROL_PYTHON" \
-  --out results/corl-calibration \
+  --safe-control-config competition/level0.yaml \
+  --safe-control-controller-mode firmware \
+  --calibration-seeds 10 \
+  --calibration-max-steps 1000 \
+  --out results/corl-level0-calibration-monitor-first-$(date +%Y%m%d-%H%M%S) \
   --force \
   --no-archive
 ```
 
 Inspect `calibration_summary.csv`, `calibration_recommendations.json`, and
-`failure_events.csv`. Avoid using regimes where nominal control fails, all
-bounded methods have saturated fallback duration, missed violations are
-nonzero, or reducer/soundness failures are recorded.
+`failure_events.csv`. Accept a calibration only when
+`paper_candidate_config_ids` is nonempty, nominal completion is at least 0.8,
+fallback is not saturated, the headline MPC has zero missed violations,
+bounded methods differ from Girard, and all budget, soundness, and reduction
+failure counters are zero. If no candidate exists, rerun with calibrated
+`--monitor-overlap` or `--generator-memory-decay` values; both knobs are
+recorded in `calibration_runs.csv` and `config.json`.
 
 ## Overnight Command
 
@@ -177,7 +185,7 @@ nohup pzr-run-corl \
   --profile overnight \
   --safe-control-gym-root "$PZR_SAFE_CONTROL_GYM_ROOT" \
   --safe-control-python "$PZR_SAFE_CONTROL_PYTHON" \
-  --safe-control-config competition/level1.yaml \
+  --safe-control-config competition/level0.yaml \
   --out results/corl-main-$(date +%Y%m%d) \
   --force \
   --method-set core \

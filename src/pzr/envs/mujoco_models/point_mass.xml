@@ -1,0 +1,42 @@
+<mujoco model="point_mass_arena">
+  <option timestep="0.02" gravity="0 0 0"/>
+
+  <worldbody>
+    <light diffuse="0.8 0.8 0.8" pos="0 0 4" dir="0 0 -1"/>
+    <geom name="floor" type="plane" size="4 4 0.1" rgba="0.9 0.9 0.9 1"/>
+
+    <!-- Arena boundary walls (invisible collision) -->
+    <geom name="wall_xp" type="box" pos="3.1 0 0.1" size="0.1 3.2 0.2" rgba="0.3 0.3 0.3 0.3"/>
+    <geom name="wall_xn" type="box" pos="-3.1 0 0.1" size="0.1 3.2 0.2" rgba="0.3 0.3 0.3 0.3"/>
+    <geom name="wall_yp" type="box" pos="0 3.1 0.1" size="3.2 0.1 0.2" rgba="0.3 0.3 0.3 0.3"/>
+    <geom name="wall_yn" type="box" pos="0 -3.1 0.1" size="3.2 0.1 0.2" rgba="0.3 0.3 0.3 0.3"/>
+
+    <!-- Point-mass agent -->
+    <body name="agent" pos="-2 -2 0.1">
+      <joint name="agent_x" type="slide" axis="1 0 0" damping="0.5"/>
+      <joint name="agent_y" type="slide" axis="0 1 0" damping="0.5"/>
+      <geom name="agent_geom" type="sphere" size="0.1" mass="1.0" rgba="0.2 0.5 1.0 1"/>
+    </body>
+
+    <!-- Obstacles -->
+    <body name="obstacle_0" pos="0.5 0.5 0.1">
+      <geom name="obs_0" type="sphere" size="0.4" rgba="1 0.2 0.2 0.6" contype="1" conaffinity="1"/>
+    </body>
+    <body name="obstacle_1" pos="-0.5 1.5 0.1">
+      <geom name="obs_1" type="sphere" size="0.3" rgba="1 0.2 0.2 0.6" contype="1" conaffinity="1"/>
+    </body>
+    <body name="obstacle_2" pos="1.5 -0.5 0.1">
+      <geom name="obs_2" type="sphere" size="0.35" rgba="1 0.2 0.2 0.6" contype="1" conaffinity="1"/>
+    </body>
+
+    <!-- Goal marker (visual only, no collision) -->
+    <body name="goal" pos="2 2 0.05">
+      <geom name="goal_geom" type="sphere" size="0.15" rgba="0.2 0.9 0.2 0.5" contype="0" conaffinity="0"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor joint="agent_x" gear="2" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor joint="agent_y" gear="2" ctrllimited="true" ctrlrange="-1 1"/>
+  </actuator>
+</mujoco>

@@ -1,0 +1,57 @@
+<mujoco model="planar_3link_arm">
+  <option timestep="0.02" gravity="0 0 -9.81"/>
+
+  <default>
+    <joint damping="1.0" armature="0.1"/>
+    <geom contype="0" conaffinity="0"/>
+  </default>
+
+  <worldbody>
+    <light diffuse="0.8 0.8 0.8" pos="0 0 3" dir="0 0 -1"/>
+    <geom name="floor" type="plane" size="2 2 0.1" rgba="0.9 0.9 0.9 1"/>
+
+    <!-- Arm base (fixed to world) -->
+    <body name="base" pos="0 0 0.1">
+      <geom name="base_geom" type="cylinder" size="0.04 0.02" rgba="0.3 0.3 0.3 1"/>
+
+      <!-- Link 1: 0.3m -->
+      <body name="link1" pos="0 0 0">
+        <joint name="joint1" type="hinge" axis="0 0 1" range="-3.14 3.14"/>
+        <geom name="link1_geom" type="capsule" fromto="0 0 0 0.3 0 0" size="0.02" mass="0.5" rgba="0.2 0.5 1.0 1"/>
+
+        <!-- Link 2: 0.25m -->
+        <body name="link2" pos="0.3 0 0">
+          <joint name="joint2" type="hinge" axis="0 0 1" range="-3.14 3.14"/>
+          <geom name="link2_geom" type="capsule" fromto="0 0 0 0.25 0 0" size="0.02" mass="0.4" rgba="0.2 0.7 0.4 1"/>
+
+          <!-- Link 3: 0.2m -->
+          <body name="link3" pos="0.25 0 0">
+            <joint name="joint3" type="hinge" axis="0 0 1" range="-3.14 3.14"/>
+            <geom name="link3_geom" type="capsule" fromto="0 0 0 0.2 0 0" size="0.015" mass="0.3" rgba="0.8 0.6 0.2 1"/>
+
+            <!-- End-effector marker -->
+            <body name="end_effector" pos="0.2 0 0">
+              <geom name="ee_geom" type="sphere" size="0.025" rgba="1 0.2 0.2 1" mass="0.05"/>
+            </body>
+          </body>
+        </body>
+      </body>
+    </body>
+
+    <!-- Forbidden zone (visual only) -->
+    <body name="forbidden_zone" pos="0.55 -0.15 0.05">
+      <geom name="zone_geom" type="box" size="0.15 0.15 0.05" rgba="1 0 0 0.25"/>
+    </body>
+
+    <!-- Target marker (visual only) -->
+    <body name="target" pos="0.55 0.1 0.05">
+      <geom name="target_geom" type="sphere" size="0.03" rgba="0.2 0.9 0.2 0.5"/>
+    </body>
+  </worldbody>
+
+  <actuator>
+    <motor joint="joint1" gear="2.0" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor joint="joint2" gear="1.5" ctrllimited="true" ctrlrange="-1 1"/>
+    <motor joint="joint3" gear="1.0" ctrllimited="true" ctrlrange="-1 1"/>
+  </actuator>
+</mujoco>

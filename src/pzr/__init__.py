@@ -1,10 +1,5 @@
-"""Predictive zonotope reduction for bounded-memory monitors."""
+"""Predictive Zonotope Reduction for State Estimation under Uncertainty."""
 
-from pzr.core.zonotope import (
-    GeneratorKind,
-    GeneratorMetadata,
-    GeneratorRequirement,
-    Zonotope,
-)
+from pzr.zonotope.core import Zonotope
 
-__all__ = ["GeneratorKind", "GeneratorMetadata", "GeneratorRequirement", "Zonotope"]
+__all__ = ["Zonotope"]

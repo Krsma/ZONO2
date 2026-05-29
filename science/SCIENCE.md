@@ -144,6 +144,25 @@ It exposes only the `MonitorAdapter` methods and trigger metadata. The
 controller can step, clone, and replace the zonotope component of the state,
 but it does not inspect equations or depend on monitor internals.
 
+The `iros` scenario is the CoRL headline benchmark. It tracks obstacle
+clearance, gate deviation, corridor deviation, altitude margins, speed, and
+safety margin for a Crazyflie quadrotor flying through gates under bounded
+sensor noise. It has one persistent calibration generator and fresh measurement
+generators per step. The `InterventionManager` closes the loop between
+monitor verdicts and controller fallback. Code: `pzr.robotics.iros`,
+`pzr.robotics.safe_control_gym`.
+
+The learning pipeline (`pzr.learning`) provides DAgger-based policy
+distillation against MPC experts. `pzr.learning.features` extracts 19 numeric
+decision features at each reduction point. `pzr.learning.dagger` implements
+the on-policy aggregation loop. `pzr.learning.policy` wraps trained
+checkpoints as `LearnedReductionPolicy`.
+
+The CoRL experiment suite (`pzr.experiments.corl_suite`) orchestrates
+preflight, calibration, DAgger training, and heldout evaluation for the IROS
+gate-flying task. It runs safe-control-gym through a sidecar subprocess
+interface (`pzr.robotics.safe_control_gym.SidecarSafeControlGymClient`).
+
 The `thermostat` scenario is the first non-robot family. It tracks room
 temperature, filtered temperature, heating/cooling effort, and comfort
 deviation from the setpoint. It has one persistent thermal-bias calibration
@@ -383,6 +402,158 @@ Useful sources for the paper trail:
 - RTLola framework overview, "Stream-based monitoring with RTLola,"
   Science of Computer Programming 253, 2026, DOI
   `10.1016/j.scico.2026.103495`.
+
+## CoRL Venue Framing
+
+The CoRL submission repositions the contribution from TACAS (algorithmic,
+formal-methods-first) to CoRL (operational, robot-deployment-first). The
+operational claim leads: predictive zonotope reduction reduces avoidable
+monitor-triggered fallback interventions on a quadrotor while preserving
+certified safety-relevant monitor state. The algorithmic claim (predictive
+abstraction control with policy-independent soundness) follows as the
+mechanism. See `paper/CORL_2026_PROJECT_NOTES.md` for venue strategy and
+`paper/related_work_foundation.md` for the trusted-boundary positioning.
+
+The trusted-boundary architecture unifies the positioning. In classical
+shielding, a policy proposes actions and a certified operator preserves system
+safety. In predictive safety filters, the operator preserves recursive
+feasibility. In PZR, the policy proposes a reduction action and the certified
+reducer preserves `Z subseteq rho(Z)` with `gen(rho(Z)) <= K`. Soundness is
+policy-independent: any selector over certified candidates inherits the
+contract, including learned selectors.
+
+## CoRL Monitor-First Benchmark
+
+The CoRL headline benchmark is monitor-first: certified bounded-memory
+uncertainty monitoring on the safe-control-gym IROS gate-flying Level0 task
+with a Crazyflie 2.x quadrotor, firmware-in-the-loop via pycffirmware. The
+drone navigates through gates while avoiding obstacles under bounded sensor
+noise. Level1 is a stress/appendix setting unless it independently passes the
+same calibration gates. Code: `pzr.robotics.iros`,
+`pzr.robotics.safe_control_gym`, `pzr.experiments.corl_suite`.
+
+The `IrosGateMonitor` tracks 7 derived streams from noisy bounded observations:
+
+- `obstacle_clearance`: minimum clearance to nearest obstacle
+- `gate_deviation`: position error relative to current gate center
+- `corridor_deviation`: lateral deviation from the gate-to-gate corridor
+- `altitude_low_margin`: margin above the altitude floor
+- `altitude_high_margin`: margin below the altitude ceiling
+- `speed`: scalar speed
+- `safety_margin`: combined clearance metric
+
+Five triggers fire on safety envelope violations:
+
+- `collision_risk`: safety_margin < 0
+- `obstacle_clearance_violation`: obstacle_clearance < min_obstacle_clearance
+- `altitude_low_violation`: altitude_low_margin < 0
+- `altitude_high_violation`: altitude_high_margin < 0
+- `speed_envelope_violation`: speed > speed_max
+
+The `NoisySensorModel` generates persistent calibration bias (sampled once
+per episode from bounded support) plus fresh bounded measurement noise per
+step, applied to all 6 state components (3 pose + 3 velocity). Default
+configuration: `sensor_bias_bound = 0.015`, `sensor_noise_bound = 0.03`.
+The monitor regime also exposes `monitor_overlap`, `stream_memory_decay`, and
+`generator_memory_decay` so calibration can avoid saturated trigger behavior
+without changing the certified reducer contract.
+
+The `InterventionManager` implements closed-loop fallback control. When any
+monitor trigger fires, it switches from nominal gate-following to a fallback
+hover command and holds for `fallback_hold_steps` (default 2). It classifies
+each intervention step as:
+
+- spurious: monitor triggered but oracle (true state) says safe
+- justified: both monitor and oracle triggered
+- missed: oracle triggered but monitor did not
+
+Oracle safety is defined by exact simulator state and obstacle/gate geometry,
+separate from the bounded noisy observations the monitor sees.
+
+## CoRL Experiment Infrastructure
+
+The CoRL suite (`pzr-run-corl` entry point) orchestrates preflight validation,
+optional calibration sweeps, DAgger training, and heldout evaluation. It runs
+safe-control-gym in a sidecar Python 3.8 conda environment while the main PZR
+package runs on Python 3.11+.
+
+Three profiles control scale:
+
+- `smoke`: 1 seed, 30 steps, horizon 2 — end-to-end test
+- `overnight`: 20 train seeds, 50 eval seeds, 1000 steps, horizon 6
+- `paper`: 40 train seeds, 100 eval seeds, 1000 steps, horizon 6
+
+Method sets:
+
+- `core`: box, girard, keep_calibration_aware, mpc_focused_fixed_girard,
+  mpc_wide_fixed_girard
+- `extended`: core + combastel, pca, keep_norm, mpc_focused_sequence
+
+Headline metrics: task_completed, gates_passed, collision_episode,
+constraint_violation_episode, fallback_activation_count,
+fallback_duration_fraction, spurious_intervention_rate,
+justified_intervention_rate, missed_violation_rate, time_to_target,
+mean_reducer_latency_ms.
+
+Quality gates enforce `budget_violation_count = 0`,
+`unsound_certificate_count = 0`, `reduction_failure_count = 0`.
+`analysis_notes.json` records a `paper_usable` flag; runs failing this gate
+should not produce headline evidence even if files completed.
+Calibration additionally requires nonempty `paper_candidate_config_ids`,
+nominal completion at least 0.8, non-saturated fallback, zero missed violations
+for the headline MPC method, and bounded methods that differ from Girard on
+intervention metrics.
+
+CoRL-specific outputs include `headline_table.csv`, `headline_table.md`,
+`headline_quality.md`, `intervention_timeseries.csv`, `monitor_timeseries.csv`,
+`failure_events.csv`, `selection_summary.csv`, `predicted_sequence_summary.csv`,
+and `analysis_notes.json`, alongside the standard benchmark outputs.
+
+## DAgger Learning Pipeline
+
+DAgger is secondary deployability evidence, not the headline controller claim.
+The DAgger loop (implemented in `pzr.experiments.corl_suite._run_dagger_training`)
+iterates:
+
+1. Roll out the current learned selector on training seeds in the closed-loop
+   Crazyflie environment.
+2. At each learner-induced over-budget state, query the MPC expert (default
+   `mpc_wide_fixed_girard`) for its certified reducer choice.
+3. Aggregate new decision-feature rows with previous rounds.
+4. Retrain a small MLP classifier on the accumulated feature rows using
+   `pzr.learning.distill_cli.train_policy`.
+5. Repeat for `dagger_iterations` rounds (default 3 for overnight).
+
+Decision features (19 numeric features from `pzr.learning.features`): generator
+count, state dimension, budget headroom, zonotope order, generator-count growth
+rate, largest and median generator norms, trigger proximity metrics, dominant
+stream directions, previous reducer choice, success/failure history, and
+horizon count estimate.
+
+The trusted boundary is preserved: the learned policy only ranks candidate
+reducers from a fixed certified set. The chosen reducer still produces a
+certificate `Z subseteq Z'`, `gen(Z') <= K`. If the learned policy picks a
+suboptimal reducer, precision degrades but soundness is preserved.
+
+A label-diversity gate checks that training data contains at least 3 distinct
+reducer labels and no single label exceeds 90% of rows. If this gate fails, the
+learned selector is excluded from headline results. The gate catches degenerate
+scenarios where the expert always selects the same reducer, making the learning
+problem trivial.
+
+## CoRL Notation Conventions
+
+Paper and SCIENCE.md use consistent notation:
+
+- `Z` for zonotope (`c + G[-1,1]^m`)
+- `c` for center, `G` for generator matrix, `m` for generator count, `n` for
+  state dimension
+- `rho` (or `rho_a`) for a certified reducer applied with action `a`
+- `pi` for the reduction policy
+- `phi` for trigger predicates
+- `K` for the generator budget
+- `h` for the prediction horizon
+- `S_t` for the monitor state at step `t`
 
 ## Current Scope
 

@@ -4,8 +4,8 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "predictive-zonotope-reduction"
-version = "0.1.0"
-description = "Predictive zonotope reduction experiments for bounded-memory runtime monitoring."
+version = "0.2.0"
+description = "Dynamic zonotope reduction for state estimation under uncertainty."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
@@ -13,25 +13,24 @@ dependencies = [
     "pandas>=2.0",
     "scipy>=1.10",
     "matplotlib>=3.7",
+    "pyyaml>=6.0",
+    "tqdm>=4.65",
 ]
-
-[project.scripts]
-pzr-benchmark = "pzr.experiments.cli:main"
-pzr-paper-figures = "pzr.experiments.paper_figures:main"
-pzr-run-experiments = "pzr.experiments.suite:main"
-pzr-run-corl = "pzr.experiments.corl_suite:main"
-pzr-train-corl-controller = "pzr.experiments.corl_learning:main"
-pzr-distill-policy = "pzr.learning.distill_cli:main"
 
 [project.optional-dependencies]
 learning = [
     "torch>=2.0",
-    "gymnasium>=1,<2",
-    "stable-baselines3>=2.7,<3",
+]
+sim = [
+    "mujoco>=3.0",
+    "safety-gymnasium>=1.0",
 ]
 dev = [
     "pytest>=8",
 ]
+
+[project.scripts]
+pzr-benchmark = "pzr.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

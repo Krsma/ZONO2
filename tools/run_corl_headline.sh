@@ -8,7 +8,7 @@ LOG_PATH="$ROOT_DIR/results/logs/$RUN_ID.log"
 
 export PZR_SAFE_CONTROL_GYM_ROOT="${PZR_SAFE_CONTROL_GYM_ROOT:-$ROOT_DIR/external/safe-control-gym}"
 export PZR_SAFE_CONTROL_PYTHON="${PZR_SAFE_CONTROL_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-safe-control-fw/bin/python}"
-export PZR_SAFE_CONTROL_CONFIG="${PZR_SAFE_CONTROL_CONFIG:-competition/level1.yaml}"
+export PZR_SAFE_CONTROL_CONFIG="${PZR_SAFE_CONTROL_CONFIG:-competition/level0.yaml}"
 PZR_CORL_PROFILE="${PZR_CORL_PROFILE:-overnight}"
 PZR_CORL_METHOD_SET="${PZR_CORL_METHOD_SET:-core}"
 PZR_CORL_LEARNED_MODE="${PZR_CORL_LEARNED_MODE:-none}"
@@ -20,9 +20,18 @@ PZR_CORL_EVAL_SEEDS="${PZR_CORL_EVAL_SEEDS:-50}"
 PZR_CORL_DAGGER_ITERATIONS="${PZR_CORL_DAGGER_ITERATIONS:-3}"
 PZR_CORL_DAGGER_EXPERT="${PZR_CORL_DAGGER_EXPERT:-mpc_wide_fixed_girard}"
 PZR_CORL_BOOTSTRAP_SAMPLES="${PZR_CORL_BOOTSTRAP_SAMPLES:-5000}"
+PZR_CORL_MONITOR_OVERLAP="${PZR_CORL_MONITOR_OVERLAP:-}"
+PZR_CORL_GENERATOR_MEMORY_DECAY="${PZR_CORL_GENERATOR_MEMORY_DECAY:-}"
 FORCE_ARGS=()
 if [[ "${PZR_CORL_FORCE:-0}" == "1" ]]; then
   FORCE_ARGS=(--force)
+fi
+MONITOR_ARGS=()
+if [[ -n "$PZR_CORL_MONITOR_OVERLAP" ]]; then
+  MONITOR_ARGS+=(--monitor-overlap "$PZR_CORL_MONITOR_OVERLAP")
+fi
+if [[ -n "$PZR_CORL_GENERATOR_MEMORY_DECAY" ]]; then
+  MONITOR_ARGS+=(--generator-memory-decay "$PZR_CORL_GENERATOR_MEMORY_DECAY")
 fi
 
 mkdir -p "$ROOT_DIR/results/logs"
@@ -55,6 +64,7 @@ mkdir -p "$ROOT_DIR/results/logs"
     --budget "$PZR_CORL_BUDGET" \
     --horizon "$PZR_CORL_HORIZON" \
     --max-steps "$PZR_CORL_MAX_STEPS" \
+    "${MONITOR_ARGS[@]}" \
     --train-seeds "$PZR_CORL_TRAIN_SEEDS" \
     --eval-seeds "$PZR_CORL_EVAL_SEEDS" \
     --dagger-iterations "$PZR_CORL_DAGGER_ITERATIONS" \
