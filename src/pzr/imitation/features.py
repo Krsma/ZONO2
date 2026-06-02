@@ -6,11 +6,14 @@ All features must be finite (no NaN/inf).
 
 from __future__ import annotations
 
+from typing import Callable
+
 import numpy as np
 from numpy.typing import NDArray
 
 from pzr.monitoring.base import MonitorState, TriggerSpec
 from pzr.monitoring.triggers import trigger_straddles_threshold
+from pzr.zonotope.core import Zonotope
 
 FEATURE_NAMES = (
     "generator_count",
@@ -50,6 +53,7 @@ def extract_features(
     state: MonitorState,
     budget: int,
     triggers: tuple[TriggerSpec, ...] = (),
+    trigger_zonotope: Callable[[MonitorState], Zonotope] | Zonotope | None = None,
 ) -> NDArray[np.float64]:
     """Extract feature vector for the learned policy."""
     z = state.zonotope
@@ -65,10 +69,17 @@ def extract_features(
     trigger_width_mean = 0.0
     trigger_straddle_count = 0.0
     if triggers:
-        lower, upper = z.interval_bounds()
+        if callable(trigger_zonotope):
+            trigger_z = trigger_zonotope(state)
+        elif trigger_zonotope is not None:
+            trigger_z = trigger_zonotope
+        else:
+            trigger_z = z
+        trigger_widths = trigger_z.widths()
+        lower, upper = trigger_z.interval_bounds()
         t_widths = []
         for t in triggers:
-            w = float(widths[t.state_index])
+            w = float(trigger_widths[t.state_index])
             t_widths.append(w)
             if trigger_straddles_threshold(float(lower[t.state_index]), float(upper[t.state_index]), t):
                 trigger_straddle_count += 1

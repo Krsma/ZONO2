@@ -8,11 +8,13 @@ over a finite horizon.
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Callable
 
 import numpy as np
 
 from pzr.monitoring.base import MonitorState, TriggerSpec, Verdict
 from pzr.monitoring.triggers import trigger_straddles_threshold
+from pzr.zonotope.core import Zonotope
 
 
 @dataclass(frozen=True)
@@ -29,15 +31,17 @@ class WeightedZonotopeCost:
 
     weights: CostWeights = CostWeights()
     triggers: tuple[TriggerSpec, ...] = ()
+    trigger_zonotope: Callable[[MonitorState], Zonotope] | None = None
 
     def __call__(
         self,
         state: MonitorState,
         verdicts: tuple[Verdict, ...] | None = None,
     ) -> float:
-        z = state.zonotope
-        widths = z.widths()
-        total = self.weights.generator_count * z.generator_count
+        state_z = state.zonotope
+        trigger_z = self.trigger_zonotope(state) if self.trigger_zonotope else state_z
+        widths = trigger_z.widths()
+        total = self.weights.generator_count * state_z.generator_count
         total += self.weights.total_width * float(np.sum(widths))
 
         triggers = self.triggers
@@ -45,7 +49,7 @@ class WeightedZonotopeCost:
             triggers = tuple(v.trigger for v in verdicts)
 
         if triggers:
-            lower, upper = z.interval_bounds()
+            lower, upper = trigger_z.interval_bounds()
             for trigger in triggers:
                 w = float(widths[trigger.state_index])
                 total += self.weights.trigger_width * w

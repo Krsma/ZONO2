@@ -77,6 +77,9 @@ class OmniRobotMonitor:
     def replace_zonotope(self, state: MonitorState, zonotope: Zonotope) -> MonitorState:
         return state.with_zonotope(zonotope)
 
+    def trigger_zonotope(self, state: MonitorState) -> Zonotope:
+        return state.zonotope
+
     def step(self, state: MonitorState, measurement: OmniRobotMeasurement) -> MonitorResult:
         old_z = state.zonotope
         old_c = old_z.center

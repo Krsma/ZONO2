@@ -17,6 +17,7 @@ from pzr.experiments.runner import (
     ReductionPolicy,
     RunResult,
     StaticReductionPolicy,
+    compute_ground_truth,
     run_single,
 )
 from pzr.imitation.dataset import build_dataset
@@ -36,7 +37,7 @@ class LearnedReductionPolicy:
     """Wraps a learned policy as a ReductionPolicy."""
 
     learned: LearnedPolicy
-    candidates: dict[str, Reducer]
+    candidates: dict[str, Reducer | ProtectedReducer]
     _name: str = "learned"
 
     @property
@@ -50,11 +51,17 @@ class LearnedReductionPolicy:
         history: Sequence,
         budget: int,
     ) -> ReductionDecision:
-        features = extract_features(state, budget, monitor.triggers)
-        result = self.learned.select_reducer(features, self.candidates, state.zonotope, budget)
+        features = extract_features(
+            state, budget, monitor.triggers,
+            trigger_zonotope=monitor.trigger_zonotope,
+        )
+        cal = state.calibration_indices
+        result = self.learned.select_reducer(
+            features, self.candidates, state.zonotope, budget,
+            protected_indices=cal,
+        )
         if result is None:
             fallback = ProtectedReducer(base=BoxReducer())
-            cal = state.calibration_indices
             red = fallback.reduce(state.zonotope, budget, protected_indices=cal)
             new_cal = tuple(range(len(cal)))
             return ReductionDecision(
@@ -63,7 +70,6 @@ class LearnedReductionPolicy:
                 reducer_name="box_fallback",
             )
         name, red_result = result
-        cal = state.calibration_indices
         new_cal = tuple(range(len(cal)))
         return ReductionDecision(
             state=state.with_zonotope(red_result.reduced, calibration_indices=new_cal),
@@ -109,6 +115,7 @@ def train_and_evaluate_dagger(
     epochs_per_iteration: int = 100,
     hidden_sizes: tuple[int, ...] = (64, 64),
     seed: int = 42,
+    candidate_names: tuple[str, ...] | None = None,
     show_progress: bool = True,
 ) -> DAggerEvalResult:
     """Full DAgger pipeline: collect → train → evaluate."""
@@ -132,7 +139,7 @@ def train_and_evaluate_dagger(
             if policy is None:
                 run_single(monitor, trace, expert_policy, budget, ep_seed, trace_collector=collector)
             else:
-                candidates = {name: ProtectedReducer(base=r) for name, r in ALL_REDUCERS.items() if name != "identity"}
+                candidates = _candidate_reducers(candidate_names)
                 learned_policy = LearnedReductionPolicy(policy, candidates, _name="dagger_learner")
                 state = monitor.initial_state()
                 history: list = []
@@ -142,7 +149,10 @@ def train_and_evaluate_dagger(
                     history.append(measurement)
                     if state.zonotope.generator_count > budget:
                         expert_decision = expert_policy.decide(monitor, state, history, budget)
-                        features = extract_features(state, budget, monitor.triggers)
+                        features = extract_features(
+                            state, budget, monitor.triggers,
+                            trigger_zonotope=monitor.trigger_zonotope,
+                        )
                         collector.record(ReductionTrace(
                             features=features,
                             action=expert_decision.reducer_name,
@@ -176,7 +186,7 @@ def train_and_evaluate_dagger(
     if policy is None:
         raise ValueError("DAgger produced no policy")
 
-    candidates = {name: ProtectedReducer(base=r) for name, r in ALL_REDUCERS.items() if name != "identity"}
+    candidates = _candidate_reducers(candidate_names)
     learned_pol = LearnedReductionPolicy(policy, candidates, _name="learned_dagger")
 
     eval_results: list[RunResult] = []
@@ -187,7 +197,8 @@ def train_and_evaluate_dagger(
     )
     for ep_seed in eval_iter:
         trace = trace_fn(length, ep_seed)
-        r = run_single(monitor, trace, learned_pol, budget, ep_seed)
+        gt = compute_ground_truth(monitor, trace)
+        r = run_single(monitor, trace, learned_pol, budget, ep_seed, ground_truth=gt)
         eval_results.append(r)
         if r.total_reductions > 0:
             inference_times.append(r.total_time_ms / r.total_reductions)
@@ -202,3 +213,14 @@ def train_and_evaluate_dagger(
         eval_results=eval_results,
         inference_time_ms=avg_inference,
     )
+
+
+def _candidate_reducers(
+    candidate_names: tuple[str, ...] | None,
+) -> dict[str, Reducer | ProtectedReducer]:
+    names = candidate_names or tuple(name for name in ALL_REDUCERS if name != "identity")
+    return {
+        name: ProtectedReducer(base=ALL_REDUCERS[name])
+        for name in names
+        if name != "identity"
+    }

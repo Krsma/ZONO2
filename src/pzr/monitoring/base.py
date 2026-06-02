@@ -83,3 +83,12 @@ class MonitorAdapter(Protocol[InputT]):
 
     @property
     def num_calibration_generators(self) -> int: ...
+
+    def trigger_zonotope(self, state: MonitorState) -> Zonotope:
+        """Zonotope on which triggers are evaluated.
+
+        For most monitors this is `state.zonotope` itself. Monitors like
+        RobotArmMonitor return a derived projection (Cartesian end-effector
+        position via FK Jacobian) so triggers see the right space.
+        """
+        ...

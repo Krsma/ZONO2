@@ -82,6 +82,9 @@ class PointMassMonitor:
     def replace_zonotope(self, state: MonitorState, zonotope: Zonotope) -> MonitorState:
         return state.with_zonotope(zonotope)
 
+    def trigger_zonotope(self, state: MonitorState) -> Zonotope:
+        return state.zonotope
+
     def step(self, state: MonitorState, measurement: PointMassMeasurement) -> MonitorResult:
         old_z = state.zonotope
         old_g = old_z.generators

@@ -17,10 +17,16 @@ from pzr.imitation.traces import ReductionTrace, TraceCollector
 from pzr.monitoring.base import MonitorAdapter, MonitorState
 from pzr.monitoring.triggers import evaluate_triggers
 from pzr.mpc.objectives import CostWeights, WeightedZonotopeCost
-from pzr.mpc.policies import MPCPolicy, ReductionDecision, RolloutMPCPolicy
+from pzr.mpc.policies import (
+    BeamMPCPolicy,
+    MPCPolicy,
+    PairRolloutMPCPolicy,
+    ReductionDecision,
+    RolloutMPCPolicy,
+)
 from pzr.mpc.prediction import ConstantPredictor
 from pzr.utils.timing import timed
-from pzr.zonotope.protected import ProtectedReducer
+from pzr.zonotope.protected import ProtectedReducer, reduce_with_protection
 from pzr.zonotope.reduction import Reducer, ReductionResult, _cert
 
 InputT = TypeVar("InputT")
@@ -59,10 +65,10 @@ class StaticReductionPolicy:
         budget: int,
     ) -> ReductionDecision:
         cal = state.calibration_indices
-        if isinstance(self.reducer, ProtectedReducer) and cal:
-            result = self.reducer.reduce(state.zonotope, budget, protected_indices=cal)
-        else:
-            result = self.reducer.reduce(state.zonotope, budget)
+        result = reduce_with_protection(
+            self.reducer, state.zonotope, budget,
+            protected_indices=cal,
+        )
         new_cal = tuple(range(len(cal))) if cal else ()
         return ReductionDecision(
             state=state.with_zonotope(result.reduced, calibration_indices=new_cal),
@@ -75,7 +81,7 @@ class StaticReductionPolicy:
 class MPCReductionPolicy:
     """Wrap an MPC or RolloutMPC policy with a predictor."""
 
-    policy: MPCPolicy | RolloutMPCPolicy
+    policy: MPCPolicy | BeamMPCPolicy | RolloutMPCPolicy | PairRolloutMPCPolicy
     _name: str = ""
     horizon: int = 4
 
@@ -104,6 +110,16 @@ class MPCReductionPolicy:
         )
 
 
+@dataclass(frozen=True)
+class GroundTruth:
+    """Per-step exact (unreduced) trigger-zonotope bounds and verdicts."""
+
+    lower: np.ndarray
+    upper: np.ndarray
+    width_sum: float
+    verdicts: dict[str, str]
+
+
 @dataclass
 class StepRecord:
     seed: int
@@ -115,6 +131,9 @@ class StepRecord:
     trigger_width_sum: float
     verdicts: dict[str, str]
     reduction_time_ms: float
+    approx_error_sum: float = 0.0
+    false_positive: bool = False
+    exact_trigger_width_sum: float = 0.0
 
 
 @dataclass
@@ -128,6 +147,38 @@ class RunResult:
     unsound_certificates: int = 0
 
 
+def _trigger_metrics(
+    monitor: MonitorAdapter,
+    state: MonitorState,
+) -> tuple[np.ndarray, np.ndarray, float, dict[str, str]]:
+    """Return (lower, upper, width_sum, verdict_dict) for the trigger zonotope."""
+    tz = monitor.trigger_zonotope(state)
+    lower, upper = tz.interval_bounds()
+    verdicts = evaluate_triggers(tz, monitor.triggers)
+    verdict_dict = {v.trigger.name: v.status for v in verdicts}
+    width_sum = sum(
+        float(upper[t.state_index] - lower[t.state_index]) for t in monitor.triggers
+    )
+    return lower, upper, width_sum, verdict_dict
+
+
+def compute_ground_truth(
+    monitor: MonitorAdapter,
+    trace: Sequence,
+) -> list[GroundTruth]:
+    """Run the monitor with no reduction; record exact trigger-zonotope bounds per step."""
+    state = monitor.initial_state()
+    out: list[GroundTruth] = []
+    for measurement in trace:
+        result = monitor.step(state, measurement)
+        state = result.state
+        lower, upper, width_sum, verdict_dict = _trigger_metrics(monitor, state)
+        out.append(GroundTruth(
+            lower=lower, upper=upper, width_sum=width_sum, verdicts=verdict_dict,
+        ))
+    return out
+
+
 def run_single(
     monitor: MonitorAdapter,
     trace: Sequence,
@@ -135,6 +186,7 @@ def run_single(
     budget: int,
     seed: int,
     trace_collector: TraceCollector | None = None,
+    ground_truth: Sequence[GroundTruth] | None = None,
 ) -> RunResult:
     """Run a single policy on a single trace."""
     state = monitor.initial_state()
@@ -155,6 +207,12 @@ def run_single(
         reduction_time = 0.0
 
         if state.zonotope.generator_count > budget:
+            decision_features = None
+            if trace_collector is not None:
+                decision_features = extract_features(
+                    state, budget, monitor.triggers,
+                    trigger_zonotope=monitor.trigger_zonotope,
+                )
             with timed() as t:
                 decision = policy.decide(monitor, state, history, budget)
 
@@ -171,21 +229,31 @@ def run_single(
                 unsound_certs += 1
 
             if trace_collector is not None:
-                features = extract_features(state, budget, monitor.triggers)
                 trace_collector.record(ReductionTrace(
-                    features=features,
+                    features=decision_features,
                     action=reducer_used,
                     cost=decision.predicted_cost,
                     step=i,
                     episode_id=seed,
                 ))
 
-        verdicts = evaluate_triggers(state.zonotope, monitor.triggers)
-        verdict_dict = {v.trigger.name: v.status for v in verdicts}
-        widths = state.zonotope.widths()
-        trigger_width_sum = sum(
-            float(widths[t.state_index]) for t in monitor.triggers
-        )
+        lower, upper, width_sum, verdict_dict = _trigger_metrics(monitor, state)
+
+        approx_error_sum = 0.0
+        false_positive = False
+        exact_width_sum = 0.0
+        if ground_truth is not None:
+            gt = ground_truth[i]
+            approx_error_sum = float(sum(
+                abs(lower[t.state_index] - gt.lower[t.state_index])
+                + abs(upper[t.state_index] - gt.upper[t.state_index])
+                for t in monitor.triggers
+            ))
+            exact_width_sum = gt.width_sum
+            for trigger in monitor.triggers:
+                if verdict_dict[trigger.name] == "violation" and gt.verdicts[trigger.name] == "safe":
+                    false_positive = True
+                    break
 
         steps.append(StepRecord(
             seed=seed,
@@ -194,9 +262,12 @@ def run_single(
             generator_count=state.zonotope.generator_count,
             reduced=reduced,
             reducer_used=reducer_used,
-            trigger_width_sum=trigger_width_sum,
+            trigger_width_sum=width_sum,
             verdicts=verdict_dict,
             reduction_time_ms=reduction_time,
+            approx_error_sum=approx_error_sum,
+            false_positive=false_positive,
+            exact_trigger_width_sum=exact_width_sum,
         ))
 
     return RunResult(
@@ -223,6 +294,9 @@ def results_to_dataframe(results: list[RunResult]) -> pd.DataFrame:
                 "reduced": s.reduced,
                 "reducer_used": s.reducer_used,
                 "trigger_width_sum": s.trigger_width_sum,
+                "exact_trigger_width_sum": s.exact_trigger_width_sum,
+                "approx_error_sum": s.approx_error_sum,
+                "false_positive": s.false_positive,
                 "reduction_time_ms": s.reduction_time_ms,
             }
             row.update(s.verdicts)
@@ -236,6 +310,8 @@ def summarize_results(results: list[RunResult]) -> pd.DataFrame:
     for r in results:
         trigger_widths = [s.trigger_width_sum for s in r.steps]
         gen_counts = [s.generator_count for s in r.steps]
+        approx_errors = [s.approx_error_sum for s in r.steps]
+        fps = [s.false_positive for s in r.steps]
         rows.append({
             "method": r.method,
             "seed": r.seed,
@@ -247,5 +323,9 @@ def summarize_results(results: list[RunResult]) -> pd.DataFrame:
             "total_time_ms": r.total_time_ms,
             "budget_violations": r.budget_violations,
             "unsound_certificates": r.unsound_certificates,
+            "mean_approx_error": float(np.mean(approx_errors)),
+            "max_approx_error": float(np.max(approx_errors)),
+            "abs_error_range": float(np.max(approx_errors) - np.min(approx_errors)),
+            "false_positive_rate": float(np.mean(fps)),
         })
     return pd.DataFrame(rows)

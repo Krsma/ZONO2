@@ -13,6 +13,7 @@ dependencies = [
     "pandas>=2.0",
     "scipy>=1.10",
     "matplotlib>=3.7",
+    "pillow>=10",
     "pyyaml>=6.0",
     "tqdm>=4.65",
 ]
@@ -31,6 +32,7 @@ dev = [
 
 [project.scripts]
 pzr-benchmark = "pzr.cli:main"
+pzr-robot-arm-animation = "pzr.experiments.robot_arm_animation:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

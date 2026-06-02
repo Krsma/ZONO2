@@ -11,10 +11,14 @@ from pzr.envs.robot_arm import (
     forward_kinematics,
 )
 from pzr.envs.robot_arm_monitor import (
+    JOINT_COUPLING_BASIS,
     RobotArmMeasurement,
     RobotArmMonitor,
     generate_robot_arm_trace,
+    generate_robot_arm_trace_records,
 )
+from pzr.experiments.benchmark import default_methods
+from pzr.experiments.runner import StaticReductionPolicy
 from pzr.envs.base import NoisySensorModel
 from pzr.zonotope.core import Zonotope
 
@@ -99,6 +103,19 @@ class TestRobotArmMonitor:
         assert state.zonotope.generator_count == NUM_JOINTS
         assert len(state.calibration_indices) == NUM_JOINTS
 
+    def test_coupled_basis_contains_independent_error_box(self):
+        inv_row_sums = np.sum(np.abs(np.linalg.inv(JOINT_COUPLING_BASIS)), axis=1)
+        assert np.max(inv_row_sums) <= 1.0 + 1e-12
+
+    def test_initial_calibration_generators_are_coupled(self):
+        mon = self._make_monitor()
+        state = mon.initial_state()
+        angle_block = state.zonotope.generators[:NUM_JOINTS, :]
+        velocity_block = state.zonotope.generators[NUM_JOINTS:, :]
+
+        assert np.count_nonzero(angle_block - np.diag(np.diag(angle_block))) > 0
+        assert np.count_nonzero(velocity_block - np.diag(np.diag(velocity_block))) > 0
+
     def test_step_grows_generators(self):
         mon = self._make_monitor()
         state = mon.initial_state()
@@ -152,6 +169,44 @@ class TestRobotArmMonitor:
             cloned.zonotope.generators, result.state.zonotope.generators,
         )
 
+    def test_trigger_zonotope_is_cartesian(self):
+        """RobotArmMonitor.trigger_zonotope returns a 2D Cartesian zonotope."""
+        mon = self._make_monitor()
+        state = mon.initial_state()
+        m = RobotArmMeasurement(0.0, (0.1, 0.2, -0.1), (0.0, 0.0, 0.0))
+        result = mon.step(state, m)
+        tz = mon.trigger_zonotope(result.state)
+        assert tz.dimension == 2
+        # Triggers index into 0=EE_X, 1=EE_Y of the trigger zonotope
+        expected_ee = forward_kinematics(np.array([0.1, 0.2, -0.1]))
+        np.testing.assert_allclose(tz.center, expected_ee, atol=1e-10)
+
+    def test_static_reducers_have_distinct_cartesian_widths(self):
+        mon = self._make_monitor()
+        state = mon.initial_state()
+        measurements = (
+            RobotArmMeasurement(0.0, (0.2, -0.4, 0.3), (0.0, 0.0, 0.0)),
+            RobotArmMeasurement(1.0, (0.25, -0.35, 0.35), (0.02, -0.01, 0.01)),
+            RobotArmMeasurement(2.0, (0.3, -0.3, 0.4), (0.02, 0.0, 0.0)),
+        )
+        for measurement in measurements:
+            state = mon.step(state, measurement).state
+
+        widths: dict[str, float] = {}
+        for method in default_methods(mon, budget=10, horizon=2):
+            if not isinstance(method.policy, StaticReductionPolicy):
+                continue
+            decision = method.policy.decide(mon, state, (), budget=10)
+            tz = mon.trigger_zonotope(decision.state)
+            lower, upper = tz.interval_bounds()
+            widths[method.name] = sum(
+                float(upper[t.state_index] - lower[t.state_index])
+                for t in mon.triggers
+            )
+
+        rounded_widths = {round(width, 10) for width in widths.values()}
+        assert len(rounded_widths) > 1
+
 
 @pytest.mark.skipif(
     not _has_mujoco(), reason="MuJoCo not available",
@@ -166,6 +221,24 @@ class TestTraceGeneration:
         for m in trace:
             assert np.all(np.isfinite(m.joint_angles))
             assert np.all(np.isfinite(m.joint_velocities))
+
+    def test_trace_records_match_measurement_trace(self):
+        measurements = generate_robot_arm_trace(12, seed=2)
+        records = generate_robot_arm_trace_records(12, seed=2)
+        assert len(records) == len(measurements)
+        for record, measurement in zip(records, measurements):
+            assert record.time == measurement.time
+            assert record.measurement.time == measurement.time
+            np.testing.assert_allclose(record.measurement.joint_angles, measurement.joint_angles)
+            np.testing.assert_allclose(
+                record.measurement.joint_velocities,
+                measurement.joint_velocities,
+            )
+            assert record.true_state.shape == (STATE_DIM,)
+            assert record.target_angles.shape == (NUM_JOINTS,)
+            assert record.action.shape == (NUM_JOINTS,)
+            assert record.ee_pos.shape == (2,)
+            assert np.all(np.isfinite(record.true_state))
 
     def test_monitor_processes_trace(self):
         mon = RobotArmMonitor(

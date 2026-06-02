@@ -37,6 +37,10 @@ def aggregate_summary(
             "mean_generator_count",
             "total_reductions",
             "total_time_ms",
+            "mean_approx_error",
+            "max_approx_error",
+            "abs_error_range",
+            "false_positive_rate",
         ]
     rows = []
     for method, group in summary_df.groupby("method"):

@@ -6,6 +6,8 @@ a single pipeline that produces paper-ready results.
 
 from __future__ import annotations
 
+import multiprocessing as mp
+from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass
 from pathlib import Path
 from typing import Callable, Sequence
@@ -20,6 +22,7 @@ from pzr.experiments.runner import (
     ReductionPolicy,
     RunResult,
     StaticReductionPolicy,
+    compute_ground_truth,
     results_to_dataframe,
     run_single,
     summarize_results,
@@ -27,7 +30,12 @@ from pzr.experiments.runner import (
 from pzr.imitation.traces import TraceCollector
 from pzr.monitoring.base import MonitorAdapter
 from pzr.mpc.objectives import CostWeights, WeightedZonotopeCost
-from pzr.mpc.policies import MPCPolicy, RolloutMPCPolicy
+from pzr.mpc.policies import (
+    BeamMPCPolicy,
+    MPCPolicy,
+    PairRolloutMPCPolicy,
+    RolloutMPCPolicy,
+)
 from pzr.systems.omni_robot import OmniRobotMonitor, generate_omni_robot_trace
 from pzr.systems.simple_robot import SimpleRobotMonitor, generate_simple_robot_trace
 from pzr.utils.serialization import save_json
@@ -54,6 +62,18 @@ from pzr.zonotope.reduction import (
     MethAReducer,
     PcaReducer,
     ScottReducer,
+)
+
+TOP3_REDUCER_NAMES = ("girard", "methA", "scott")
+STANDARD_METHOD_NAMES = (
+    "girard",
+    "combastel",
+    "pca",
+    "methA",
+    "scott",
+    "box",
+    "mpc_rollout",
+    "mpc_sequence",
 )
 
 
@@ -129,9 +149,14 @@ def default_methods(
     budget: int,
     horizon: int,
     cost_weights: CostWeights = CostWeights(),
+    beam_width: int = 4,
 ) -> list[MethodSpec]:
     """Build the standard method set: static baselines + MPC variants."""
-    cost = WeightedZonotopeCost(weights=cost_weights, triggers=monitor.triggers)
+    cost = WeightedZonotopeCost(
+        weights=cost_weights,
+        triggers=monitor.triggers,
+        trigger_zonotope=monitor.trigger_zonotope,
+    )
 
     static_methods = [
         ("girard", GirardReducer()),
@@ -154,6 +179,11 @@ def default_methods(
     mpc_candidates = tuple(
         ProtectedReducer(base=r) for _, r in static_methods[:5]
     )
+    reducer_by_name = {name: reducer for name, reducer in static_methods}
+    top3_candidates = tuple(
+        ProtectedReducer(base=reducer_by_name[name]) for name in TOP3_REDUCER_NAMES
+    )
+    fallback = ProtectedReducer(base=BoxReducer())
 
     mpc_rollout = RolloutMPCPolicy(
         candidates=mpc_candidates,
@@ -161,11 +191,43 @@ def default_methods(
         budget=budget,
         horizon=horizon,
         cost=cost,
-        fallback=ProtectedReducer(base=BoxReducer()),
+        fallback=fallback,
     )
     methods.append(MethodSpec(
         name="mpc_rollout",
         policy=MPCReductionPolicy(policy=mpc_rollout, _name="mpc_rollout", horizon=horizon),
+    ))
+
+    for name, base in (
+        ("mpc_rollout_methA", MethAReducer()),
+        ("mpc_rollout_scott", ScottReducer()),
+    ):
+        policy = RolloutMPCPolicy(
+            candidates=top3_candidates,
+            base_reducer=ProtectedReducer(base=base),
+            budget=budget,
+            horizon=horizon,
+            cost=cost,
+            fallback=fallback,
+        )
+        methods.append(MethodSpec(
+            name=name,
+            policy=MPCReductionPolicy(policy=policy, _name=name, horizon=horizon),
+        ))
+
+    mpc_pair_rollout = PairRolloutMPCPolicy(
+        first_candidates=top3_candidates,
+        base_candidates=top3_candidates,
+        budget=budget,
+        horizon=horizon,
+        cost=cost,
+        fallback=fallback,
+    )
+    methods.append(MethodSpec(
+        name="mpc_pair_rollout3",
+        policy=MPCReductionPolicy(
+            policy=mpc_pair_rollout, _name="mpc_pair_rollout3", horizon=horizon,
+        ),
     ))
 
     mpc_sequence = MPCPolicy(
@@ -173,11 +235,38 @@ def default_methods(
         budget=budget,
         horizon=horizon,
         cost=cost,
-        fallback=ProtectedReducer(base=BoxReducer()),
+        fallback=fallback,
     )
     methods.append(MethodSpec(
         name="mpc_sequence",
         policy=MPCReductionPolicy(policy=mpc_sequence, _name="mpc_sequence", horizon=horizon),
+    ))
+
+    mpc_sequence3 = MPCPolicy(
+        candidates=top3_candidates,
+        budget=budget,
+        horizon=horizon,
+        cost=cost,
+        fallback=fallback,
+    )
+    methods.append(MethodSpec(
+        name="mpc_sequence3",
+        policy=MPCReductionPolicy(
+            policy=mpc_sequence3, _name="mpc_sequence3", horizon=horizon,
+        ),
+    ))
+
+    mpc_beam3 = BeamMPCPolicy(
+        candidates=top3_candidates,
+        budget=budget,
+        horizon=horizon,
+        beam_width=beam_width,
+        cost=cost,
+        fallback=fallback,
+    )
+    methods.append(MethodSpec(
+        name="mpc_beam3",
+        policy=MPCReductionPolicy(policy=mpc_beam3, _name="mpc_beam3", horizon=horizon),
     ))
 
     return methods
@@ -189,8 +278,108 @@ def _filter_methods(methods: list[MethodSpec], method_set: str) -> list[MethodSp
     if method_set == "static":
         return [m for m in methods if not m.name.startswith("mpc")]
     if method_set == "standard":
-        return methods
+        return [m for m in methods if m.name in STANDARD_METHOD_NAMES]
     return methods
+
+
+def _default_scenario_by_name(name: str) -> ScenarioSpec:
+    for scenario in default_scenarios():
+        if scenario.name == name:
+            return scenario
+    raise ValueError(f"unknown scenario: {name}")
+
+
+def _run_default_seed(
+    scenario_name: str,
+    config: BenchmarkConfig,
+    seed: int,
+) -> list[RunResult]:
+    """Run all default methods for one seed of one default scenario."""
+    scenario = _default_scenario_by_name(scenario_name)
+    scenario_methods = default_methods(
+        scenario.monitor, config.budget, config.horizon, config.cost_weights,
+        config.beam_width,
+    )
+    scenario_methods = _filter_methods(scenario_methods, config.method_set)
+
+    trace = scenario.trace_fn(config.length, seed)
+    gt = compute_ground_truth(scenario.monitor, trace)
+    return [
+        run_single(
+            monitor=scenario.monitor,
+            trace=trace,
+            policy=method.policy,
+            budget=config.budget,
+            seed=seed,
+            ground_truth=gt,
+        )
+        for method in scenario_methods
+    ]
+
+
+def _run_scenario_parallel(
+    scenario: ScenarioSpec,
+    config: BenchmarkConfig,
+    scenario_methods: list[MethodSpec],
+    show_progress: bool,
+) -> list[RunResult]:
+    max_workers = min(max(int(config.jobs), 1), max(int(config.seeds), 1))
+    results_by_seed: dict[int, list[RunResult]] = {}
+    total_runs = len(scenario_methods) * config.seeds
+
+    with tqdm(
+        total=total_runs, desc=scenario.name, disable=not show_progress,
+        unit="run", leave=False,
+    ) as pbar:
+        context = mp.get_context("spawn")
+        with ProcessPoolExecutor(max_workers=max_workers, mp_context=context) as executor:
+            futures = {
+                executor.submit(_run_default_seed, scenario.name, config, seed): seed
+                for seed in range(config.seeds)
+            }
+            for future in as_completed(futures):
+                seed = futures[future]
+                seed_results = future.result()
+                results_by_seed[seed] = seed_results
+                pbar.update(len(seed_results))
+
+    return [
+        result
+        for seed in range(config.seeds)
+        for result in results_by_seed[seed]
+    ]
+
+
+def _run_scenario_serial(
+    scenario: ScenarioSpec,
+    scenario_methods: list[MethodSpec],
+    config: BenchmarkConfig,
+    trace_collector: TraceCollector | None,
+    show_progress: bool,
+) -> list[RunResult]:
+    raw_results: list[RunResult] = []
+    total_runs = len(scenario_methods) * config.seeds
+    with tqdm(
+        total=total_runs, desc=scenario.name, disable=not show_progress,
+        unit="run", leave=False,
+    ) as pbar:
+        for seed in range(config.seeds):
+            trace = scenario.trace_fn(config.length, seed)
+            gt = compute_ground_truth(scenario.monitor, trace)
+            for method in scenario_methods:
+                pbar.set_description_str(f"{scenario.name} · {method.name}")
+                result = run_single(
+                    monitor=scenario.monitor,
+                    trace=trace,
+                    policy=method.policy,
+                    budget=config.budget,
+                    seed=seed,
+                    trace_collector=trace_collector,
+                    ground_truth=gt,
+                )
+                raw_results.append(result)
+                pbar.update(1)
+    return raw_results
 
 
 def run_benchmark(
@@ -218,31 +407,26 @@ def run_benchmark(
         if methods is None:
             scenario_methods = default_methods(
                 scenario.monitor, config.budget, config.horizon, config.cost_weights,
+                config.beam_width,
             )
             scenario_methods = _filter_methods(scenario_methods, config.method_set)
         else:
             scenario_methods = methods
 
-        raw_results: list[RunResult] = []
-        total_runs = len(scenario_methods) * config.seeds
-        with tqdm(
-            total=total_runs, desc=scenario.name, disable=not show_progress,
-            unit="run", leave=False,
-        ) as pbar:
-            for method in scenario_methods:
-                pbar.set_description_str(f"{scenario.name} · {method.name}")
-                for seed in range(config.seeds):
-                    trace = scenario.trace_fn(config.length, seed)
-                    result = run_single(
-                        monitor=scenario.monitor,
-                        trace=trace,
-                        policy=method.policy,
-                        budget=config.budget,
-                        seed=seed,
-                        trace_collector=trace_collector,
-                    )
-                    raw_results.append(result)
-                    pbar.update(1)
+        use_parallel = (
+            config.jobs > 1
+            and scenarios is None
+            and methods is None
+            and trace_collector is None
+        )
+        if use_parallel:
+            raw_results = _run_scenario_parallel(
+                scenario, config, scenario_methods, show_progress,
+            )
+        else:
+            raw_results = _run_scenario_serial(
+                scenario, scenario_methods, config, trace_collector, show_progress,
+            )
 
         timeseries = results_to_dataframe(raw_results)
         summary = summarize_results(raw_results)

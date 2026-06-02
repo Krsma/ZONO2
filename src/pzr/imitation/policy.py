@@ -16,6 +16,7 @@ from numpy.typing import NDArray
 from tqdm.auto import tqdm
 
 from pzr.imitation.dataset import ReductionDataset
+from pzr.zonotope.protected import ProtectedReducer, reduce_with_protection
 from pzr.zonotope.reduction import Reducer, ReductionResult
 from pzr.zonotope.core import Zonotope
 
@@ -63,9 +64,10 @@ class LearnedPolicy:
     def select_reducer(
         self,
         features: NDArray[np.float64],
-        candidates: dict[str, Reducer],
+        candidates: dict[str, Reducer | ProtectedReducer],
         z: Zonotope,
         budget: int,
+        protected_indices: tuple[int, ...] = (),
     ) -> tuple[str, ReductionResult] | None:
         """Try reducers in order of predicted probability until one succeeds."""
         for name in self.rank_reducers(features):
@@ -73,7 +75,10 @@ class LearnedPolicy:
             if reducer is None:
                 continue
             try:
-                result = reducer.reduce(z, budget)
+                result = reduce_with_protection(
+                    reducer, z, budget,
+                    protected_indices=protected_indices,
+                )
                 if result.certificate.is_sound:
                     return name, result
             except ValueError:

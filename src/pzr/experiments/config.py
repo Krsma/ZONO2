@@ -17,10 +17,12 @@ class BenchmarkConfig:
     length: int = 200
     budget: int = 10
     horizon: int = 4
+    beam_width: int = 4
     seeds: int = 30
     method_set: str = "standard"
     cost_weights: CostWeights = field(default_factory=CostWeights)
     output_dir: str = "results"
+    jobs: int = 1
 
     def to_dict(self) -> dict[str, Any]:
         d = asdict(self)
@@ -30,7 +32,7 @@ class BenchmarkConfig:
 
 PROFILES: dict[str, dict[str, Any]] = {
     "smoke": {"length": 30, "seeds": 3, "horizon": 2},
-    "standard": {"length": 100, "seeds": 10, "horizon": 4},
+    "standard": {"length": 200, "seeds": 10, "horizon": 4},
     "paper": {"length": 200, "seeds": 30, "horizon": 4},
 }
 

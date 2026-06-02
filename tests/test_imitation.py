@@ -11,10 +11,11 @@ from pzr.imitation.dataset import ReductionDataset, build_dataset, class_balance
 from pzr.imitation.features import FEATURE_NAMES, extract_features
 from pzr.imitation.policy import LearnedPolicy, train_policy
 from pzr.imitation.traces import ReductionTrace, TraceCollector
-from pzr.monitoring.base import MonitorState
+from pzr.monitoring.base import MonitorState, TriggerSpec
 from pzr.systems.omni_robot import OmniRobotMonitor, generate_omni_robot_trace
 from pzr.zonotope.core import Zonotope
-from pzr.zonotope.reduction import GirardReducer
+from pzr.zonotope.protected import ProtectedReducer
+from pzr.zonotope.reduction import BoxReducer, GirardReducer
 
 
 class TestFeatures:
@@ -46,6 +47,24 @@ class TestFeatures:
         features = extract_features(state, budget=8)
         idx = FEATURE_NAMES.index("budget_headroom")
         assert features[idx] == 5.0  # 8 - 3
+
+    def test_trigger_features_use_trigger_zonotope(self):
+        raw_z = Zonotope([0.0, 0.0, 0.0], np.diag([10.0, 1.0, 1.0]))
+        trigger_z = Zonotope([0.0, 0.0], np.diag([0.5, 0.25]))
+        state = MonitorState(zonotope=raw_z, step=0)
+        triggers = (
+            TriggerSpec("x", 0, 2.0),
+            TriggerSpec("y", 1, 2.0),
+        )
+
+        features = extract_features(
+            state, budget=8, triggers=triggers,
+            trigger_zonotope=trigger_z,
+        )
+
+        assert features[FEATURE_NAMES.index("width_sum")] == pytest.approx(24.0)
+        assert features[FEATURE_NAMES.index("trigger_width_sum")] == pytest.approx(1.5)
+        assert features[FEATURE_NAMES.index("trigger_width_mean")] == pytest.approx(0.75)
 
 
 class TestTraces:
@@ -189,3 +208,29 @@ class TestPolicy:
         name, red_result = result
         assert name in ("left", "right")
         assert red_result.certificate.is_sound
+
+    def test_select_reducer_preserves_calibration_indices(self):
+        policy = LearnedPolicy(
+            class_names=("box",),
+            feature_mean=np.zeros(1),
+            feature_std=np.ones(1),
+            weights=[np.zeros((1, 1))],
+            biases=[np.zeros(1)],
+        )
+        z = Zonotope(
+            np.zeros(2),
+            np.array([
+                [1e-6, 10.0, 0.0, 9.0, 0.0],
+                [0.0, 0.0, 10.0, 0.0, 9.0],
+            ]),
+        )
+        candidates = {"box": ProtectedReducer(base=BoxReducer())}
+
+        result = policy.select_reducer(
+            np.array([0.0]), candidates, z, budget=3,
+            protected_indices=(0,),
+        )
+
+        assert result is not None
+        _, red_result = result
+        np.testing.assert_allclose(red_result.reduced.generators[:, 0], z.generators[:, 0])

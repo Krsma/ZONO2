@@ -40,6 +40,16 @@ VEL_2 = 5
 EE_X = 0
 EE_Y = 1
 
+JOINT_COUPLING_UNSCALED = np.array([
+    [1.0, 0.2, -0.2],
+    [-0.2, 1.0, 0.2],
+    [0.2, -0.2, 1.0],
+], dtype=np.float64)
+JOINT_COUPLING_SCALE = float(
+    np.max(np.sum(np.abs(np.linalg.inv(JOINT_COUPLING_UNSCALED)), axis=1))
+)
+JOINT_COUPLING_BASIS = JOINT_COUPLING_SCALE * JOINT_COUPLING_UNSCALED
+
 
 @dataclass(frozen=True)
 class RobotArmMeasurement:
@@ -48,6 +58,21 @@ class RobotArmMeasurement:
     time: float
     joint_angles: tuple[float, float, float]
     joint_velocities: tuple[float, float, float]
+
+
+@dataclass(frozen=True)
+class RobotArmTraceRecord:
+    """One MuJoCo trace step with true state and noisy monitor input."""
+
+    time: float
+    true_state: NDArray[np.float64]
+    measurement: RobotArmMeasurement
+    target_angles: NDArray[np.float64]
+    action: NDArray[np.float64]
+    ee_pos: NDArray[np.float64]
+    in_forbidden_zone: bool
+    done: bool
+    episode_id: int
 
 
 @dataclass(frozen=True)
@@ -82,7 +107,7 @@ class RobotArmMonitor:
 
     def initial_state(self) -> MonitorState:
         center = np.zeros(STATE_DIM, dtype=np.float64)
-        generators = np.zeros((STATE_DIM, NUM_JOINTS), dtype=np.float64)
+        generators = _coupled_joint_generators(self.noise_model.bias_bound)
         return MonitorState(
             zonotope=Zonotope(center, generators),
             step=0,
@@ -100,6 +125,9 @@ class RobotArmMonitor:
 
     def replace_zonotope(self, state: MonitorState, zonotope: Zonotope) -> MonitorState:
         return state.with_zonotope(zonotope)
+
+    def trigger_zonotope(self, state: MonitorState) -> Zonotope:
+        return self._cartesian_zonotope(state.zonotope)
 
     def step(self, state: MonitorState, measurement: RobotArmMeasurement) -> MonitorResult:
         old_z = state.zonotope
@@ -125,16 +153,12 @@ class RobotArmMonitor:
         if n_existing > 0:
             new_g[:, :n_existing] = old_g
 
+        calibration_g = _coupled_joint_generators(bias_bound)
         for j in range(NUM_JOINTS):
             if j < len(cal) and cal[j] < n_existing:
-                new_g[j, cal[j]] = float(bias_bound[j]) if j < len(bias_bound) else 0.0
+                new_g[:, cal[j]] = calibration_g[:, j]
 
-        for j in range(NUM_JOINTS):
-            col = n_existing + j
-            noise_angle = float(noise_bound[j]) if j < len(noise_bound) else 0.0
-            noise_vel = float(noise_bound[NUM_JOINTS + j]) if (NUM_JOINTS + j) < len(noise_bound) else noise_angle * 0.5
-            new_g[j, col] = noise_angle
-            new_g[NUM_JOINTS + j, col] = noise_vel
+        new_g[:, n_existing:n_new] = _coupled_joint_generators(noise_bound)
 
         new_z = Zonotope(new_center, new_g)
         new_state = MonitorState(
@@ -162,6 +186,22 @@ class RobotArmMonitor:
         return joint_z.affine_map(M, bias)
 
 
+def _coupled_joint_generators(bounds: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Return 3 coupled generator columns for angle and velocity bounds."""
+    b = np.asarray(bounds, dtype=np.float64).ravel()
+    angle_bounds = np.zeros(NUM_JOINTS, dtype=np.float64)
+    velocity_bounds = np.zeros(NUM_JOINTS, dtype=np.float64)
+    for j in range(NUM_JOINTS):
+        angle_bounds[j] = float(b[j]) if j < b.size else 0.0
+        v_idx = NUM_JOINTS + j
+        velocity_bounds[j] = float(b[v_idx]) if v_idx < b.size else 0.5 * angle_bounds[j]
+
+    generators = np.zeros((STATE_DIM, NUM_JOINTS), dtype=np.float64)
+    generators[:NUM_JOINTS, :] = np.diag(angle_bounds) @ JOINT_COUPLING_BASIS
+    generators[NUM_JOINTS:, :] = np.diag(velocity_bounds) @ JOINT_COUPLING_BASIS
+    return generators
+
+
 def generate_robot_arm_trace(
     length: int,
     *,
@@ -174,6 +214,23 @@ def generate_robot_arm_trace(
     Drives the arm through waypoints near the forbidden zone boundary,
     creating trajectories that stress the safety certificate.
     """
+    records = generate_robot_arm_trace_records(
+        length,
+        seed=seed,
+        bias_bound=bias_bound,
+        noise_bound=noise_bound,
+    )
+    return tuple(record.measurement for record in records)
+
+
+def generate_robot_arm_trace_records(
+    length: int,
+    *,
+    seed: int = 0,
+    bias_bound: NDArray[np.float64] | None = None,
+    noise_bound: NDArray[np.float64] | None = None,
+) -> tuple[RobotArmTraceRecord, ...]:
+    """Generate a MuJoCo trace with true state, control, and noisy measurement."""
     from pzr.envs.robot_arm import RobotArmEnv, joint_pd_controller
 
     if bias_bound is None:
@@ -191,24 +248,44 @@ def generate_robot_arm_trace(
 
     env = RobotArmEnv(config=RobotArmConfig(max_steps=length + 10))
     true_state = env.reset(seed=seed)
-    trace: list[RobotArmMeasurement] = []
+    episode_id = 0
+    records: list[RobotArmTraceRecord] = []
 
-    for t in range(length):
-        target = waypoint_angles[waypoint_idx]
-        action = joint_pd_controller(true_state, target)
-        true_state, _, done, _ = env.step(action)
-        trace.append(_make_measurement(true_state, noise_model, rng, float(t)))
+    try:
+        for t in range(length):
+            target = waypoint_angles[waypoint_idx]
+            action = joint_pd_controller(true_state, target)
+            true_state, _, done, info = env.step(action)
+            measurement = _make_measurement(true_state, noise_model, rng, float(t))
+            ee_pos = np.asarray(
+                info.get("ee_pos", forward_kinematics(true_state[:NUM_JOINTS])),
+                dtype=np.float64,
+            )
+            records.append(RobotArmTraceRecord(
+                time=float(t),
+                true_state=true_state.copy(),
+                measurement=measurement,
+                target_angles=target.copy(),
+                action=action.copy(),
+                ee_pos=ee_pos.copy(),
+                in_forbidden_zone=bool(info.get("in_forbidden_zone", False)),
+                done=bool(done),
+                episode_id=episode_id,
+            ))
 
-        angle_error = float(np.linalg.norm(true_state[:NUM_JOINTS] - target))
-        if angle_error < 0.15 and waypoint_idx < num_waypoints - 1:
-            waypoint_idx += 1
+            angle_error = float(np.linalg.norm(true_state[:NUM_JOINTS] - target))
+            if angle_error < 0.15 and waypoint_idx < num_waypoints - 1:
+                waypoint_idx += 1
 
-        if done and t < length - 1:
-            env = RobotArmEnv(config=RobotArmConfig(max_steps=length + 10))
-            true_state = env.reset(seed=seed + t + 1)
+            if done and t < length - 1:
+                env.close()
+                env = RobotArmEnv(config=RobotArmConfig(max_steps=length + 10))
+                episode_id += 1
+                true_state = env.reset(seed=seed + t + 1)
+    finally:
+        env.close()
 
-    env.close()
-    return tuple(trace)
+    return tuple(records)
 
 
 def _generate_waypoint_angles(

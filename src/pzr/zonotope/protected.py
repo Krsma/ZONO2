@@ -63,3 +63,15 @@ class ProtectedReducer:
             reduced_g = protected_g
         reduced = Zonotope(z.center, reduced_g)
         return ReductionResult(z, reduced, _cert(self.name, z, reduced))
+
+
+def reduce_with_protection(
+    reducer: Reducer | ProtectedReducer,
+    z: Zonotope,
+    budget: int,
+    protected_indices: tuple[int, ...] = (),
+) -> ReductionResult:
+    """Apply a reducer while honoring ProtectedReducer calibration columns."""
+    if isinstance(reducer, ProtectedReducer) and protected_indices:
+        return reducer.reduce(z, budget, protected_indices=protected_indices)
+    return reducer.reduce(z, budget)

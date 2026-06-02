@@ -26,11 +26,18 @@ from pzr.experiments.tables import (
     format_latex_table,
     format_soundness_report,
 )
+from pzr.imitation.features import FEATURE_NAMES
 from pzr.mpc.objectives import CostWeights, WeightedZonotopeCost
-from pzr.mpc.policies import RolloutMPCPolicy
+from pzr.mpc.policies import MPCPolicy, RolloutMPCPolicy
 from pzr.systems.omni_robot import OmniRobotMonitor, generate_omni_robot_trace
 from pzr.zonotope.protected import ProtectedReducer
-from pzr.zonotope.reduction import BoxReducer, CombastelReducer, GirardReducer
+from pzr.zonotope.reduction import (
+    BoxReducer,
+    CombastelReducer,
+    GirardReducer,
+    MethAReducer,
+    ScottReducer,
+)
 
 
 class TestTables:
@@ -77,6 +84,33 @@ class TestDAggerEval:
             expert, budget=8, seeds=range(3), length=20,
         )
         assert len(collector) > 0
+        gen_idx = FEATURE_NAMES.index("generator_count")
+        assert all(t.features[gen_idx] > 8 for t in collector.traces)
+
+    def test_sequence3_expert_labels_are_top3(self):
+        monitor = OmniRobotMonitor()
+        cost = WeightedZonotopeCost(
+            weights=CostWeights(trigger_width=1.0, straddling=20.0),
+            triggers=monitor.triggers,
+        )
+        mpc = MPCPolicy(
+            candidates=(
+                ProtectedReducer(base=GirardReducer()),
+                ProtectedReducer(base=MethAReducer()),
+                ProtectedReducer(base=ScottReducer()),
+            ),
+            budget=8, horizon=2, cost=cost,
+            fallback=ProtectedReducer(base=BoxReducer()),
+        )
+        expert = MPCReductionPolicy(policy=mpc, _name="mpc_sequence3", horizon=2)
+
+        collector = collect_expert_traces(
+            monitor, lambda l, s: generate_omni_robot_trace(l, seed=s),
+            expert, budget=8, seeds=range(2), length=20,
+        )
+
+        assert len(collector) > 0
+        assert {t.action for t in collector.traces} <= {"girard", "methA", "scott"}
 
     def test_full_dagger_pipeline(self):
         monitor = OmniRobotMonitor()
@@ -136,8 +170,8 @@ class TestDAggerEval:
             trace_fn=lambda l, s: generate_omni_robot_trace(l, seed=s),
             expert_policy=expert,
             budget=8,
-            train_seeds=range(5),
-            eval_seeds=range(5, 8),
+            train_seeds=range(6),
+            eval_seeds=range(6, 9),
             length=30,
             dagger_iterations=1,
             epochs_per_iteration=30,
@@ -162,6 +196,67 @@ class TestFiguresIntegration:
             out_path=tmp_path / "inference.pdf",
         )
         assert (tmp_path / "inference.pdf").exists()
+
+
+class TestGroundTruth:
+    """Tests for the new ground-truth comparison (approx_error + FPR)."""
+
+    def _make_runner_inputs(self, length=20, seed=0):
+        from pzr.experiments.runner import compute_ground_truth
+        monitor = OmniRobotMonitor()
+        trace = generate_omni_robot_trace(length, seed=seed)
+        gt = compute_ground_truth(monitor, trace)
+        return monitor, trace, gt
+
+    def test_compute_ground_truth_shape(self):
+        monitor, trace, gt = self._make_runner_inputs(length=10)
+        assert len(gt) == 10
+        for entry in gt:
+            assert entry.lower.shape == entry.upper.shape
+            assert entry.width_sum >= 0
+            assert set(entry.verdicts.keys()) == {t.name for t in monitor.triggers}
+
+    def test_unreduced_policy_has_zero_approx_error(self):
+        """A policy that never reduces (budget large enough) must match ground truth exactly."""
+        from pzr.experiments.runner import run_single
+
+        monitor, trace, gt = self._make_runner_inputs(length=8)
+        huge_budget = 10_000  # never triggers reduction
+        # Use any policy; with huge_budget it never decides to reduce
+        policy = StaticReductionPolicy(
+            reducer=ProtectedReducer(base=GirardReducer()), _name="girard",
+        )
+        result = run_single(monitor, trace, policy, huge_budget, 0, ground_truth=gt)
+        for step in result.steps:
+            assert not step.reduced, "huge budget should never reduce"
+            assert step.approx_error_sum == 0.0
+            assert step.false_positive is False
+
+    def test_reduced_policy_has_nonzero_approx_error(self):
+        """A policy that actually reduces should incur positive approximation error."""
+        from pzr.experiments.runner import run_single
+
+        monitor, trace, gt = self._make_runner_inputs(length=30)
+        policy = StaticReductionPolicy(
+            reducer=ProtectedReducer(base=BoxReducer()), _name="box",
+        )
+        result = run_single(monitor, trace, policy, budget=8, seed=0, ground_truth=gt)
+        reductions = [s for s in result.steps if s.reduced]
+        assert len(reductions) > 0
+        post_reduction_errors = [s.approx_error_sum for s in result.steps if s.step >= reductions[0].step]
+        assert max(post_reduction_errors) > 0.0
+
+    def test_aggregate_has_fpr_columns(self):
+        """aggregate_summary surfaces the new FPR/approximation columns."""
+        config = from_profile("smoke", scenario="omni_robot", method_set="static")
+        results = run_benchmark(config)
+        agg = results["omni_robot"].aggregate
+        for col in (
+            "false_positive_rate_mean",
+            "mean_approx_error_mean",
+            "abs_error_range_mean",
+        ):
+            assert col in agg.columns
 
 
 class TestFullPipeline:

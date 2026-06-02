@@ -29,8 +29,13 @@ METHOD_COLORS: dict[str, str] = {
     "scott": "#9467bd",
     "box": "#7f7f7f",
     "mpc_rollout": "#d62728",
+    "mpc_rollout_methA": "#8c564b",
+    "mpc_rollout_scott": "#c5b0d5",
+    "mpc_pair_rollout3": "#e377c2",
     "mpc_sequence": "#ff7f0e",
-    "learned_dagger": "#e377c2",
+    "mpc_sequence3": "#ffbb78",
+    "mpc_beam3": "#2f4b7c",
+    "learned_dagger": "#f7b6d2",
 }
 
 
@@ -139,6 +144,87 @@ def plot_combined_timeseries(
     ax2.set_title("Generator Count")
     ax2.legend(fontsize=7)
     ax2.grid(True, alpha=0.3)
+
+    if title:
+        fig.suptitle(title, fontsize=13)
+    fig.tight_layout()
+    if out_path:
+        _save_fig(fig, out_path)
+    return fig
+
+
+def plot_approximation_error_timeseries(
+    timeseries: pd.DataFrame,
+    methods: Sequence[str] | None = None,
+    title: str = "Approximation Error Over Time",
+    out_path: Path | None = None,
+) -> plt.Figure:
+    """Per-step approximation error vs unreduced zonotope, with mean ± std bands.
+
+    Mirrors Figure 5 of arxiv:2601.11358 (Cutting Corners on Uncertainty).
+    """
+    if methods is None:
+        methods = sorted(timeseries["method"].unique())
+
+    fig, ax = plt.subplots(figsize=(10, 5))
+    for method in methods:
+        df = timeseries[timeseries["method"] == method]
+        grouped = df.groupby("step")["approx_error_sum"]
+        mean = grouped.mean()
+        std = grouped.std().fillna(0)
+        ax.plot(mean.index, mean.values, label=method, linewidth=1.5, color=_color(method))
+        ax.fill_between(mean.index, (mean - std).values, (mean + std).values,
+                        alpha=0.15, color=_color(method))
+
+    ax.set_xlabel("Step")
+    ax.set_ylabel("Approximation Error (|approx − exact| summed over trigger axes)")
+    ax.set_title(title)
+    ax.legend(fontsize=8)
+    ax.grid(True, alpha=0.3)
+    fig.tight_layout()
+    if out_path:
+        _save_fig(fig, out_path)
+    return fig
+
+
+def plot_fig4_panel(
+    aggregate: pd.DataFrame,
+    title: str = "False Positive Rate & Absolute Error Range",
+    out_path: Path | None = None,
+) -> plt.Figure:
+    """Two-panel chart mirroring arxiv:2601.11358 Figure 4.
+
+    Left: False Positive Rate per method (with CI). Right: Absolute Error Range.
+    """
+    if "false_positive_rate_mean" not in aggregate.columns:
+        raise ValueError("aggregate missing FPR columns; re-run benchmark with ground truth")
+
+    df = aggregate.sort_values("false_positive_rate_mean")
+    methods = df["method"].values
+    colors = [_color(m) for m in methods]
+    x = np.arange(len(methods))
+
+    fig, (ax1, ax2) = plt.subplots(1, 2, figsize=(14, 5))
+
+    fpr = df["false_positive_rate_mean"].values
+    fpr_lo = df["false_positive_rate_ci95_lo"].values
+    fpr_hi = df["false_positive_rate_ci95_hi"].values
+    ax1.bar(x, fpr, yerr=[fpr - fpr_lo, fpr_hi - fpr], capsize=4, color=colors, alpha=0.85)
+    ax1.set_xticks(x)
+    ax1.set_xticklabels(methods, rotation=30, ha="right", fontsize=9)
+    ax1.set_ylabel("False Positive Rate")
+    ax1.set_title("False Positive Rate")
+    ax1.grid(True, axis="y", alpha=0.3)
+
+    aer = df["abs_error_range_mean"].values
+    aer_lo = df["abs_error_range_ci95_lo"].values
+    aer_hi = df["abs_error_range_ci95_hi"].values
+    ax2.bar(x, aer, yerr=[aer - aer_lo, aer_hi - aer], capsize=4, color=colors, alpha=0.85)
+    ax2.set_xticks(x)
+    ax2.set_xticklabels(methods, rotation=30, ha="right", fontsize=9)
+    ax2.set_ylabel("Absolute Error Range (max − min)")
+    ax2.set_title("Absolute Error Range")
+    ax2.grid(True, axis="y", alpha=0.3)
 
     if title:
         fig.suptitle(title, fontsize=13)
