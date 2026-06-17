@@ -11,13 +11,13 @@ uncertainty as zonotopes. Source code lives under `src/pzr/`:
 - `monitoring/`: monitor adapter protocol, monitor state, trigger specs, and
   trigger evaluation.
 - `mpc/`: receding-horizon reducer selection over certified reduction actions.
-- `imitation/`: DAgger traces, feature extraction, datasets, and learned
+- `imitation/`: feature extraction, legacy trace datasets, and learned
   reducer-selection policies.
 - `systems/`: math-only benchmark monitors (`omni_robot`, `simple_robot`).
 - `envs/`: MuJoCo-backed environments and monitors (`point_mass`,
   `robot_arm`), requiring the optional `sim` dependencies.
 - `experiments/`: benchmark orchestration, aggregation, tables, figures,
-  robot-arm animation, DAgger evaluation, and profiles.
+  robot-arm animation, regret/ranking distillation, and profiles.
 - `utils/`: seeding, timing, and serialization helpers.
 
 Tests are in `tests/`. The CORA comparison fixture is
@@ -29,8 +29,8 @@ saved benchmark artifacts.
 
 - `python -m pip install -e ".[dev]"`: install the package in editable mode
   with pytest.
-- `python -m pip install -e ".[dev,learning,sim]"`: include PyTorch and MuJoCo
-  extras for DAgger and simulator-backed scenarios.
+- `python -m pip install -e ".[dev,learning,sim]"`: include optional learning
+  and MuJoCo extras for simulator-backed scenarios.
 - `pytest`: run the full test suite configured by `pyproject.toml`.
 - `pytest tests/test_full_eval.py -x -q`: focused full-evaluation smoke path.
 - `pytest tests/test_robot_arm.py -k trigger_zonotope`: focused robot-arm
@@ -38,17 +38,19 @@ saved benchmark artifacts.
 - `pzr-benchmark --profile smoke --scenario omni_robot --output /tmp/pzr-smoke`:
   quick CLI smoke run.
 - `pzr-benchmark --profile standard --output results/my-run`: standard suite.
-- `pzr-benchmark --profile paper --scenario all --method-set all --budget 10 --horizon 4 --beam-width 4 --seeds 30 --jobs 4 --no-dagger --output results/paper-full`:
+- `pzr-benchmark --profile paper --scenario all --method-set all --budget 10 --horizon 4 --beam-width 4 --seeds 30 --jobs 4 --output results/paper-full`:
   benchmark-only paper-style suite; expect a multi-hour run when exhaustive
   `mpc_sequence` is included.
+- `pzr-benchmark --profile smoke --scenario omni_robot --method-set static --learned-mode regret --regret-oracle beam3 --regret-iterations 1 --regret-epochs 20 --regret-train-seeds 2 --regret-eval-seeds 1 --output /tmp/pzr-regret-smoke`:
+  smoke-test regret/ranking distillation and learned-result persistence.
 - `pzr-benchmark --profile smoke --budget-sweep "6,8,10,12" --output results/sweep`:
-  budget trade-off run; DAgger is disabled automatically.
+  budget trade-off run.
 - `pzr-robot-arm-animation --trace benchmark --seed 0 --length 200 --method scott --output results/robot-arm-animation`:
   render a benchmark-distribution MuJoCo robot-arm replay as GIF, paper
   stills, storyboard, and metadata.
 - `pzr-robot-arm-animation --trace paper --length 200 --method scott --output results/robot-arm-paper-viz`:
   render a deterministic explanatory robot-arm trace for paper motivation.
-- `python -m pzr.cli --profile smoke --scenario simple_robot --no-dagger --no-progress --output /tmp/pzr-smoke`:
+- `python -m pzr.cli --profile smoke --scenario simple_robot --no-progress --output /tmp/pzr-smoke`:
   smoke-test without relying on the installed console script.
 - `python -m pzr.experiments.robot_arm_animation --trace benchmark --seed 0 --length 50 --method scott --output /tmp/pzr-arm-viz`:
   smoke-test the robot-arm animation module without relying on the installed
@@ -56,24 +58,68 @@ saved benchmark artifacts.
 - `python -m pzr.experiments.robotics_probe --candidate all --length 60 --budget 10 --output /tmp/pzr-robotics-probe`:
   audit candidate drone/F1TENTH robotics environments before promoting either
   into benchmark defaults.
+- `python -m pzr.experiments.robotics_probe --candidate drone --trace-source live --length 120 --budget 10 --output /tmp/pzr-drone-live`:
+  run the live safe-control-gym drone trace collector and score reducers.
+- `tools/setup_f1tenth_sidecar.sh`: create the isolated Python 3.8 F1TENTH
+  sidecar under `external/f1tenth-py38-venv`.
+- `python -m pzr.experiments.robotics_probe --candidate f1tenth --trace-source live --length 120 --budget 10 --f1tenth-sidecar-python external/f1tenth-py38-venv/bin/python --output /tmp/pzr-f1tenth-live`:
+  run the live F1TENTH sidecar trace collector and score reducers.
+- `python -m pzr.experiments.robotics_probe --candidate all --trace-source live --length 300 --seeds 5 --warmup-steps 30 --budget 10 --f1tenth-sidecar-python external/f1tenth-py38-venv/bin/python --output /tmp/pzr-robotics-tuned-eval`:
+  exploratory multi-seed live robotics probe. This writes per-seed raw traces
+  under `seed_N/` plus top-level `candidate_scores.csv`,
+  `candidate_score_summary.csv`, `method_scores.csv`,
+  `method_score_summary.csv`, `trace_summary.csv`, metadata, and report files.
+- `python -m pzr.experiments.robotics_replay eval --candidate all --trace-source procedural --monitor physical --scenario-family stress --length 160 --seeds 3 --budget 12 --horizon 4 --beam-width 4 --output /tmp/pzr-robotics-replay-eval`:
+  run the replay-only robotics evaluator with focused static and MPC methods.
+  With `--scenario-family stress`, `--monitor physical` uses physical replay
+  monitors for both drone and F1TENTH; `--scenario-family legacy` preserves
+  the older procedural traces.
+- `python -m pzr.experiments.robotics_replay sweep --candidate all --trace-source procedural --monitor physical --scenario-family stress --budgets 8,10,12,16,20,24 --length 80 --seeds 2 --horizon 4 --beam-width 4 --output /tmp/pzr-robotics-high-k-sweep`:
+  run the robotics high-generator-budget sweep for drone and F1TENTH. This
+  uses static reducers plus `mpc_beam3` only by default and writes top-level
+  budget gain, runtime, reducer-selection, scenario, and intervention CSVs
+  plus selected-budget visual artifacts.
+- `python -m pzr.experiments.robotics_replay render --eval-dir /tmp/pzr-robotics-replay-eval --candidate all --methods scott,mpc_beam3 --output /tmp/pzr-robotics-replay-viz`:
+  render focused static-vs-MPC robotics storyboards/stills/GIFs from replay
+  artifacts.
 - `tools/run_pzr_smoke_parallel.sh`: scripted parallel smoke run with bounded
   BLAS/OpenMP threads and log capture.
 - `tools/run_pzr_paper_static.sh`: static-baseline paper run, useful for fast
-  sanity checks without MPC or DAgger.
-- `tools/run_pzr_paper_full.sh`: full paper run wrapper. It disables DAgger by
-  default; set `PZR_WITH_DAGGER=1` to include the learned-policy pass.
+  sanity checks without MPC.
+- `tools/run_pzr_paper_full.sh`: full paper run wrapper. It runs no learned
+  selector by default; set `PZR_WITH_REGRET=1` to include regret/ranking
+  distillation with `PZR_REGRET_ORACLE=beam3|sequence3|pair_rollout3|rollout_wide|sequence_wide`.
+- `tools/run_pzr_icra_table_matrix.sh`: staged, resumable ICRA table matrix
+  for `drone`, `f1tenth`, and `omni_robot`. By default it runs length 250,
+  10 seeds, budgets `8,10,12,16,20,24,30`, primary horizon 4, horizon sweep
+  `1,2,4,8,12`, and the `paper_core` methods. Regret/ranking distillation is
+  off by default; set `PZR_WITH_REGRET=1` to run it as a separate stage.
+  Exact `mpc_sequence3` is off by default and available as a small audit stage
+  controlled by
+  `PZR_INCLUDE_SEQUENCE_AUDIT`, `PZR_SEQUENCE_AUDIT_BUDGETS`, and
+  `PZR_SEQUENCE_AUDIT_SEEDS`. Completed cells write `.complete` markers, so
+  rerunning the same `PZR_OUT_DIR` resumes by default; set `PZR_RESUME=0` to
+  force reruns.
+- `tools/run_pzr_paper_live_headline_overnight.sh`: live robotics plus omni
+  headline overnight sweep. It enables regret/ranking distillation by default
+  across the configured budget list; set `PZR_WITH_REGRET=0` to disable it or
+  `PZR_REGRET_ORACLE=beam3` to choose the teacher.
 
 `pyproject.toml` currently declares `pzr-benchmark = pzr.cli:main` and
 `pzr-robot-arm-animation = pzr.experiments.robot_arm_animation:main`. CLI
 profiles are `smoke`, `standard`, and `paper`; scenarios are `all`,
 `omni_robot`, `simple_robot`, plus
-`point_mass` and `robot_arm` when MuJoCo imports successfully. Method sets are
+`point_mass` and `robot_arm` when MuJoCo imports successfully. `scenario=all`
+is the headline/default set and excludes deprecated `simple_robot` and
+`point_mass`; those remain runnable only when requested explicitly. Method sets are
 `all`, `static`, and `standard`; `all` includes every registered method,
 `static` excludes MPC, and `standard` preserves the old static plus legacy
-`mpc_rollout`/`mpc_sequence` set. DAgger runs by default; use `--no-dagger`
-to skip it. `--beam-width N` controls the bounded-width beam MPC method and
-defaults to 4. DAgger uses `mpc_sequence3` as its default expert; use
-`--dagger-expert NAME` to override it. `--jobs N` parallelizes
+`mpc_rollout`/`mpc_sequence` set. Learned policies are disabled by default;
+use `--learned-mode regret` to run regret/ranking distillation. `--beam-width N`
+controls the bounded-width beam MPC method and defaults to 4. Regret
+distillation defaults to the `beam3` oracle; use `--regret-oracle
+beam3|sequence3|pair_rollout3|rollout_wide|sequence_wide` to choose the MPC
+teacher. `--jobs N` parallelizes
 default benchmark runs across seeds when no custom scenarios, custom methods,
 or trace collector are provided. Keep BLAS/OpenMP thread counts at 1 for long
 `--jobs` runs; the scripts in `tools/` already export these limits and set
@@ -104,7 +150,7 @@ metadata preservation, chosen reducer accounting, predictor/search metadata
 projection behavior. Beam-search changes should cover wide-beam agreement
 with exact search, narrow-beam pruning, deterministic tie behavior, and
 protected-index preservation through first and future reductions. Learned-policy
-and DAgger changes should keep the candidate set aligned with benchmark
+and regret/ranking changes should keep the candidate set aligned with benchmark
 reducers and should not include `IdentityReducer` unless no-op experiments are
 explicitly reopened.
 
@@ -115,7 +161,7 @@ non-empty. Robot-arm animation changes should smoke-test
 with a short trace and assert non-empty GIF/PNG/PDF/metadata outputs.
 Diagnostic or aggregation changes should check `summary.csv`, `aggregate.csv`,
 `timeseries.csv`, `config.yaml`, generated figure files, and learned-policy
-rows when DAgger is enabled.
+rows when `--learned-mode regret` is enabled.
 
 Parallel benchmark changes should compare serial and parallel runs on stable
 seed-level metrics. Avoid asserting raw wall-clock timings exactly.
@@ -236,12 +282,54 @@ main paper visualization. Use `pzr.experiments.robotics_probe` for the next
 environment-selection pass. The probe is intentionally outside benchmark
 defaults and scores candidate drone/F1TENTH derived-stream traces for reducer
 differentiation, near-threshold behavior, reductions, and budget/soundness.
+Use `--trace-source proxy|live|auto` to select synthetic/proxy traces, require
+live simulator traces, or try live and fall back. Live drone traces are
+collected through `tools/collect_safe_control_drone_trace.py`; live F1TENTH
+traces are collected through `tools/collect_f1tenth_trace.py` in the isolated
+sidecar created by `tools/setup_f1tenth_sidecar.sh`. Use `--seeds N` for
+consecutive seed sweeps and `--warmup-steps N` to drop initial transient
+measurements before scoring. Current live sidecars are still mostly
+deterministic, so equal metrics across seeds should not be interpreted as
+statistical robustness.
 
-DAgger evaluation defaults to exact `mpc_sequence3` as the expert and trains
-over the top-3 reducer labels, with protected box kept as learned-policy
-fallback. It appends learned-policy rows to the in-memory benchmark result used
-for printed tables and post-run figures. Saved per-scenario benchmark CSVs are
-written before DAgger unless the persistence behavior is explicitly changed.
+`pzr.experiments.robotics_replay` is the next-step replay evaluator and
+visualizer. It is also outside benchmark defaults. The `eval` command writes
+benchmark-style `timeseries.csv`, `summary.csv`, `aggregate.csv`, plus
+`policy_gain.csv`, `winner_by_step.csv`, `trace_summary.csv`,
+`scenario_summary.csv`, `intervention_summary.csv`, `trace_metadata.json`, raw
+payload JSONL files, and derived streams. Use `--scenario-family stress
+--monitor physical` for the richer replay monitors. Drone tracks physical
+state over `x, y, z, vx, vy, vz` and projects triggers to obstacle, gate,
+corridor, altitude, and speed margins. F1TENTH tracks `x, y, theta, speed,
+yaw_rate` and projects triggers to boundary/heading/TTC/curvature/yaw margins.
+Both stress monitors use deterministic phase-dependent fresh uncertainty from
+local scenario context. Use `--scenario-family legacy` or `--monitor stream`
+only for older low-dimensional diagnostics. The `render` command defaults to focused `scott` vs `mpc_beam3`
+comparisons; `best_static,mpc_beam3` remains available for diagnostic
+best-static checks, but current best-static gains are modest and should not be
+oversold as the main visual story.
+
+For the current ICRA-oriented robotics question, prefer the `sweep` subcommand
+over ad hoc repeated eval calls. It supports `--candidate drone|f1tenth|all`,
+runs budgets incrementally, defaults to the paper-relevant `sweep` method set
+(`girard`, `combastel`, `methA`, `scott`, `box`, `mpc_beam3`), excludes exact
+`mpc_sequence3` because it is much slower without improving current replay
+results, and writes
+`budget_sweep_summary.csv`, `budget_policy_gain.csv`,
+`budget_reducer_counts.csv`, `budget_runtime.csv`,
+`budget_scenario_summary.csv`, `budget_intervention_summary.csv`,
+`budget_sweep_metadata.json`, and `figures/`. The selected visualization
+budget maximizes minimum seed gain of `mpc_beam3` against the best fixed static
+reducer, then mean gain, reducer switches, and runtime. Robotics replay MPC
+currently records its focused candidate reducer set as `girard`, `combastel`,
+and `scott` in metadata.
+
+Regret/ranking distillation trains a learned selector from per-candidate MPC
+cost tables rather than hard expert labels. The default oracle is `beam3` for
+speed; `sequence3` is useful as an exact top-3 audit, `pair_rollout3` is a
+middle ground, and `rollout_wide` / `sequence_wide` expose broader candidate
+teachers. Learned method rows are appended before benchmark CSVs and figures
+are written. Learning artifacts are saved under `learning/<scenario>/`.
 
 ## Commit & Pull Request Guidelines
 

@@ -10,11 +10,12 @@ from __future__ import annotations
 import argparse
 import importlib
 import importlib.util
+import json
 import os
 import subprocess
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Iterable, Sequence
+from typing import Any, Iterable, Literal, Sequence
 
 import numpy as np
 import pandas as pd
@@ -65,12 +66,29 @@ METHOD_SCORE_COLUMNS = [
 ]
 TRACE_SUMMARY_COLUMNS = [
     "candidate",
+    "seed",
     "stream",
     "mean",
     "min",
     "max",
     "near_threshold_fraction",
 ]
+REPORT_COLUMNS = [
+    "candidate",
+    "seed",
+    "recommendation",
+    "budget",
+    "length",
+    "relative_width_spread",
+    "differentiated_methods",
+    "reduction_rate",
+    "near_threshold_fraction",
+    "oracle_violation_fraction",
+    "budget_violations",
+    "unsound_certificates",
+]
+TraceSource = Literal["proxy", "live", "auto"]
+DroneController = Literal["sim", "firmware"]
 
 
 @dataclass(frozen=True)
@@ -182,6 +200,24 @@ class ProbeBundle:
     monitor: SafetyStreamMonitor
     trace: tuple[SafetyStreamMeasurement, ...]
     metadata: dict[str, Any]
+
+
+def _trim_bundle(bundle: ProbeBundle, warmup_steps: int) -> ProbeBundle:
+    if warmup_steps <= 0:
+        return bundle
+    trace = tuple(bundle.trace[warmup_steps:])
+    metadata = {
+        **bundle.metadata,
+        "raw_length": len(bundle.trace),
+        "length": len(trace),
+        "warmup_steps": warmup_steps,
+    }
+    return ProbeBundle(
+        candidate=bundle.candidate,
+        monitor=bundle.monitor,
+        trace=trace,
+        metadata=metadata,
+    )
 
 
 def drone_stream_profile() -> SafetyStreamProfile:
@@ -309,9 +345,37 @@ def _repo_root() -> Path:
     return Path(__file__).resolve().parents[3]
 
 
-def _sidecar_status(root: Path | None = None) -> dict[str, Any]:
+def _load_jsonl(path: Path) -> list[dict[str, Any]]:
+    with open(path) as f:
+        return [json.loads(line) for line in f if line.strip()]
+
+
+def _write_trace_csv(bundle: ProbeBundle, path: Path) -> None:
+    rows = []
+    for measurement in bundle.trace:
+        row: dict[str, Any] = {
+            "time": measurement.time,
+            "oracle_violation": measurement.oracle_violation,
+        }
+        for name, value, true_value in zip(
+            bundle.monitor.profile.stream_names,
+            measurement.values,
+            measurement.true_values,
+        ):
+            row[name] = value
+            row[f"true_{name}"] = true_value
+        rows.append(row)
+    pd.DataFrame(rows).to_csv(path, index=False)
+
+
+def _sidecar_status(
+    root: Path | None = None,
+    python_path: Path | None = None,
+) -> dict[str, Any]:
     repo = _repo_root() if root is None else root
-    python_path = repo / "external" / "miniconda3" / "envs" / "pzr-safe-control-fw" / "bin" / "python"
+    python_path = python_path or (
+        repo / "external" / "miniconda3" / "envs" / "pzr-safe-control-fw" / "bin" / "python"
+    )
     gym_root = repo / "external" / "safe-control-gym"
     status: dict[str, Any] = {
         "python": str(python_path),
@@ -371,11 +435,40 @@ def _load_level0_geometry(root: Path | None = None) -> dict[str, Any]:
     }
 
 
-def make_drone_probe_bundle(*, length: int, seed: int) -> ProbeBundle | None:
-    """Build a drone candidate from safe-control-gym Level0 geometry metadata."""
-    status = _sidecar_status()
+def make_drone_probe_bundle(
+    *,
+    length: int,
+    seed: int,
+    trace_source: TraceSource = "auto",
+    output: Path | None = None,
+    controller_mode: DroneController = "sim",
+    sidecar_python: Path | None = None,
+    stress_randomize: bool = False,
+) -> ProbeBundle | None:
+    """Build a drone candidate from live safe-control-gym or proxy metadata."""
+    status = _sidecar_status(python_path=sidecar_python)
     if not status.get("available", False):
         return None
+
+    if trace_source in ("live", "auto"):
+        live_bundle, live_metadata = _make_live_drone_probe_bundle(
+            length=length,
+            seed=seed,
+            output=output,
+            controller_mode=controller_mode,
+            sidecar_python=sidecar_python,
+            sidecar_status=status,
+            stress_randomize=stress_randomize,
+        )
+        if live_bundle is not None:
+            return live_bundle
+        if trace_source == "live":
+            return ProbeBundle(
+                candidate="drone",
+                monitor=SafetyStreamMonitor(drone_stream_profile()),
+                trace=(),
+                metadata=live_metadata,
+            )
 
     geometry = _load_level0_geometry()
     bundle = make_synthetic_probe_bundle("drone", length=length, seed=seed)
@@ -388,12 +481,95 @@ def make_drone_probe_bundle(*, length: int, seed: int) -> ProbeBundle | None:
             "trace_source": "safe_control_gym_level0_geometry_proxy",
             "sidecar": status,
             "geometry": geometry,
+            "stress_randomize": stress_randomize,
+            "live_attempt": None if trace_source == "proxy" else live_metadata,
             "note": (
                 "This is a derived-stream audit trace seeded from Level0 geometry, "
                 "not a closed-loop safe-control-gym benchmark."
             ),
         },
     )
+
+
+def _make_live_drone_probe_bundle(
+    *,
+    length: int,
+    seed: int,
+    output: Path | None,
+    controller_mode: DroneController,
+    sidecar_python: Path | None,
+    sidecar_status: dict[str, Any],
+    stress_randomize: bool,
+) -> tuple[ProbeBundle | None, dict[str, Any]]:
+    repo = _repo_root()
+    python_path = sidecar_python or Path(sidecar_status["python"])
+    safe_control_root = Path(sidecar_status["safe_control_gym_root"])
+    config_path = safe_control_root / "competition" / "level0.yaml"
+    raw_path = (output or Path("/tmp")) / "drone_raw_trace.jsonl"
+    collector = repo / "tools" / "collect_safe_control_drone_trace.py"
+    command = [
+        str(python_path),
+        str(collector),
+        "--safe-control-root", str(safe_control_root),
+        "--config", str(config_path),
+        "--output", str(raw_path),
+        "--length", str(length),
+        "--seed", str(seed),
+        "--controller-mode", controller_mode,
+    ]
+    if stress_randomize:
+        command.append("--stress-randomize")
+    metadata: dict[str, Any] = {
+        "candidate": "drone",
+        "status": "unavailable",
+        "trace_source": "safe_control_gym_live_rollout",
+        "sidecar": sidecar_status,
+        "collector_command": command,
+        "controller_mode": controller_mode,
+        "stress_randomize": stress_randomize,
+    }
+    try:
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
+            command,
+            cwd=repo,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=max(45, length * 3),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
+        metadata["reason"] = str(exc)
+        return None, metadata
+
+    metadata["returncode"] = proc.returncode
+    metadata["stdout"] = proc.stdout[-4000:]
+    metadata["stderr"] = proc.stderr[-4000:]
+    metadata["raw_trace_path"] = str(raw_path)
+    if proc.returncode != 0:
+        metadata["reason"] = "safe-control-gym live collector failed"
+        return None, metadata
+    raw_records = _load_jsonl(raw_path)
+    if not raw_records:
+        metadata["reason"] = "safe-control-gym live collector produced no records"
+        return None, metadata
+
+    geometry = _load_level0_geometry()
+    trace = tuple(_drone_records_to_measurements(raw_records, seed=seed))
+    metadata.update({
+        "status": "available",
+        "length": len(trace),
+        "seed": seed,
+        "geometry": geometry,
+        "stress_randomize": stress_randomize,
+        "note": "Closed-loop safe-control-gym rollout converted to derived safety streams.",
+    })
+    return ProbeBundle(
+        candidate="drone",
+        monitor=SafetyStreamMonitor(drone_stream_profile()),
+        trace=trace,
+        metadata=metadata,
+    ), metadata
 
 
 def _attach_geometry_payload(
@@ -415,22 +591,236 @@ def _attach_geometry_payload(
         )
 
 
-def _f1tenth_status() -> dict[str, Any]:
-    available = importlib.util.find_spec("f110_gym") is not None
-    status: dict[str, Any] = {"available": available, "package": "f110_gym"}
-    if not available:
-        status["reason"] = "f110_gym is not installed in the active Python environment"
+def _drone_records_to_measurements(
+    records: Sequence[dict[str, Any]],
+    *,
+    seed: int,
+) -> Iterable[SafetyStreamMeasurement]:
+    rng = np.random.default_rng(seed)
+    for record in records:
+        true_values = _drone_true_safety_streams(record)
+        observed = true_values + rng.normal(0.0, 0.02, true_values.size)
+        info = record.get("info", {})
+        collision = bool((info.get("collision") or [None, False])[1])
+        constraint_violation = bool(info.get("constraint_violation", False))
+        yield SafetyStreamMeasurement(
+            time=float(record.get("time", record.get("step", 0.0))),
+            values=tuple(float(v) for v in observed),
+            true_values=tuple(float(v) for v in true_values),
+            oracle_violation=bool(
+                collision or constraint_violation or np.any(true_values < 0.0)
+            ),
+            payload={
+                "trace_source": "safe_control_gym_live_rollout",
+                "raw_step": int(record.get("step", 0)),
+                "done": bool(record.get("done", False)),
+                "raw_record": record,
+            },
+        )
+
+
+def _drone_true_safety_streams(record: dict[str, Any]) -> NDArray[np.float64]:
+    obs = np.asarray(record.get("obs", []), dtype=np.float64).ravel()
+    if obs.size < 6:
+        raise ValueError("drone record observation must contain at least 6 state values")
+    pos = np.array([obs[0], obs[2], obs[4]], dtype=np.float64)
+    vel = np.array([obs[1], obs[3], obs[5]], dtype=np.float64)
+    gates = np.asarray(record.get("gates", []), dtype=np.float64)
+    obstacles = np.asarray(record.get("obstacles", []), dtype=np.float64)
+    info = record.get("info", {})
+
+    obstacle_margin = _min_xy_distance_margin(pos, obstacles, threshold=0.45)
+    gate_pos = np.asarray(info.get("current_target_gate_pos", []), dtype=np.float64).ravel()
+    gate_yaw = 0.0
+    if gate_pos.size >= 2:
+        gate_xyz = np.array([
+            gate_pos[0],
+            gate_pos[1],
+            _gate_height(float(info.get("current_target_gate_type", 0))),
+        ], dtype=np.float64)
+        if gate_pos.size >= 6:
+            gate_yaw = float(gate_pos[5])
+    elif gates.size:
+        idx = int(info.get("current_target_gate_id", 0))
+        idx = int(np.clip(idx, 0, len(gates) - 1))
+        gate_xyz = np.array([gates[idx, 0], gates[idx, 1], _gate_height(gates[idx, 6])])
+        if gates.shape[-1] >= 6:
+            gate_yaw = float(gates[idx, 5])
+    else:
+        gate_xyz = pos
+
+    gate_alignment_margin = _gate_alignment_margin(
+        pos,
+        gate_xyz,
+        gate_yaw=gate_yaw,
+        in_range=bool(info.get("current_target_gate_in_range", False)),
+    )
+    corridor_margin = _corridor_margin(pos, gates)
+    altitude_low_margin = float(pos[2] - 0.10)
+    altitude_high_margin = float(2.0 - pos[2])
+    speed_margin = float(1.75 - np.linalg.norm(vel))
+    return np.array([
+        obstacle_margin,
+        gate_alignment_margin,
+        corridor_margin,
+        altitude_low_margin,
+        altitude_high_margin,
+        speed_margin,
+    ], dtype=np.float64)
+
+
+def _gate_alignment_margin(
+    pos: NDArray[np.float64],
+    gate_xyz: NDArray[np.float64],
+    *,
+    gate_yaw: float,
+    in_range: bool,
+) -> float:
+    rel_xy = pos[:2] - gate_xyz[:2]
+    forward = np.array([np.cos(gate_yaw), np.sin(gate_yaw)], dtype=np.float64)
+    lateral_axis = np.array([-np.sin(gate_yaw), np.cos(gate_yaw)], dtype=np.float64)
+    lateral = abs(float(np.dot(rel_xy, lateral_axis)))
+    vertical = abs(float(pos[2] - gate_xyz[2]))
+    if not in_range and float(np.linalg.norm(rel_xy)) > 1.5:
+        return 0.35
+    return float(min(1.20 - lateral, 0.75 - vertical))
+
+
+def _gate_height(gate_type: float) -> float:
+    return 1.0 if int(gate_type) == 0 else 0.525
+
+
+def _min_xy_distance_margin(
+    pos: NDArray[np.float64],
+    objects: NDArray[np.float64],
+    *,
+    threshold: float,
+) -> float:
+    if objects.size == 0:
+        return 10.0
+    obj = np.asarray(objects, dtype=np.float64).reshape((-1, objects.shape[-1]))
+    dists = np.linalg.norm(obj[:, :2] - pos[:2], axis=1)
+    return float(np.min(dists) - threshold)
+
+
+def _corridor_margin(pos: NDArray[np.float64], gates: NDArray[np.float64]) -> float:
+    if gates.size == 0:
+        return 1.0
+    gate_points = np.asarray(gates, dtype=np.float64).reshape((-1, gates.shape[-1]))[:, :2]
+    points = np.vstack([np.array([-0.9, -2.9], dtype=np.float64), gate_points])
+    point = pos[:2]
+    best = min(_point_segment_distance(point, a, b) for a, b in zip(points[:-1], points[1:]))
+    return float(0.65 - best)
+
+
+def _point_segment_distance(
+    point: NDArray[np.float64],
+    a: NDArray[np.float64],
+    b: NDArray[np.float64],
+) -> float:
+    ab = b - a
+    denom = float(np.dot(ab, ab))
+    if denom <= 1e-12:
+        return float(np.linalg.norm(point - a))
+    t = float(np.clip(np.dot(point - a, ab) / denom, 0.0, 1.0))
+    return float(np.linalg.norm(point - (a + t * ab)))
+
+
+def _f1tenth_status(sidecar_python: Path | None = None) -> dict[str, Any]:
+    if sidecar_python is None:
+        available = importlib.util.find_spec("f110_gym") is not None
+        status: dict[str, Any] = {
+            "available": available,
+            "package": "f110_gym",
+            "python": "current",
+        }
+    else:
+        status = {
+            "available": False,
+            "package": "f110_gym",
+            "python": str(sidecar_python),
+        }
+        if sidecar_python.exists():
+            proc = subprocess.run(
+                [
+                    str(sidecar_python),
+                    "-c",
+                    "import f110_gym, gym; print('ok')",
+                ],
+                check=False,
+                text=True,
+                capture_output=True,
+                timeout=10,
+            )
+            status["returncode"] = proc.returncode
+            status["stdout"] = proc.stdout.strip()
+            status["stderr"] = proc.stderr.strip()
+            status["available"] = proc.returncode == 0
+        else:
+            status["reason"] = "F1TENTH sidecar Python does not exist"
+    if not status["available"] and "reason" not in status:
+        status["reason"] = (
+            "f110_gym is not installed in the selected Python environment"
+        )
     return status
 
 
-def make_f1tenth_probe_bundle(*, length: int, seed: int) -> ProbeBundle | None:
+def make_f1tenth_probe_bundle(
+    *,
+    length: int,
+    seed: int,
+    trace_source: TraceSource = "auto",
+    output: Path | None = None,
+    sidecar_python: Path | None = None,
+    map_name: str = "vegas",
+    stress_randomize: bool = False,
+) -> ProbeBundle | None:
     """Build an F1TENTH candidate if the optional package is installed."""
-    status = _f1tenth_status()
-    if not status.get("available", False):
+    status = _f1tenth_status(sidecar_python=sidecar_python)
+    if not status.get("available", False) and trace_source == "live":
+        return ProbeBundle(
+            candidate="f1tenth",
+            monitor=SafetyStreamMonitor(f1tenth_stream_profile()),
+            trace=(),
+            metadata={
+                "candidate": "f1tenth",
+                "status": "unavailable",
+                "trace_source": "f1tenth_live_gym_rollout",
+                "dependency": status,
+                "stress_randomize": stress_randomize,
+            },
+        )
+    if not status.get("available", False) and trace_source == "auto":
         return None
-    live_bundle = _make_live_f1tenth_bundle(length=length, seed=seed, status=status)
-    if live_bundle is not None:
-        return live_bundle
+    live_error: dict[str, Any] | None = None
+    if trace_source in ("live", "auto") and status.get("available", False):
+        live_bundle = _make_live_f1tenth_bundle(
+            length=length,
+            seed=seed,
+            output=output,
+            status=status,
+            sidecar_python=sidecar_python,
+            map_name=map_name,
+            stress_randomize=stress_randomize,
+        )
+        if live_bundle is not None:
+            return live_bundle
+        live_error = dict(status)
+        if trace_source == "live":
+            return ProbeBundle(
+                candidate="f1tenth",
+                monitor=SafetyStreamMonitor(f1tenth_stream_profile()),
+                trace=(),
+                metadata={
+                    "candidate": "f1tenth",
+                    "status": "unavailable",
+                    "trace_source": "f1tenth_live_gym_rollout",
+                    "dependency": status,
+                    "stress_randomize": stress_randomize,
+                },
+            )
+    if trace_source == "live":
+        return None
     bundle = make_synthetic_probe_bundle("f1tenth", length=length, seed=seed)
     return ProbeBundle(
         candidate="f1tenth",
@@ -440,6 +830,8 @@ def make_f1tenth_probe_bundle(*, length: int, seed: int) -> ProbeBundle | None:
             **bundle.metadata,
             "trace_source": "f1tenth_derived_stream_proxy",
             "dependency": status,
+            "live_attempt": live_error,
+            "stress_randomize": stress_randomize,
             "note": (
                 "The current probe checks the F1TENTH-derived stream design. "
                 "The local package was present, but live Gym rollout capture "
@@ -453,47 +845,58 @@ def _make_live_f1tenth_bundle(
     *,
     length: int,
     seed: int,
+    output: Path | None,
     status: dict[str, Any],
+    sidecar_python: Path | None,
+    map_name: str,
+    stress_randomize: bool,
 ) -> ProbeBundle | None:
-    """Best-effort live F1TENTH rollout for environments using the Gym API."""
+    """Run the standalone F1TENTH collector and convert raw records."""
+    repo = _repo_root()
+    python_path = sidecar_python or Path(status.get("python", "python"))
+    raw_path = (output or Path("/tmp")) / "f1tenth_raw_trace.jsonl"
+    collector = repo / "tools" / "collect_f1tenth_trace.py"
+    command = [
+        str(python_path),
+        str(collector),
+        "--output", str(raw_path),
+        "--length", str(length),
+        "--seed", str(seed),
+        "--map", map_name,
+    ]
+    if stress_randomize:
+        command.append("--stress-randomize")
     try:
-        gym_module = importlib.import_module("gymnasium")
-    except ImportError:
-        try:
-            gym_module = importlib.import_module("gym")
-        except ImportError:
-            status["live_rollout_error"] = "neither gymnasium nor gym is installed"
-            return None
-
-    try:
-        env = gym_module.make("f110_gym:f110-v0", map="vegas", num_agents=1)
-        reset_pose = np.array([[0.0, 0.0, 0.0]], dtype=np.float64)
-        reset_result = env.reset(poses=reset_pose)
-        obs = reset_result[0] if isinstance(reset_result, tuple) else reset_result
-        rng = np.random.default_rng(seed)
-        trace: list[SafetyStreamMeasurement] = []
-        for t in range(length):
-            measurement = _f1tenth_measurement_from_obs(obs, float(t), rng)
-            trace.append(measurement)
-            action = np.array([[0.0, 1.0]], dtype=np.float64)
-            step_result = env.step(action)
-            if len(step_result) == 5:
-                obs, _, terminated, truncated, _ = step_result
-                done = bool(terminated or truncated)
-            else:
-                obs, _, done, _ = step_result
-            if done:
-                break
-        close = getattr(env, "close", None)
-        if callable(close):
-            close()
-    except Exception as exc:  # pragma: no cover - depends on optional package API.
+        raw_path.parent.mkdir(parents=True, exist_ok=True)
+        proc = subprocess.run(
+            command,
+            cwd=repo,
+            check=False,
+            text=True,
+            capture_output=True,
+            timeout=max(45, length * 2),
+        )
+    except (OSError, subprocess.TimeoutExpired) as exc:
         status["live_rollout_error"] = str(exc)
         return None
+    status["collector_command"] = command
+    status["collector_returncode"] = proc.returncode
+    status["collector_stdout"] = proc.stdout[-4000:]
+    status["collector_stderr"] = proc.stderr[-4000:]
+    status["raw_trace_path"] = str(raw_path)
+    if proc.returncode != 0:
+        status["live_rollout_error"] = "F1TENTH collector failed"
+        return None
 
-    if not trace:
+    raw_records = _load_jsonl(raw_path)
+    if not raw_records:
         status["live_rollout_error"] = "live rollout produced no observations"
         return None
+    rng = np.random.default_rng(seed)
+    trace = tuple(
+        _f1tenth_measurement_from_record(record, float(i), rng)
+        for i, record in enumerate(raw_records)
+    )
     return ProbeBundle(
         candidate="f1tenth",
         monitor=SafetyStreamMonitor(f1tenth_stream_profile()),
@@ -505,15 +908,36 @@ def _make_live_f1tenth_bundle(
             "dependency": status,
             "length": len(trace),
             "seed": seed,
+            "map": map_name,
+            "stress_randomize": stress_randomize,
         },
     )
 
 
-def _f1tenth_measurement_from_obs(
-    obs: Any,
+def _f1tenth_measurement_from_record(
+    record: dict[str, Any],
     time: float,
     rng: np.random.Generator,
 ) -> SafetyStreamMeasurement:
+    obs = record.get("obs", {})
+    true_values = _f1tenth_true_safety_streams(obs)
+    observed = true_values + rng.normal(0.0, 0.02, true_values.size)
+    collision = bool(np.asarray(obs.get("collisions", [False])).ravel()[0])
+    return SafetyStreamMeasurement(
+        time=float(record.get("time", time)),
+        values=tuple(float(v) for v in observed),
+        true_values=tuple(float(v) for v in true_values),
+        oracle_violation=bool(collision or np.any(true_values < 0.0)),
+        payload={
+            "trace_source": "f1tenth_live_gym_rollout",
+            "raw_step": int(record.get("step", 0)),
+            "done": bool(record.get("done", False)),
+            "raw_record": record,
+        },
+    )
+
+
+def _f1tenth_true_safety_streams(obs: Any) -> NDArray[np.float64]:
     data = obs[0] if isinstance(obs, tuple) else obs
     if not isinstance(data, dict):
         raise ValueError("expected F1TENTH observation dictionary")
@@ -533,28 +957,23 @@ def _f1tenth_measurement_from_obs(
 
     speed = _obs_scalar(data, "linear_vels_x", default=0.0)
     yaw_rate = abs(_obs_scalar(data, "ang_vels_z", default=0.0))
-    heading = abs(_obs_scalar(data, "poses_theta", default=0.0))
+    heading = abs(_wrap_angle(_obs_scalar(data, "poses_theta", default=0.0)))
     front_clearance = float(np.nanmin(front))
     side_clearance = float(min(np.nanmin(left), np.nanmin(right)))
     ttc = front_clearance / max(abs(speed), 0.2)
 
-    true_values = np.array([
-        front_clearance - 0.6,
-        side_clearance - 0.35,
-        ttc - 0.8,
-        side_clearance - 0.45,
-        0.35 - heading,
-        1.5 - abs(speed) - 0.4 * yaw_rate,
+    return np.array([
+        front_clearance - 1.2,
+        side_clearance - 0.55,
+        ttc - 1.0,
+        side_clearance - 0.65,
+        0.75 - heading,
+        1.8 - abs(speed) - 0.5 * yaw_rate,
     ], dtype=np.float64)
-    observed = true_values + rng.normal(0.0, 0.02, true_values.size)
-    collision = bool(np.asarray(data.get("collisions", [False])).ravel()[0])
-    return SafetyStreamMeasurement(
-        time=time,
-        values=tuple(float(v) for v in observed),
-        true_values=tuple(float(v) for v in true_values),
-        oracle_violation=bool(collision or np.any(true_values < 0.0)),
-        payload={"trace_source": "f1tenth_live_gym_rollout"},
-    )
+
+
+def _wrap_angle(angle: float) -> float:
+    return float((angle + np.pi) % (2.0 * np.pi) - np.pi)
 
 
 def _obs_scalar(data: dict[str, Any], key: str, *, default: float) -> float:
@@ -654,7 +1073,7 @@ def score_candidate(
     }
 
 
-def trace_summary(bundle: ProbeBundle) -> pd.DataFrame:
+def trace_summary(bundle: ProbeBundle, *, seed: int) -> pd.DataFrame:
     values = np.array([m.true_values for m in bundle.trace], dtype=np.float64)
     if values.size == 0:
         return pd.DataFrame(columns=TRACE_SUMMARY_COLUMNS)
@@ -663,6 +1082,7 @@ def trace_summary(bundle: ProbeBundle) -> pd.DataFrame:
         stream = values[:, i]
         rows.append({
             "candidate": bundle.candidate,
+            "seed": seed,
             "stream": name,
             "mean": float(np.mean(stream)),
             "min": float(np.min(stream)),
@@ -674,24 +1094,54 @@ def trace_summary(bundle: ProbeBundle) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=TRACE_SUMMARY_COLUMNS)
 
 
-def _candidate_bundle(name: str, *, length: int, seed: int) -> tuple[ProbeBundle | None, dict[str, Any]]:
+def _candidate_bundle(
+    name: str,
+    *,
+    length: int,
+    seed: int,
+    trace_source: TraceSource,
+    output: Path,
+    drone_controller: DroneController,
+    drone_sidecar_python: Path | None,
+    f1tenth_sidecar_python: Path | None,
+    f1tenth_map: str,
+    stress_randomize: bool = False,
+) -> tuple[ProbeBundle | None, dict[str, Any]]:
     if name == "drone":
-        bundle = make_drone_probe_bundle(length=length, seed=seed)
-        if bundle is None:
+        bundle = make_drone_probe_bundle(
+            length=length,
+            seed=seed,
+            trace_source=trace_source,
+            output=output,
+            controller_mode=drone_controller,
+            sidecar_python=drone_sidecar_python,
+            stress_randomize=stress_randomize,
+        )
+        if bundle is None or not bundle.trace:
             return None, {
                 "candidate": name,
                 "status": "unavailable",
-                "sidecar": _sidecar_status(),
-            }
+                "sidecar": _sidecar_status(python_path=drone_sidecar_python),
+                "trace_source": trace_source,
+            } if bundle is None else bundle.metadata
         return bundle, bundle.metadata
     if name == "f1tenth":
-        bundle = make_f1tenth_probe_bundle(length=length, seed=seed)
-        if bundle is None:
+        bundle = make_f1tenth_probe_bundle(
+            length=length,
+            seed=seed,
+            trace_source=trace_source,
+            output=output,
+            sidecar_python=f1tenth_sidecar_python,
+            map_name=f1tenth_map,
+            stress_randomize=stress_randomize,
+        )
+        if bundle is None or not bundle.trace:
             return None, {
                 "candidate": name,
                 "status": "unavailable",
-                "dependency": _f1tenth_status(),
-            }
+                "dependency": _f1tenth_status(sidecar_python=f1tenth_sidecar_python),
+                "trace_source": trace_source,
+            } if bundle is None else bundle.metadata
         return bundle, bundle.metadata
     raise ValueError(f"unknown robotics probe candidate: {name}")
 
@@ -701,17 +1151,35 @@ def run_probe(
     candidates: Sequence[str],
     length: int,
     seed: int,
+    seeds: int = 1,
+    warmup_steps: int = 0,
     budget: int,
     output: Path,
+    trace_source: TraceSource = "auto",
+    drone_controller: DroneController = "sim",
+    drone_sidecar_python: Path | None = None,
+    f1tenth_sidecar_python: Path | None = None,
+    f1tenth_map: str = "vegas",
 ) -> dict[str, Any]:
     """Run candidate probes and write all artifacts."""
+    if seeds < 1:
+        raise ValueError("seeds must be at least 1")
+    if warmup_steps < 0:
+        raise ValueError("warmup_steps must be non-negative")
     output.mkdir(parents=True, exist_ok=True)
     requested = ("drone", "f1tenth") if "all" in candidates else tuple(candidates)
+    seed_values = tuple(range(seed, seed + seeds))
 
     metadata: dict[str, Any] = {
         "length": length,
         "seed": seed,
+        "seeds": seeds,
+        "seed_values": list(seed_values),
+        "warmup_steps": warmup_steps,
         "budget": budget,
+        "trace_source": trace_source,
+        "drone_controller": drone_controller,
+        "f1tenth_map": f1tenth_map,
         "requested_candidates": list(requested),
         "candidates": {},
     }
@@ -719,19 +1187,62 @@ def run_probe(
     trace_summaries: list[pd.DataFrame] = []
     reports: list[dict[str, Any]] = []
 
-    for candidate in requested:
-        bundle, candidate_metadata = _candidate_bundle(candidate, length=length, seed=seed)
-        metadata["candidates"][candidate] = candidate_metadata
-        if bundle is None:
-            continue
+    for current_seed in seed_values:
+        seed_output = output if seeds == 1 else output / f"seed_{current_seed}"
+        seed_output.mkdir(parents=True, exist_ok=True)
+        for candidate in requested:
+            bundle, candidate_metadata = _candidate_bundle(
+                candidate,
+                length=length,
+                seed=current_seed,
+                trace_source=trace_source,
+                output=seed_output,
+                drone_controller=drone_controller,
+                drone_sidecar_python=drone_sidecar_python,
+                f1tenth_sidecar_python=f1tenth_sidecar_python,
+                f1tenth_map=f1tenth_map,
+            )
+            candidate_metadata = {**candidate_metadata, "seed": current_seed}
+            if seeds == 1:
+                metadata["candidates"][candidate] = candidate_metadata
+            else:
+                aggregate_metadata = metadata["candidates"].setdefault(
+                    candidate,
+                    {"candidate": candidate, "per_seed": []},
+                )
+                aggregate_metadata["per_seed"].append(candidate_metadata)
+                if candidate_metadata.get("status", "available") == "available":
+                    aggregate_metadata["status"] = "available"
+                else:
+                    aggregate_metadata.setdefault("status", candidate_metadata.get("status", "unavailable"))
+            if bundle is None:
+                continue
 
-        result = run_bundle(bundle, budget=budget, seed=seed)
-        summary = result["summary"].copy()
-        summary.insert(0, "candidate", candidate)
-        summaries.append(summary)
-        trace_summaries.append(trace_summary(bundle))
-        reports.append(result["report"])
-        result["timeseries"].to_csv(output / f"{candidate}_timeseries.csv", index=False)
+            bundle = _trim_bundle(bundle, warmup_steps)
+            if not bundle.trace:
+                empty_metadata = {
+                    **bundle.metadata,
+                    "status": "unavailable",
+                    "reason": "trace is empty after warmup trimming",
+                    "seed": current_seed,
+                }
+                if seeds == 1:
+                    metadata["candidates"][candidate] = empty_metadata
+                else:
+                    metadata["candidates"][candidate]["per_seed"][-1] = empty_metadata
+                continue
+
+            result = run_bundle(bundle, budget=budget, seed=current_seed)
+            summary = result["summary"].copy()
+            summary.insert(0, "candidate", candidate)
+            if "seed" not in summary.columns:
+                summary.insert(2, "seed", current_seed)
+            summaries.append(summary)
+            trace_summaries.append(trace_summary(bundle, seed=current_seed))
+            report = {**result["report"], "seed": current_seed}
+            reports.append(report)
+            result["timeseries"].to_csv(seed_output / f"{candidate}_timeseries.csv", index=False)
+            _write_trace_csv(bundle, seed_output / f"{candidate}_derived_streams.csv")
 
     method_scores = (
         pd.concat(summaries, ignore_index=True)
@@ -741,26 +1252,113 @@ def run_probe(
         pd.concat(trace_summaries, ignore_index=True)
         if trace_summaries else pd.DataFrame(columns=TRACE_SUMMARY_COLUMNS)
     )
+    candidate_scores = (
+        pd.DataFrame(reports)
+        if reports else pd.DataFrame(columns=REPORT_COLUMNS)
+    )
+    method_score_summary = _aggregate_method_scores(method_scores)
+    candidate_score_summary = _aggregate_candidate_scores(candidate_scores)
     method_scores.to_csv(output / "method_scores.csv", index=False)
     trace_scores.to_csv(output / "trace_summary.csv", index=False)
+    candidate_scores.to_csv(output / "candidate_scores.csv", index=False)
+    method_score_summary.to_csv(output / "method_score_summary.csv", index=False)
+    candidate_score_summary.to_csv(output / "candidate_score_summary.csv", index=False)
 
     metadata["reports"] = reports
     save_json(metadata, output / "probe_metadata.json")
-    _write_report_md(metadata, method_scores, output / "candidate_report.md")
+    _write_report_md(
+        metadata,
+        method_scores,
+        candidate_scores,
+        method_score_summary,
+        output / "candidate_report.md",
+    )
     return {
         "metadata": metadata,
         "method_scores": method_scores,
+        "method_score_summary": method_score_summary,
+        "candidate_scores": candidate_scores,
+        "candidate_score_summary": candidate_score_summary,
         "trace_summary": trace_scores,
         "reports": reports,
     }
 
 
-def _write_report_md(metadata: dict[str, Any], method_scores: pd.DataFrame, path: Path) -> None:
+def _aggregate_method_scores(method_scores: pd.DataFrame) -> pd.DataFrame:
+    if method_scores.empty:
+        return pd.DataFrame()
+    numeric = [
+        "mean_trigger_width",
+        "max_trigger_width",
+        "mean_generator_count",
+        "total_reductions",
+        "budget_violations",
+        "unsound_certificates",
+        "false_positive_rate",
+    ]
+    present = [c for c in numeric if c in method_scores.columns]
+    return (
+        method_scores
+        .groupby(["candidate", "method"])[present]
+        .agg(["mean", "std", "min", "max"])
+        .reset_index()
+        .pipe(_flatten_columns)
+    )
+
+
+def _aggregate_candidate_scores(candidate_scores: pd.DataFrame) -> pd.DataFrame:
+    if candidate_scores.empty:
+        return pd.DataFrame()
+    numeric = [
+        "relative_width_spread",
+        "differentiated_methods",
+        "reduction_rate",
+        "near_threshold_fraction",
+        "oracle_violation_fraction",
+        "budget_violations",
+        "unsound_certificates",
+    ]
+    present = [c for c in numeric if c in candidate_scores.columns]
+    aggregate = (
+        candidate_scores
+        .groupby("candidate")[present]
+        .agg(["mean", "std", "min", "max"])
+        .reset_index()
+        .pipe(_flatten_columns)
+    )
+    recommendations = (
+        candidate_scores
+        .groupby(["candidate", "recommendation"], as_index=False)
+        .size()
+        .rename(columns={"size": "recommendation_count"})
+    )
+    return aggregate.merge(recommendations, on="candidate", how="left")
+
+
+def _flatten_columns(df: pd.DataFrame) -> pd.DataFrame:
+    df = df.copy()
+    df.columns = [
+        "_".join(str(part) for part in col if str(part))
+        if isinstance(col, tuple) else str(col)
+        for col in df.columns
+    ]
+    return df
+
+
+def _write_report_md(
+    metadata: dict[str, Any],
+    method_scores: pd.DataFrame,
+    candidate_scores: pd.DataFrame,
+    method_score_summary: pd.DataFrame,
+    path: Path,
+) -> None:
     lines = [
         "# Robotics Probe Report",
         "",
         f"- length: {metadata['length']}",
         f"- seed: {metadata['seed']}",
+        f"- seeds: {metadata.get('seeds', 1)}",
+        f"- warmup_steps: {metadata.get('warmup_steps', 0)}",
         f"- budget: {metadata['budget']}",
         "",
         "## Candidate Status",
@@ -771,21 +1369,49 @@ def _write_report_md(metadata: dict[str, Any], method_scores: pd.DataFrame, path
         note = candidate_metadata.get("note")
         if note:
             lines.append(f"  - {note}")
+        if "per_seed" in candidate_metadata:
+            lines.append(f"  - per-seed traces: {len(candidate_metadata['per_seed'])}")
 
     if metadata.get("reports"):
         lines.extend(["", "## Recommendations"])
         for report in metadata["reports"]:
             lines.append(
-                f"- {report['candidate']}: {report['recommendation']} "
+                f"- {report['candidate']} seed {report.get('seed', metadata['seed'])}: "
+                f"{report['recommendation']} "
                 f"(relative width spread={report['relative_width_spread']:.3f}, "
-                f"reduction rate={report['reduction_rate']:.3f})"
+                f"reduction rate={report['reduction_rate']:.3f}, "
+                f"oracle violations={report['oracle_violation_fraction']:.3f})"
             )
+
+    if not candidate_scores.empty:
+        lines.extend(["", "## Candidate Scores", ""])
+        display_cols = [
+            "candidate",
+            "seed",
+            "recommendation",
+            "relative_width_spread",
+            "near_threshold_fraction",
+            "oracle_violation_fraction",
+        ]
+        lines.extend(_markdown_table(candidate_scores[display_cols]))
+
+    if not method_score_summary.empty:
+        lines.extend(["", "## Method Score Summary", ""])
+        display_cols = [
+            "candidate",
+            "method",
+            "mean_trigger_width_mean",
+            "mean_trigger_width_std",
+            "false_positive_rate_mean",
+        ]
+        lines.extend(_markdown_table(method_score_summary[display_cols]))
 
     if not method_scores.empty:
         lines.extend(["", "## Method Scores", ""])
         display_cols = [
             "candidate",
             "method",
+            "seed",
             "mean_trigger_width",
             "total_reductions",
             "budget_violations",
@@ -823,7 +1449,44 @@ def _parse_args(argv: Sequence[str] | None = None) -> argparse.Namespace:
     )
     parser.add_argument("--length", type=int, default=80)
     parser.add_argument("--seed", type=int, default=0)
+    parser.add_argument(
+        "--seeds",
+        type=int,
+        default=1,
+        help="Number of consecutive seeds to run, starting at --seed.",
+    )
+    parser.add_argument(
+        "--warmup-steps",
+        type=int,
+        default=0,
+        help="Drop this many initial measurements before scoring each trace.",
+    )
     parser.add_argument("--budget", type=int, default=10)
+    parser.add_argument(
+        "--trace-source",
+        choices=("proxy", "live", "auto"),
+        default="auto",
+        help="Use proxy traces, require live simulator traces, or try live then fall back.",
+    )
+    parser.add_argument(
+        "--drone-controller",
+        choices=("sim", "firmware"),
+        default="sim",
+        help="safe-control-gym controller path for live drone traces.",
+    )
+    parser.add_argument(
+        "--drone-sidecar-python",
+        type=Path,
+        default=None,
+        help="Python interpreter for the safe-control-gym sidecar.",
+    )
+    parser.add_argument(
+        "--f1tenth-sidecar-python",
+        type=Path,
+        default=None,
+        help="Python interpreter for the isolated F1TENTH sidecar.",
+    )
+    parser.add_argument("--f1tenth-map", default="vegas")
     parser.add_argument("--output", type=Path, default=Path("results/robotics-probe"))
     return parser.parse_args(argv)
 
@@ -834,14 +1497,22 @@ def main(argv: Sequence[str] | None = None) -> None:
         candidates=(args.candidate,),
         length=args.length,
         seed=args.seed,
+        seeds=args.seeds,
+        warmup_steps=args.warmup_steps,
         budget=args.budget,
         output=args.output,
+        trace_source=args.trace_source,
+        drone_controller=args.drone_controller,
+        drone_sidecar_python=args.drone_sidecar_python,
+        f1tenth_sidecar_python=args.f1tenth_sidecar_python,
+        f1tenth_map=args.f1tenth_map,
     )
     reports = result["reports"]
     if reports:
         for report in reports:
             print(
-                f"{report['candidate']}: {report['recommendation']} "
+                f"{report['candidate']} seed {report.get('seed', args.seed)}: "
+                f"{report['recommendation']} "
                 f"(relative width spread={report['relative_width_spread']:.3f})"
             )
     else:

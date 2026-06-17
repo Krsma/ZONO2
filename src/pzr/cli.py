@@ -28,14 +28,18 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--scenario",
         default="all",
-        help="Scenario(s) to run: all, omni_robot, simple_robot, point_mass, robot_arm",
+        help=(
+            "Scenario(s) to run: all, omni_robot, robot_arm, simple_robot, "
+            "point_mass. all excludes deprecated simple_robot/point_mass."
+        ),
     )
     parser.add_argument(
         "--method-set",
         default="all",
-        choices=["all", "static", "standard"],
+        choices=["all", "static", "standard", "headline", "paper_core"],
     )
     parser.add_argument("--budget", type=int, default=None)
+    parser.add_argument("--length", type=int, default=None)
     parser.add_argument("--horizon", type=int, default=None)
     parser.add_argument("--beam-width", type=int, default=None)
     parser.add_argument("--seeds", type=int, default=None)
@@ -51,13 +55,27 @@ def main(argv: list[str] | None = None) -> None:
         default=Path("results"),
     )
     parser.add_argument(
-        "--no-dagger",
-        action="store_true",
-        help="Skip the DAgger pipeline (DAgger runs by default)",
+        "--learned-mode",
+        choices=["none", "regret"],
+        default="none",
+        help="Optional learned reducer selector to train/evaluate after baselines.",
     )
-    parser.add_argument("--dagger-iterations", type=int, default=3)
-    parser.add_argument("--dagger-epochs", type=int, default=100)
-    parser.add_argument("--dagger-expert", type=str, default="mpc_sequence3")
+    parser.add_argument(
+        "--regret-oracle",
+        choices=["beam3", "sequence3", "pair_rollout3", "rollout_wide", "sequence_wide"],
+        default="beam3",
+        help="MPC teacher used for regret/ranking distillation.",
+    )
+    parser.add_argument("--regret-iterations", type=int, default=3)
+    parser.add_argument("--regret-epochs", type=int, default=100)
+    parser.add_argument("--regret-train-seeds", type=int, default=None)
+    parser.add_argument("--regret-eval-seeds", type=int, default=None)
+    parser.add_argument(
+        "--regret-loss",
+        choices=["pairwise", "mse"],
+        default="pairwise",
+        help="Training loss for regret/ranking distillation.",
+    )
     parser.add_argument(
         "--no-progress",
         action="store_true",
@@ -67,7 +85,7 @@ def main(argv: list[str] | None = None) -> None:
         "--budget-sweep",
         type=str,
         default=None,
-        help="Comma-separated list of budgets to sweep (e.g. '6,8,10,12'). Disables DAgger.",
+        help="Comma-separated list of budgets to sweep (e.g. '6,8,10,12').",
     )
 
     args = parser.parse_args(argv)
@@ -80,6 +98,8 @@ def main(argv: list[str] | None = None) -> None:
     }
     if args.budget is not None:
         overrides["budget"] = args.budget
+    if args.length is not None:
+        overrides["length"] = args.length
     if args.horizon is not None:
         overrides["horizon"] = args.horizon
     if args.beam_width is not None:
@@ -91,7 +111,7 @@ def main(argv: list[str] | None = None) -> None:
 
     if args.budget_sweep:
         budgets = [int(b.strip()) for b in args.budget_sweep.split(",")]
-        print(f"Budget sweep over {budgets} (DAgger disabled).")
+        print(f"Budget sweep over {budgets} (learned={args.learned_mode}).")
         _run_budget_sweep(config, budgets, args)
         return
 
@@ -106,6 +126,9 @@ def main(argv: list[str] | None = None) -> None:
     results = run_benchmark(config, show_progress=not args.no_progress)
     elapsed = time.perf_counter() - t0
 
+    if args.learned_mode == "regret":
+        _run_regret_distillation(config, results, args)
+
     save_benchmark_results(results, args.output)
 
     for name, r in results.items():
@@ -118,9 +141,6 @@ def main(argv: list[str] | None = None) -> None:
 
     print(f"\nBenchmark completed in {elapsed:.1f}s")
     print(f"Results saved to {args.output}/")
-
-    if not args.no_dagger:
-        _run_dagger(config, results, args)
 
     _generate_figures(results, args.output)
 
@@ -143,6 +163,8 @@ def _run_budget_sweep(
 
         t0 = time.perf_counter()
         results = run_benchmark(cfg, show_progress=not args.no_progress)
+        if args.learned_mode == "regret":
+            _run_regret_distillation(cfg, results, args, output_dir=budget_output)
         elapsed = time.perf_counter() - t0
 
         save_benchmark_results(results, budget_output)
@@ -170,60 +192,61 @@ def _run_budget_sweep(
     print(f"\nBudget sweep figures saved to {sweep_dir}/")
 
 
-def _run_dagger(
+def _run_regret_distillation(
     config: BenchmarkConfig,
     results: dict,
     args: argparse.Namespace,
+    output_dir: Path | None = None,
 ) -> None:
     from pzr.experiments.benchmark import (
-        TOP3_REDUCER_NAMES,
-        default_methods,
         default_scenarios,
+        registered_scenarios,
     )
-    from pzr.experiments.dagger_eval import train_and_evaluate_dagger
     from pzr.experiments.evaluation import aggregate_summary
+    from pzr.experiments.regret_eval import (
+        RegretOracleConfig,
+        train_and_evaluate_regret,
+        write_regret_artifacts,
+    )
     from pzr.experiments.runner import summarize_results
 
-    scenarios = default_scenarios()
-    if config.scenario != "all":
-        scenarios = [s for s in scenarios if s.name == config.scenario]
+    scenarios = (
+        default_scenarios()
+        if config.scenario == "all"
+        else [s for s in registered_scenarios() if s.name == config.scenario]
+    )
 
     for scenario in scenarios:
-        methods = default_methods(
-            scenario.monitor, config.budget, config.horizon, config.cost_weights,
-            config.beam_width,
+        train_count = args.regret_train_seeds or config.seeds
+        eval_count = args.regret_eval_seeds or max(config.seeds // 3, 3)
+        train_seeds = range(train_count)
+        eval_seeds = range(train_count, train_count + eval_count)
+        oracle_config = RegretOracleConfig(
+            mode=args.regret_oracle,
+            horizon=config.horizon,
+            beam_width=config.beam_width,
+            cost_weights=config.cost_weights,
         )
-        mpc_methods = [m for m in methods if m.name.startswith("mpc")]
-        if not mpc_methods:
-            print(f"\nSkipping DAgger for {scenario.name}: no MPC methods")
-            continue
-
-        method_by_name = {m.name: m for m in mpc_methods}
-        if args.dagger_expert not in method_by_name:
-            available = ", ".join(sorted(method_by_name))
-            raise ValueError(
-                f"unknown DAgger expert {args.dagger_expert!r}; available: {available}"
-            )
-        expert = method_by_name[args.dagger_expert].policy
-        train_seeds = range(config.seeds)
-        eval_seeds = range(config.seeds, config.seeds + max(config.seeds // 3, 3))
 
         print(f"\n{'=' * 60}")
-        print(f"  DAgger: {scenario.name} (expert={args.dagger_expert})")
+        print(
+            f"  Regret distillation: {scenario.name} "
+            f"(oracle={args.regret_oracle})"
+        )
         print(f"{'=' * 60}")
 
         t0 = time.perf_counter()
-        result = train_and_evaluate_dagger(
+        result = train_and_evaluate_regret(
             monitor=scenario.monitor,
             trace_fn=scenario.trace_fn,
-            expert_policy=expert,
             budget=config.budget,
             train_seeds=train_seeds,
             eval_seeds=eval_seeds,
             length=config.length,
-            dagger_iterations=args.dagger_iterations,
-            epochs_per_iteration=args.dagger_epochs,
-            candidate_names=TOP3_REDUCER_NAMES,
+            oracle_config=oracle_config,
+            iterations=args.regret_iterations,
+            epochs_per_iteration=args.regret_epochs,
+            regret_loss=args.regret_loss,
             show_progress=not args.no_progress,
         )
         elapsed = time.perf_counter() - t0
@@ -237,20 +260,39 @@ def _run_dagger(
         print(f"  Unsound certificates: {unsound}")
         if result.training_results:
             last = result.training_results[-1]
-            print(f"  Final train acc: {last.train_accuracy:.3f}")
-            print(f"  Final val acc: {last.val_accuracy:.3f}")
-        print(f"  DAgger completed in {elapsed:.1f}s")
+            print(f"  Final train top-1: {last.train_top1_accuracy:.3f}")
+            print(f"  Final val top-1: {last.val_top1_accuracy:.3f}")
+            print(f"  Final val chosen regret: {last.val_mean_chosen_regret:.6f}")
+        print(f"  Regret distillation completed in {elapsed:.1f}s")
 
         if scenario.name in results and result.eval_results:
             from pzr.experiments.runner import results_to_dataframe
-            dagger_summary = summarize_results(result.eval_results)
-            dagger_agg = aggregate_summary(dagger_summary)
-            dagger_ts = results_to_dataframe(result.eval_results)
+            regret_summary = summarize_results(result.eval_results)
+            regret_agg = aggregate_summary(regret_summary)
+            regret_ts = results_to_dataframe(result.eval_results)
 
             br = results[scenario.name]
-            br.aggregate = pd.concat([br.aggregate, dagger_agg], ignore_index=True)
-            br.summary = pd.concat([br.summary, dagger_summary], ignore_index=True)
-            br.timeseries = pd.concat([br.timeseries, dagger_ts], ignore_index=True)
+            br.aggregate = pd.concat([br.aggregate, regret_agg], ignore_index=True)
+            br.summary = pd.concat([br.summary, regret_summary], ignore_index=True)
+            br.timeseries = pd.concat([br.timeseries, regret_ts], ignore_index=True)
+            br.raw_results.extend(result.eval_results)
+
+            write_regret_artifacts(
+                result,
+                (output_dir or args.output) / "learning" / scenario.name,
+                metadata={
+                    "scenario": scenario.name,
+                    "length": config.length,
+                    "budget": config.budget,
+                    "horizon": config.horizon,
+                    "beam_width": config.beam_width,
+                    "train_seeds": list(train_seeds),
+                    "eval_seeds": list(eval_seeds),
+                    "cost_weights": config.cost_weights.__dict__,
+                    "candidate_names": list(oracle_config.candidate_names),
+                    "regret_loss": args.regret_loss,
+                },
+            )
 
             print(f"\n  Updated comparison table ({scenario.name}):")
             print(format_comparison_table(br.aggregate))

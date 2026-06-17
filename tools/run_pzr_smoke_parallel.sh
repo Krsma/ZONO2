@@ -44,7 +44,6 @@ mkdir -p "$(dirname "$LOG_PATH")" "$MPLCONFIGDIR"
     --horizon "$HORIZON" \
     --seeds "$SEEDS" \
     --jobs "$JOBS" \
-    --no-dagger \
     --no-progress \
     --output "$OUT_DIR"
 } 2>&1 | tee "$LOG_PATH"

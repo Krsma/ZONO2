@@ -25,9 +25,14 @@ HORIZON="${PZR_HORIZON:-4}"
 SEEDS="${PZR_SEEDS:-30}"
 JOBS="${PZR_JOBS:-4}"
 
-DAGGER_ARGS=(--no-dagger)
-if [[ "${PZR_WITH_DAGGER:-0}" == "1" ]]; then
-  DAGGER_ARGS=()
+LEARNED_ARGS=(--learned-mode none)
+if [[ "${PZR_WITH_REGRET:-0}" == "1" ]]; then
+  LEARNED_ARGS=(
+    --learned-mode regret
+    --regret-oracle "${PZR_REGRET_ORACLE:-beam3}"
+    --regret-iterations "${PZR_REGRET_ITERATIONS:-3}"
+    --regret-epochs "${PZR_REGRET_EPOCHS:-100}"
+  )
 fi
 
 mkdir -p "$(dirname "$LOG_PATH")" "$MPLCONFIGDIR"
@@ -43,7 +48,7 @@ mkdir -p "$(dirname "$LOG_PATH")" "$MPLCONFIGDIR"
   echo "  horizon: $HORIZON"
   echo "  seeds: $SEEDS"
   echo "  jobs: $JOBS"
-  echo "  dagger: $([[ ${#DAGGER_ARGS[@]} -eq 0 ]] && echo enabled || echo disabled)"
+  echo "  learned: ${LEARNED_ARGS[*]}"
   echo "  OMP_NUM_THREADS=$OMP_NUM_THREADS"
   echo "  OPENBLAS_NUM_THREADS=$OPENBLAS_NUM_THREADS"
   echo "  MKL_NUM_THREADS=$MKL_NUM_THREADS"
@@ -60,6 +65,6 @@ mkdir -p "$(dirname "$LOG_PATH")" "$MPLCONFIGDIR"
     --horizon "$HORIZON" \
     --seeds "$SEEDS" \
     --jobs "$JOBS" \
-    "${DAGGER_ARGS[@]}" \
+    "${LEARNED_ARGS[@]}" \
     --output "$OUT_DIR"
 } 2>&1 | tee "$LOG_PATH"

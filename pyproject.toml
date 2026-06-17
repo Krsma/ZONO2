@@ -33,6 +33,9 @@ dev = [
 [project.scripts]
 pzr-benchmark = "pzr.cli:main"
 pzr-robot-arm-animation = "pzr.experiments.robot_arm_animation:main"
+pzr-robotics-replay = "pzr.experiments.robotics_replay:main"
+pzr-paper-tables = "pzr.experiments.paper_tables:main"
+pzr-rtlola-benchmark = "pzr.rtlola.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

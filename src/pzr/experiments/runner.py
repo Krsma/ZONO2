@@ -24,7 +24,7 @@ from pzr.mpc.policies import (
     ReductionDecision,
     RolloutMPCPolicy,
 )
-from pzr.mpc.prediction import ConstantPredictor
+from pzr.mpc.prediction import ConstantPredictor, InputPredictor
 from pzr.utils.timing import timed
 from pzr.zonotope.protected import ProtectedReducer, reduce_with_protection
 from pzr.zonotope.reduction import Reducer, ReductionResult, _cert
@@ -84,6 +84,7 @@ class MPCReductionPolicy:
     policy: MPCPolicy | BeamMPCPolicy | RolloutMPCPolicy | PairRolloutMPCPolicy
     _name: str = ""
     horizon: int = 4
+    predictor: InputPredictor | None = None
 
     @property
     def name(self) -> str:
@@ -96,7 +97,7 @@ class MPCReductionPolicy:
         history: Sequence,
         budget: int,
     ) -> ReductionDecision:
-        predictor = ConstantPredictor()
+        predictor = self.predictor or ConstantPredictor()
         predicted = predictor.predict(history, self.horizon)
         decision = self.policy.select(monitor, state, predicted)
         return ReductionDecision(
@@ -134,6 +135,10 @@ class StepRecord:
     approx_error_sum: float = 0.0
     false_positive: bool = False
     exact_trigger_width_sum: float = 0.0
+    predicted_cost: float = 0.0
+    predicted_sequence: tuple[str, ...] = ()
+    evaluated_leaves: int = 0
+    pruned_branches: int = 0
 
 
 @dataclass
@@ -205,6 +210,10 @@ def run_single(
         reduced = False
         reducer_used = ""
         reduction_time = 0.0
+        predicted_cost = 0.0
+        predicted_sequence: tuple[str, ...] = ()
+        evaluated_leaves = 0
+        pruned_branches = 0
 
         if state.zonotope.generator_count > budget:
             decision_features = None
@@ -220,6 +229,10 @@ def run_single(
             state = decision.state
             reduced = True
             reducer_used = decision.reducer_name
+            predicted_cost = decision.predicted_cost
+            predicted_sequence = decision.predicted_sequence
+            evaluated_leaves = decision.evaluated_leaves
+            pruned_branches = decision.pruned_branches
             total_reductions += 1
             total_time_ms += reduction_time
 
@@ -268,6 +281,10 @@ def run_single(
             approx_error_sum=approx_error_sum,
             false_positive=false_positive,
             exact_trigger_width_sum=exact_width_sum,
+            predicted_cost=predicted_cost,
+            predicted_sequence=predicted_sequence,
+            evaluated_leaves=evaluated_leaves,
+            pruned_branches=pruned_branches,
         ))
 
     return RunResult(
@@ -298,6 +315,10 @@ def results_to_dataframe(results: list[RunResult]) -> pd.DataFrame:
                 "approx_error_sum": s.approx_error_sum,
                 "false_positive": s.false_positive,
                 "reduction_time_ms": s.reduction_time_ms,
+                "predicted_cost": s.predicted_cost,
+                "predicted_sequence": ",".join(s.predicted_sequence),
+                "evaluated_leaves": s.evaluated_leaves,
+                "pruned_branches": s.pruned_branches,
             }
             row.update(s.verdicts)
             rows.append(row)

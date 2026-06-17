@@ -6,7 +6,6 @@ Produces publication-quality matplotlib figures for:
 - Method comparison bar charts with confidence intervals
 - Budget sweep plots
 - Reducer selection frequency charts
-- DAgger learning curves
 - Inference time comparison
 """
 
@@ -35,7 +34,11 @@ METHOD_COLORS: dict[str, str] = {
     "mpc_sequence": "#ff7f0e",
     "mpc_sequence3": "#ffbb78",
     "mpc_beam3": "#2f4b7c",
-    "learned_dagger": "#f7b6d2",
+    "learned_regret_beam3": "#f7b6d2",
+    "learned_regret_sequence3": "#b07aa1",
+    "learned_regret_pair_rollout3": "#d37295",
+    "learned_regret_rollout_wide": "#a05195",
+    "learned_regret_sequence_wide": "#665191",
 }
 
 
@@ -347,32 +350,6 @@ def plot_budget_sweep(
     ax.set_title(title)
     ax.legend(fontsize=8)
     ax.grid(True, alpha=0.3)
-    fig.tight_layout()
-    if out_path:
-        _save_fig(fig, out_path)
-    return fig
-
-
-def plot_dagger_learning_curve(
-    train_accuracies: Sequence[float],
-    val_accuracies: Sequence[float] | None = None,
-    title: str = "DAgger Learning Curve",
-    out_path: Path | None = None,
-) -> plt.Figure:
-    """Plot train (and optionally val) accuracy per DAgger iteration."""
-    fig, ax = plt.subplots(figsize=(7, 4))
-    iterations = list(range(1, len(train_accuracies) + 1))
-    ax.plot(iterations, train_accuracies, "o-", label="Train", linewidth=1.5,
-            color=METHOD_COLORS["mpc_rollout"])
-    if val_accuracies:
-        ax.plot(iterations, val_accuracies, "s--", label="Validation", linewidth=1.5,
-                color=METHOD_COLORS["learned_dagger"])
-    ax.set_xlabel("DAgger Iteration")
-    ax.set_ylabel("Accuracy")
-    ax.set_title(title)
-    ax.legend()
-    ax.grid(True, alpha=0.3)
-    ax.set_ylim(0, 1.05)
     fig.tight_layout()
     if out_path:
         _save_fig(fig, out_path)

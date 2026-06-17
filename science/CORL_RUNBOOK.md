@@ -134,10 +134,10 @@ Expected core outputs:
 - `headline_quality.md`
 - `analysis_notes.json`
 
-`dagger_dataset.csv` and learned-policy checkpoints are written only when
-`--learned-mode dagger` is used. Learned rows should be treated as headline
-evidence only when `learning/dagger_label_summary.csv` passes the label
-diversity gate recorded in `analysis_notes.json`.
+Regret/ranking learned-policy artifacts are written only when
+`--learned-mode regret` is used. Learned rows should be treated as headline
+evidence only when the regret diagnostics in `learning/` show low chosen regret
+and no collapse to a pathological reducer ranking.
 
 ## Calibration Sweep
 
@@ -195,16 +195,14 @@ nohup pzr-run-corl \
   --max-steps 1000 \
   --train-seeds 20 \
   --eval-seeds 50 \
-  --dagger-iterations 3 \
-  --dagger-expert mpc_wide_fixed_girard \
   --bootstrap-samples 5000 \
   --fail-on-unusable \
   > results/logs/corl-main-$(date +%Y%m%d).log 2>&1 &
 ```
 
-For the learned-policy ablation, add `--learned-mode dagger`. The learned row is
-omitted from the headline table unless the label-diversity gate passes, unless
-`--include-failed-learned` is explicitly supplied for diagnostics.
+For the learned-policy ablation, add `--learned-mode regret`. The learned row
+should be treated as diagnostic unless regret/ranking metrics and held-out
+intervention metrics both support the claim.
 
 ## Morning Inspection
 
@@ -221,9 +219,9 @@ Then inspect `intervention_timeseries.csv` for spurious, justified, and missed
 interventions, and `monitor_timeseries.csv` for reducer latency, budget
 violations, unsound certificates, and sequence-search behavior.
 Check `failure_events.csv`; it should be empty for headline evidence.
-Check `learning/dagger_label_summary.csv` before treating the learned selector
-as paper evidence; the label-diversity gate should pass rather than collapse to
-one reducer.
+Check the regret/ranking artifacts under `learning/` before treating the
+learned selector as paper evidence; the learned policy should choose low-regret
+reducers on held-out rollouts rather than collapse to one bad ranking.
 Treat `headline_quality.md` or `analysis_notes.json` reporting
 `paper_usable=false` as a failed headline run even if the process completed and
 all CSV files were written.

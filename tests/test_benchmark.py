@@ -5,12 +5,15 @@ import pytest
 
 from pzr.experiments.benchmark import (
     BenchmarkResult,
+    deprecated_scenarios,
     default_methods,
     default_scenarios,
+    registered_scenarios,
     run_benchmark,
     save_benchmark_results,
 )
 from pzr.experiments.config import BenchmarkConfig, from_profile, save_config, load_config
+from pzr.cli import main as cli_main
 
 
 class TestConfig:
@@ -53,12 +56,30 @@ class TestBenchmark:
         assert all(result.summary["budget_violations"] == 0)
         assert all(result.summary["unsound_certificates"] == 0)
 
-    def test_smoke_both_scenarios(self, tmp_path):
+    def test_smoke_default_scenarios_exclude_deprecated(self, tmp_path):
         config = from_profile("smoke", scenario="all", output_dir=str(tmp_path))
         results = run_benchmark(config)
+        registered = {s.name for s in registered_scenarios()}
         assert "omni_robot" in results
-        assert "simple_robot" in results
-        assert "robot_arm" in results
+        assert "simple_robot" not in results
+        assert "point_mass" not in results
+        if "robot_arm" in registered:
+            assert "robot_arm" in results
+
+    def test_registered_scenarios_keep_deprecated_explicit_options(self):
+        registered = {s.name: s for s in registered_scenarios()}
+        defaults = {s.name for s in default_scenarios()}
+        deprecated = {s.name for s in deprecated_scenarios()}
+
+        assert "simple_robot" in registered
+        assert "simple_robot" in deprecated
+        assert "simple_robot" not in defaults
+        if "point_mass" in registered:
+            assert "point_mass" in deprecated
+            assert "point_mass" not in defaults
+        assert "omni_robot" in defaults
+        if "robot_arm" in registered:
+            assert "robot_arm" in defaults
 
     def test_static_only(self, tmp_path):
         config = from_profile("smoke", scenario="omni_robot", method_set="static")
@@ -91,6 +112,32 @@ class TestBenchmark:
         assert "mpc_beam3" not in standard_names
         assert "mpc_pair_rollout3" not in standard_names
 
+        headline_config = from_profile(
+            "smoke", scenario="omni_robot", method_set="headline", seeds=1,
+        )
+        headline = run_benchmark(headline_config, show_progress=False)
+        headline_names = set(headline["omni_robot"].summary["method"].unique())
+        assert {
+            "mpc_rollout",
+            "mpc_pair_rollout3",
+            "mpc_beam3",
+            "mpc_sequence3",
+        } <= headline_names
+        assert "mpc_rollout_scott" not in headline_names
+        assert "mpc_rollout_methA" not in headline_names
+
+        core_config = from_profile(
+            "smoke", scenario="omni_robot", method_set="paper_core", seeds=1,
+        )
+        core = run_benchmark(core_config, show_progress=False)
+        core_names = set(core["omni_robot"].summary["method"].unique())
+        assert {
+            "mpc_rollout",
+            "mpc_pair_rollout3",
+            "mpc_beam3",
+        } <= core_names
+        assert "mpc_sequence3" not in core_names
+
     def test_save_results(self, tmp_path):
         config = from_profile("smoke", scenario="omni_robot")
         results = run_benchmark(config)
@@ -102,6 +149,76 @@ class TestBenchmark:
         assert (tmp_path / "output" / "config.yaml").exists()
         assert (tmp_path / "output" / "manifest.json").exists()
 
+    def test_cli_default_runs_no_learned_policy(self, tmp_path):
+        output = tmp_path / "default"
+        cli_main([
+            "--profile", "smoke",
+            "--scenario", "omni_robot",
+            "--method-set", "static",
+            "--length", "12",
+            "--seeds", "1",
+            "--no-progress",
+            "--output", str(output),
+        ])
+        summary = pd.read_csv(output / "omni_robot" / "summary.csv")
+        timeseries = pd.read_csv(output / "omni_robot" / "timeseries.csv")
+        assert not any(summary["method"].str.startswith("learned_regret"))
+        assert int(timeseries["step"].max()) == 11
+
+    def test_cli_regret_persists_learned_rows(self, tmp_path):
+        output = tmp_path / "regret"
+        cli_main([
+            "--profile", "smoke",
+            "--scenario", "omni_robot",
+            "--method-set", "static",
+            "--seeds", "1",
+            "--learned-mode", "regret",
+            "--regret-oracle", "beam3",
+            "--regret-iterations", "1",
+            "--regret-epochs", "5",
+            "--regret-train-seeds", "1",
+            "--regret-eval-seeds", "1",
+            "--no-progress",
+            "--output", str(output),
+        ])
+        summary = pd.read_csv(output / "omni_robot" / "summary.csv")
+        timeseries = pd.read_csv(output / "omni_robot" / "timeseries.csv")
+        aggregate = pd.read_csv(output / "omni_robot" / "aggregate.csv")
+        assert "learned_regret_beam3" in set(summary["method"])
+        assert "learned_regret_beam3" in set(timeseries["method"])
+        assert "learned_regret_beam3" in set(aggregate["method"])
+        assert (output / "learning" / "omni_robot" / "regret_candidate_costs.csv").exists()
+
+    def test_cli_budget_sweep_regret_persists_learned_rows_per_budget(self, tmp_path):
+        output = tmp_path / "regret_sweep"
+        cli_main([
+            "--profile", "smoke",
+            "--scenario", "omni_robot",
+            "--method-set", "static",
+            "--seeds", "1",
+            "--budget-sweep", "8,10",
+            "--learned-mode", "regret",
+            "--regret-oracle", "beam3",
+            "--regret-iterations", "1",
+            "--regret-epochs", "5",
+            "--regret-train-seeds", "1",
+            "--regret-eval-seeds", "1",
+            "--no-progress",
+            "--output", str(output),
+        ])
+        for budget in (8, 10):
+            budget_dir = output / f"budget_{budget}"
+            summary = pd.read_csv(budget_dir / "omni_robot" / "summary.csv")
+            aggregate = pd.read_csv(budget_dir / "omni_robot" / "aggregate.csv")
+            assert "learned_regret_beam3" in set(summary["method"])
+            assert "learned_regret_beam3" in set(aggregate["method"])
+            assert (
+                budget_dir
+                / "learning"
+                / "omni_robot"
+                / "regret_candidate_costs.csv"
+            ).exists()
+
     def test_point_mass_scenario(self, tmp_path):
         config = from_profile("smoke", scenario="point_mass", output_dir=str(tmp_path))
         results = run_benchmark(config)
@@ -111,13 +228,24 @@ class TestBenchmark:
         assert all(result.summary["budget_violations"] == 0)
         assert all(result.summary["unsound_certificates"] == 0)
 
-    def test_all_scenarios(self, tmp_path):
+    def test_explicit_simple_robot_still_runs(self, tmp_path):
+        config = from_profile("smoke", scenario="simple_robot", output_dir=str(tmp_path))
+        results = run_benchmark(config)
+        assert "simple_robot" in results
+        result = results["simple_robot"]
+        assert len(result.summary) > 0
+        assert all(result.summary["budget_violations"] == 0)
+        assert all(result.summary["unsound_certificates"] == 0)
+
+    def test_all_scenarios_runs_default_headline_set(self, tmp_path):
         config = from_profile("smoke", scenario="all", output_dir=str(tmp_path))
         results = run_benchmark(config)
+        registered = {s.name for s in registered_scenarios()}
         assert "omni_robot" in results
-        assert "simple_robot" in results
-        assert "point_mass" in results
-        assert "robot_arm" in results
+        assert "simple_robot" not in results
+        assert "point_mass" not in results
+        if "robot_arm" in registered:
+            assert "robot_arm" in results
 
     def test_girard_beats_box(self, tmp_path):
         config = from_profile("smoke", scenario="omni_robot", method_set="static")

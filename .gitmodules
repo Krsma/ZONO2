@@ -1,0 +1,3 @@
+[submodule "rlolapythonbinding"]
+	path = rlolapythonbinding
+	url = git@projects.cispa.saarland:group-finkbeiner/tools/RTLola/rlolapythonbinding.git

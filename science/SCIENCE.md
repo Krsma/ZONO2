@@ -152,14 +152,14 @@ generators per step. The `InterventionManager` closes the loop between
 monitor verdicts and controller fallback. Code: `pzr.robotics.iros`,
 `pzr.robotics.safe_control_gym`.
 
-The learning pipeline (`pzr.learning`) provides DAgger-based policy
-distillation against MPC experts. `pzr.learning.features` extracts 19 numeric
-decision features at each reduction point. `pzr.learning.dagger` implements
-the on-policy aggregation loop. `pzr.learning.policy` wraps trained
-checkpoints as `LearnedReductionPolicy`.
+The learning pipeline provides regret/ranking distillation against MPC
+teachers. Feature extraction summarizes each reduction state, while the
+distillation target stores per-candidate MPC costs and normalized regrets
+instead of only the winning reducer label. The learned selector ranks certified
+reducers; the reducer certificates remain the soundness boundary.
 
 The CoRL experiment suite (`pzr.experiments.corl_suite`) orchestrates
-preflight, calibration, DAgger training, and heldout evaluation for the IROS
+preflight, calibration, learned regret/ranking distillation, and heldout evaluation for the IROS
 gate-flying task. It runs safe-control-gym through a sidecar subprocess
 interface (`pzr.robotics.safe_control_gym.SidecarSafeControlGymClient`).
 
@@ -473,7 +473,7 @@ separate from the bounded noisy observations the monitor sees.
 ## CoRL Experiment Infrastructure
 
 The CoRL suite (`pzr-run-corl` entry point) orchestrates preflight validation,
-optional calibration sweeps, DAgger training, and heldout evaluation. It runs
+optional calibration sweeps, learned regret/ranking distillation, and heldout evaluation. It runs
 safe-control-gym in a sidecar Python 3.8 conda environment while the main PZR
 package runs on Python 3.11+.
 
@@ -509,20 +509,19 @@ CoRL-specific outputs include `headline_table.csv`, `headline_table.md`,
 `failure_events.csv`, `selection_summary.csv`, `predicted_sequence_summary.csv`,
 and `analysis_notes.json`, alongside the standard benchmark outputs.
 
-## DAgger Learning Pipeline
+## Regret/Ranking Learning Pipeline
 
-DAgger is secondary deployability evidence, not the headline controller claim.
-The DAgger loop (implemented in `pzr.experiments.corl_suite._run_dagger_training`)
-iterates:
+Regret/ranking distillation is secondary deployability evidence, not the
+headline controller claim. The loop iterates:
 
 1. Roll out the current learned selector on training seeds in the closed-loop
    Crazyflie environment.
-2. At each learner-induced over-budget state, query the MPC expert (default
-   `mpc_wide_fixed_girard`) for its certified reducer choice.
-3. Aggregate new decision-feature rows with previous rounds.
-4. Retrain a small MLP classifier on the accumulated feature rows using
-   `pzr.learning.distill_cli.train_policy`.
-5. Repeat for `dagger_iterations` rounds (default 3 for overnight).
+2. At each learner-induced over-budget state, query an MPC teacher for
+   per-candidate first-action costs.
+3. Convert candidate costs into normalized regrets and aggregate them with
+   previous rounds.
+4. Retrain a small MLP ranker to predict one regret score per candidate.
+5. Repeat for the configured number of distillation rounds.
 
 Decision features (19 numeric features from `pzr.learning.features`): generator
 count, state dimension, budget headroom, zonotope order, generator-count growth
@@ -535,11 +534,10 @@ reducers from a fixed certified set. The chosen reducer still produces a
 certificate `Z subseteq Z'`, `gen(Z') <= K`. If the learned policy picks a
 suboptimal reducer, precision degrades but soundness is preserved.
 
-A label-diversity gate checks that training data contains at least 3 distinct
-reducer labels and no single label exceeds 90% of rows. If this gate fails, the
-learned selector is excluded from headline results. The gate catches degenerate
-scenarios where the expert always selects the same reducer, making the learning
-problem trivial.
+Regret diagnostics check chosen-action regret, second-best margins, near-tie
+fractions, and reducer ranking collapse. Learned selectors are excluded from
+headline claims when they choose high-regret reducers or only reproduce a
+degenerate constant ranking.
 
 ## CoRL Notation Conventions
 

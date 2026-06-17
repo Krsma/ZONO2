@@ -21,8 +21,6 @@ PZR_CORL_CALIBRATION_MAX_STEPS="${PZR_CORL_CALIBRATION_MAX_STEPS:-1000}"
 PZR_CORL_TRAIN_SEEDS="${PZR_CORL_TRAIN_SEEDS:-20}"
 PZR_CORL_EVAL_SEEDS="${PZR_CORL_EVAL_SEEDS:-50}"
 PZR_CORL_PAPER_EVAL_SEEDS="${PZR_CORL_PAPER_EVAL_SEEDS:-100}"
-PZR_CORL_DAGGER_ITERATIONS="${PZR_CORL_DAGGER_ITERATIONS:-3}"
-PZR_CORL_DAGGER_EXPERT="${PZR_CORL_DAGGER_EXPERT:-mpc_wide_fixed_girard}"
 PZR_CORL_BOOTSTRAP_SAMPLES="${PZR_CORL_BOOTSTRAP_SAMPLES:-5000}"
 PZR_CORL_MONITOR_OVERLAP="${PZR_CORL_MONITOR_OVERLAP:-}"
 PZR_CORL_GENERATOR_MEMORY_DECAY="${PZR_CORL_GENERATOR_MEMORY_DECAY:-}"
@@ -30,7 +28,7 @@ PZR_CORL_GENERATOR_MEMORY_DECAY="${PZR_CORL_GENERATOR_MEMORY_DECAY:-}"
 CALIBRATION_OUT="$ROOT_DIR/results/corl-level0-calibration-monitor-first-$RUN_ID"
 HELDOUT_OUT="$ROOT_DIR/results/corl-level0-core-heldout-$RUN_ID"
 PAPER_OUT="$ROOT_DIR/results/corl-level0-core-paper-$RUN_ID"
-DAGGER_OUT="$ROOT_DIR/results/corl-level0-dagger-$RUN_ID"
+REGRET_OUT="$ROOT_DIR/results/corl-level0-regret-$RUN_ID"
 
 FORCE_ARGS=()
 if [[ "${PZR_CORL_FORCE:-0}" == "1" ]]; then
@@ -60,8 +58,6 @@ COMMON_RUN_ARGS=(
   --horizon "$PZR_CORL_HORIZON"
   --max-steps "$PZR_CORL_MAX_STEPS"
   "${MONITOR_ARGS[@]}"
-  --dagger-iterations "$PZR_CORL_DAGGER_ITERATIONS"
-  --dagger-expert "$PZR_CORL_DAGGER_EXPERT"
   --bootstrap-samples "$PZR_CORL_BOOTSTRAP_SAMPLES"
 )
 
@@ -181,16 +177,18 @@ print(f"{label} passed headline checks.")
 PY
 }
 
-report_dagger_gate() {
-  python - "$DAGGER_OUT/analysis_notes.json" <<'PY'
+report_regret_notes() {
+  python - "$REGRET_OUT/analysis_notes.json" <<'PY'
 import json
 import sys
 
 with open(sys.argv[1], "r", encoding="utf-8") as handle:
     notes = json.load(handle)
-quality = notes.get("learning_label_quality", {})
-print("DAgger label diversity gate:", quality.get("passes_gate", False))
-print(json.dumps(quality, indent=2, sort_keys=True))
+learning = {
+    key: value for key, value in notes.items()
+    if "learning" in key or "regret" in key
+}
+print(json.dumps(learning, indent=2, sort_keys=True))
 PY
 }
 
@@ -261,22 +259,22 @@ fi
   validate_headline_run "$PAPER_OUT" "core paper-scale"
 
   echo
-  echo "Running Level0 DAgger ablation: $DAGGER_OUT"
+  echo "Running Level0 regret learned-policy ablation: $REGRET_OUT"
   pzr-run-corl \
     "${COMMON_RUN_ARGS[@]}" \
-    --learned-mode dagger \
+    --learned-mode regret \
     --train-seeds "$PZR_CORL_TRAIN_SEEDS" \
     --eval-seeds "$PZR_CORL_EVAL_SEEDS" \
-    --out "$DAGGER_OUT" \
+    --out "$REGRET_OUT" \
     "${FORCE_ARGS[@]}" \
     --fail-on-unusable
-  validate_headline_run "$DAGGER_OUT" "dagger ablation"
-  report_dagger_gate
+  validate_headline_run "$REGRET_OUT" "regret ablation"
+  report_regret_notes
 
   echo
   echo "CoRL Level0 full pipeline completed."
   echo "Calibration: $CALIBRATION_OUT"
   echo "Core held-out: $HELDOUT_OUT"
   echo "Core paper-scale: $PAPER_OUT"
-  echo "DAgger ablation: $DAGGER_OUT"
+  echo "Regret ablation: $REGRET_OUT"
 } 2>&1 | tee "$LOG_PATH"

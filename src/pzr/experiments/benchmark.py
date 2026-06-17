@@ -75,6 +75,29 @@ STANDARD_METHOD_NAMES = (
     "mpc_rollout",
     "mpc_sequence",
 )
+HEADLINE_METHOD_NAMES = (
+    "girard",
+    "combastel",
+    "pca",
+    "methA",
+    "scott",
+    "box",
+    "mpc_rollout",
+    "mpc_pair_rollout3",
+    "mpc_sequence3",
+    "mpc_beam3",
+)
+PAPER_CORE_METHOD_NAMES = (
+    "girard",
+    "combastel",
+    "pca",
+    "methA",
+    "scott",
+    "box",
+    "mpc_rollout",
+    "mpc_pair_rollout3",
+    "mpc_beam3",
+)
 
 
 @dataclass
@@ -92,6 +115,8 @@ class ScenarioSpec:
     name: str
     monitor: MonitorAdapter
     trace_fn: Callable[[int, int], Sequence]
+    deprecated: bool = False
+    deprecation_reason: str = ""
 
 
 @dataclass
@@ -105,7 +130,8 @@ class BenchmarkResult:
     aggregate: pd.DataFrame
 
 
-def default_scenarios() -> list[ScenarioSpec]:
+def registered_scenarios() -> list[ScenarioSpec]:
+    """Return every registered benchmark scenario, including deprecated ones."""
     scenarios = [
         ScenarioSpec(
             name="omni_robot",
@@ -116,6 +142,10 @@ def default_scenarios() -> list[ScenarioSpec]:
             name="simple_robot",
             monitor=SimpleRobotMonitor(),
             trace_fn=lambda length, seed: generate_simple_robot_trace(length, seed=seed),
+            deprecated=True,
+            deprecation_reason=(
+                "Degenerate long-rollout checks tie best static across tested budgets."
+            ),
         ),
     ]
     if _HAS_MUJOCO:
@@ -130,6 +160,10 @@ def default_scenarios() -> list[ScenarioSpec]:
                 ),
             ),
             trace_fn=lambda length, seed: generate_point_mass_trace(length, seed=seed),
+            deprecated=True,
+            deprecation_reason=(
+                "Degenerate long-rollout checks tie best static across tested budgets."
+            ),
         ))
         scenarios.append(ScenarioSpec(
             name="robot_arm",
@@ -142,6 +176,16 @@ def default_scenarios() -> list[ScenarioSpec]:
             trace_fn=lambda length, seed: generate_robot_arm_trace(length, seed=seed),
         ))
     return scenarios
+
+
+def default_scenarios() -> list[ScenarioSpec]:
+    """Return scenarios used by `scenario=all` headline/default benchmark runs."""
+    return [scenario for scenario in registered_scenarios() if not scenario.deprecated]
+
+
+def deprecated_scenarios() -> list[ScenarioSpec]:
+    """Return registered scenarios that are explicit-only diagnostic baselines."""
+    return [scenario for scenario in registered_scenarios() if scenario.deprecated]
 
 
 def default_methods(
@@ -279,11 +323,15 @@ def _filter_methods(methods: list[MethodSpec], method_set: str) -> list[MethodSp
         return [m for m in methods if not m.name.startswith("mpc")]
     if method_set == "standard":
         return [m for m in methods if m.name in STANDARD_METHOD_NAMES]
-    return methods
+    if method_set == "headline":
+        return [m for m in methods if m.name in HEADLINE_METHOD_NAMES]
+    if method_set == "paper_core":
+        return [m for m in methods if m.name in PAPER_CORE_METHOD_NAMES]
+    raise ValueError(f"unknown method_set: {method_set}")
 
 
 def _default_scenario_by_name(name: str) -> ScenarioSpec:
-    for scenario in default_scenarios():
+    for scenario in registered_scenarios():
         if scenario.name == name:
             return scenario
     raise ValueError(f"unknown scenario: {name}")
@@ -391,9 +439,12 @@ def run_benchmark(
 ) -> dict[str, BenchmarkResult]:
     """Run the full benchmark across scenarios."""
     if scenarios is None:
-        all_scenarios = default_scenarios()
-        if config.scenario != "all":
-            all_scenarios = [s for s in all_scenarios if s.name == config.scenario]
+        if config.scenario == "all":
+            all_scenarios = default_scenarios()
+        else:
+            all_scenarios = [
+                s for s in registered_scenarios() if s.name == config.scenario
+            ]
     else:
         all_scenarios = scenarios
 

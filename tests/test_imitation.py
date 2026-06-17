@@ -1,4 +1,4 @@
-"""Tests for imitation learning: features, traces, dataset, policy, DAgger."""
+"""Tests for imitation learning: features, traces, datasets, and policies."""
 
 import json
 import tempfile
@@ -10,6 +10,7 @@ import pytest
 from pzr.imitation.dataset import ReductionDataset, build_dataset, class_balanced_indices
 from pzr.imitation.features import FEATURE_NAMES, extract_features
 from pzr.imitation.policy import LearnedPolicy, train_policy
+from pzr.imitation.regret import RegretDataset, RegretRankingPolicy, train_regret_policy
 from pzr.imitation.traces import ReductionTrace, TraceCollector
 from pzr.monitoring.base import MonitorState, TriggerSpec
 from pzr.systems.omni_robot import OmniRobotMonitor, generate_omni_robot_trace
@@ -212,6 +213,74 @@ class TestPolicy:
     def test_select_reducer_preserves_calibration_indices(self):
         policy = LearnedPolicy(
             class_names=("box",),
+            feature_mean=np.zeros(1),
+            feature_std=np.ones(1),
+            weights=[np.zeros((1, 1))],
+            biases=[np.zeros(1)],
+        )
+        z = Zonotope(
+            np.zeros(2),
+            np.array([
+                [1e-6, 10.0, 0.0, 9.0, 0.0],
+                [0.0, 0.0, 10.0, 0.0, 9.0],
+            ]),
+        )
+        candidates = {"box": ProtectedReducer(base=BoxReducer())}
+
+        result = policy.select_reducer(
+            np.array([0.0]), candidates, z, budget=3,
+            protected_indices=(0,),
+        )
+
+        assert result is not None
+        _, red_result = result
+        np.testing.assert_allclose(red_result.reduced.generators[:, 0], z.generators[:, 0])
+
+
+class TestRegretPolicy:
+    def _make_regret_dataset(self, n=200, seed=42):
+        rng = np.random.default_rng(seed)
+        features = rng.standard_normal((n, 4))
+        regrets = np.zeros((n, 3), dtype=np.float64)
+        regrets[:, 0] = np.maximum(0.0, features[:, 0])
+        regrets[:, 1] = np.maximum(0.0, -features[:, 0])
+        regrets[:, 2] = 0.5 + 0.1 * np.abs(features[:, 1])
+        return RegretDataset(features, regrets, ("left", "right", "backup"))
+
+    def test_train_regret_policy_learns_ranking(self):
+        ds = self._make_regret_dataset()
+        policy, result = train_regret_policy(
+            ds, hidden_sizes=(32,), epochs=250, learning_rate=3e-3, loss="mse",
+        )
+        assert result.train_loss < 0.2
+        assert result.val_mean_chosen_regret < 0.4
+        assert set(policy.rank_reducers(np.array([2.0, 0.0, 0.0, 0.0]))) == {
+            "left", "right", "backup",
+        }
+
+    def test_pairwise_regret_policy_learns_ranking(self):
+        ds = self._make_regret_dataset()
+        policy, result = train_regret_policy(
+            ds, hidden_sizes=(32,), epochs=250, learning_rate=3e-3, loss="pairwise",
+        )
+        assert result.val_mean_chosen_regret < 0.35
+        assert policy.rank_reducers(np.array([2.0, 0.0, 0.0, 0.0]))[0] == "right"
+
+    def test_regret_policy_save_and_load(self, tmp_path):
+        ds = self._make_regret_dataset()
+        policy, _ = train_regret_policy(ds, hidden_sizes=(16,), epochs=50)
+        path = tmp_path / "regret_policy.npz"
+        policy.save(path)
+        loaded = RegretRankingPolicy.load(path)
+
+        x = np.array([0.2, -0.3, 0.1, 0.0])
+        np.testing.assert_allclose(policy.predict_regret(x), loaded.predict_regret(x))
+        assert loaded.candidate_names == policy.candidate_names
+        assert loaded.feature_names == policy.feature_names
+
+    def test_regret_select_reducer_preserves_calibration_indices(self):
+        policy = RegretRankingPolicy(
+            candidate_names=("box",),
             feature_mean=np.zeros(1),
             feature_std=np.ones(1),
             weights=[np.zeros((1, 1))],

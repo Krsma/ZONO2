@@ -1,4 +1,4 @@
-# CoRL Framing: Robotics Interventions, DAgger, and CORA Parity
+# CoRL Framing: Robotics Interventions, Regret Distillation, and CORA Parity
 
 ## Claim Scope
 
@@ -45,12 +45,13 @@ parameters, and no hidden controller-specific side effects in predicate logic.
 ## Learning Story
 
 One-shot distillation is a useful baseline but should not be the main learning
-story. Use DAgger:
+story. Use regret/ranking distillation:
 
 1. Roll out the current learned selector on training seeds.
-2. Query the MPC/oracle expert at learner-induced over-budget states.
-3. Aggregate new examples with previous data.
-4. Retrain with class balancing.
+2. Query the MPC/oracle teacher for all candidate first-action costs at
+   learner-induced over-budget states.
+3. Aggregate normalized per-candidate regrets with previous data.
+4. Retrain a ranker that predicts one regret score per reducer.
 5. Validate on held-out closed-loop rollouts, not only row-wise accuracy.
 
 The trusted boundary stays unchanged: learned policies only rank reducers;

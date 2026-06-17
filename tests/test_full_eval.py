@@ -9,16 +9,18 @@ from pzr.experiments.benchmark import (
     save_benchmark_results,
 )
 from pzr.experiments.config import from_profile
-from pzr.experiments.dagger_eval import (
-    DAggerEvalResult,
-    LearnedReductionPolicy,
-    collect_expert_traces,
-    train_and_evaluate_dagger,
-)
 from pzr.experiments.figures import (
-    plot_dagger_learning_curve,
     plot_inference_time_comparison,
     plot_method_comparison_bars,
+)
+from pzr.experiments.regret_eval import (
+    REGRET_ORACLE_MODES,
+    RegretEvalResult,
+    RegretOracleConfig,
+    build_regret_dataset,
+    evaluate_regret_candidates,
+    train_and_evaluate_regret,
+    train_and_evaluate_regret_on_traces,
 )
 from pzr.experiments.runner import MPCReductionPolicy, StaticReductionPolicy
 from pzr.experiments.tables import (
@@ -26,7 +28,6 @@ from pzr.experiments.tables import (
     format_latex_table,
     format_soundness_report,
 )
-from pzr.imitation.features import FEATURE_NAMES
 from pzr.mpc.objectives import CostWeights, WeightedZonotopeCost
 from pzr.mpc.policies import MPCPolicy, RolloutMPCPolicy
 from pzr.systems.omni_robot import OmniRobotMonitor, generate_omni_robot_trace
@@ -64,132 +65,116 @@ class TestTables:
         assert "All soundness invariants hold" in report
 
 
-class TestDAggerEval:
-    def test_expert_trace_collection(self):
+class TestRegretDistillation:
+    def _overflow_state(self, length=20, seed=0):
         monitor = OmniRobotMonitor()
-        cost = WeightedZonotopeCost(
-            weights=CostWeights(trigger_width=1.0, straddling=20.0),
-            triggers=monitor.triggers,
-        )
-        mpc = RolloutMPCPolicy(
-            candidates=(ProtectedReducer(base=GirardReducer()),),
-            base_reducer=ProtectedReducer(base=GirardReducer()),
-            budget=8, horizon=2, cost=cost,
-            fallback=ProtectedReducer(base=BoxReducer()),
-        )
-        expert = MPCReductionPolicy(policy=mpc, _name="mpc_expert", horizon=2)
+        state = monitor.initial_state()
+        history = []
+        for measurement in generate_omni_robot_trace(length, seed=seed):
+            state = monitor.step(state, measurement).state
+            history.append(measurement)
+            if state.zonotope.generator_count > 8:
+                return monitor, state, history
+        raise AssertionError("trace did not overflow the generator budget")
 
-        collector = collect_expert_traces(
-            monitor, lambda l, s: generate_omni_robot_trace(l, seed=s),
-            expert, budget=8, seeds=range(3), length=20,
-        )
-        assert len(collector) > 0
-        gen_idx = FEATURE_NAMES.index("generator_count")
-        assert all(t.features[gen_idx] > 8 for t in collector.traces)
+    def test_oracle_candidate_cost_collection(self):
+        monitor, state, history = self._overflow_state()
 
-    def test_sequence3_expert_labels_are_top3(self):
+        rows = evaluate_regret_candidates(
+            monitor, state, history, budget=8,
+            config=RegretOracleConfig(mode="beam3", horizon=2, beam_width=3),
+        )
+
+        assert {row.name for row in rows} == {"girard", "methA", "scott"}
+        assert all(np.isfinite(row.cost) for row in rows)
+        assert rows == sorted(rows, key=lambda row: (row.cost, row.sequence))
+
+    @pytest.mark.parametrize("mode", REGRET_ORACLE_MODES)
+    def test_oracle_modes_return_finite_costs(self, mode):
+        monitor, state, history = self._overflow_state(length=18, seed=1)
+
+        rows = evaluate_regret_candidates(
+            monitor, state, history, budget=8,
+            config=RegretOracleConfig(mode=mode, horizon=1, beam_width=2),
+        )
+
+        expected = {"girard", "methA", "scott"}
+        if mode in {"rollout_wide", "sequence_wide"}:
+            expected = {"girard", "combastel", "pca", "methA", "scott"}
+        assert {row.name for row in rows} == expected
+        assert all(np.isfinite(row.cost) for row in rows)
+
+    def test_full_regret_pipeline(self):
         monitor = OmniRobotMonitor()
-        cost = WeightedZonotopeCost(
-            weights=CostWeights(trigger_width=1.0, straddling=20.0),
-            triggers=monitor.triggers,
-        )
-        mpc = MPCPolicy(
-            candidates=(
-                ProtectedReducer(base=GirardReducer()),
-                ProtectedReducer(base=MethAReducer()),
-                ProtectedReducer(base=ScottReducer()),
-            ),
-            budget=8, horizon=2, cost=cost,
-            fallback=ProtectedReducer(base=BoxReducer()),
-        )
-        expert = MPCReductionPolicy(policy=mpc, _name="mpc_sequence3", horizon=2)
 
-        collector = collect_expert_traces(
-            monitor, lambda l, s: generate_omni_robot_trace(l, seed=s),
-            expert, budget=8, seeds=range(2), length=20,
-        )
-
-        assert len(collector) > 0
-        assert {t.action for t in collector.traces} <= {"girard", "methA", "scott"}
-
-    def test_full_dagger_pipeline(self):
-        monitor = OmniRobotMonitor()
-        cost = WeightedZonotopeCost(
-            weights=CostWeights(trigger_width=1.0, straddling=20.0),
-            triggers=monitor.triggers,
-        )
-        mpc = RolloutMPCPolicy(
-            candidates=(
-                ProtectedReducer(base=GirardReducer()),
-                ProtectedReducer(base=CombastelReducer()),
-            ),
-            base_reducer=ProtectedReducer(base=GirardReducer()),
-            budget=8, horizon=2, cost=cost,
-            fallback=ProtectedReducer(base=BoxReducer()),
-        )
-        expert = MPCReductionPolicy(policy=mpc, _name="mpc_expert", horizon=2)
-
-        result = train_and_evaluate_dagger(
+        result = train_and_evaluate_regret(
             monitor=monitor,
             trace_fn=lambda l, s: generate_omni_robot_trace(l, seed=s),
-            expert_policy=expert,
             budget=8,
             train_seeds=range(3),
             eval_seeds=range(3, 6),
             length=20,
-            dagger_iterations=2,
+            oracle_config=RegretOracleConfig(mode="beam3", horizon=1, beam_width=2),
+            iterations=2,
             epochs_per_iteration=50,
             hidden_sizes=(32,),
         )
-        assert isinstance(result, DAggerEvalResult)
+        assert isinstance(result, RegretEvalResult)
         assert result.total_traces > 0
+        dataset = build_regret_dataset(result.traces, result.policy.candidate_names)
+        assert dataset.regrets.shape[1] == len(result.policy.candidate_names)
+        assert np.all(dataset.regrets >= 0.0)
         assert len(result.eval_results) == 3
         assert all(r.budget_violations == 0 for r in result.eval_results)
         assert all(r.unsound_certificates == 0 for r in result.eval_results)
 
-    def test_learned_policy_faster_than_mpc(self):
+    def test_regret_policy_runs_without_soundness_violations(self):
         monitor = OmniRobotMonitor()
-        cost = WeightedZonotopeCost(
-            weights=CostWeights(trigger_width=1.0, straddling=20.0),
-            triggers=monitor.triggers,
-        )
-        mpc = RolloutMPCPolicy(
-            candidates=(
-                ProtectedReducer(base=GirardReducer()),
-                ProtectedReducer(base=CombastelReducer()),
-                ProtectedReducer(base=BoxReducer()),
-            ),
-            base_reducer=ProtectedReducer(base=GirardReducer()),
-            budget=8, horizon=2, cost=cost,
-            fallback=ProtectedReducer(base=BoxReducer()),
-        )
-        expert = MPCReductionPolicy(policy=mpc, _name="mpc_expert", horizon=2)
 
-        result = train_and_evaluate_dagger(
+        result = train_and_evaluate_regret(
             monitor=monitor,
             trace_fn=lambda l, s: generate_omni_robot_trace(l, seed=s),
-            expert_policy=expert,
             budget=8,
             train_seeds=range(6),
             eval_seeds=range(6, 9),
             length=30,
-            dagger_iterations=1,
+            oracle_config=RegretOracleConfig(mode="beam3", horizon=1, beam_width=2),
+            iterations=1,
             epochs_per_iteration=30,
             hidden_sizes=(16,),
         )
         assert len(result.eval_results) == 3
         assert all(r.budget_violations == 0 for r in result.eval_results)
 
+    def test_regret_training_from_explicit_traces(self):
+        monitor = OmniRobotMonitor()
+        train_traces = tuple(
+            (seed, generate_omni_robot_trace(20, seed=seed))
+            for seed in range(2)
+        )
+        eval_traces = tuple(
+            (seed, generate_omni_robot_trace(20, seed=seed))
+            for seed in range(2, 3)
+        )
+
+        result = train_and_evaluate_regret_on_traces(
+            monitor=monitor,
+            train_traces=train_traces,
+            eval_traces=eval_traces,
+            budget=8,
+            oracle_config=RegretOracleConfig(mode="beam3", horizon=1, beam_width=2),
+            iterations=1,
+            epochs_per_iteration=10,
+            hidden_sizes=(16,),
+            show_progress=False,
+        )
+
+        assert result.total_traces > 0
+        assert len(result.eval_results) == 1
+        assert all(r.unsound_certificates == 0 for r in result.eval_results)
+
 
 class TestFiguresIntegration:
-    def test_dagger_learning_curve(self, tmp_path):
-        fig = plot_dagger_learning_curve(
-            [0.4, 0.6, 0.75],
-            [0.35, 0.55, 0.70],
-            out_path=tmp_path / "dagger.pdf",
-        )
-        assert (tmp_path / "dagger.pdf").exists()
-
     def test_inference_time_bars(self, tmp_path):
         fig = plot_inference_time_comparison(
             {"girard": 0.1, "mpc_rollout": 5.0, "learned": 0.3},

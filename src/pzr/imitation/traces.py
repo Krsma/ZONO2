@@ -1,8 +1,8 @@
 """Expert trace recording for imitation learning.
 
 Traces store (features, action) pairs collected at reduction decision points.
-Both MPC expert demonstrations and DAgger on-policy collections use this
-format.
+They are retained for legacy behavioral-cloning tests; regret/ranking
+distillation uses the richer regret trace format in `pzr.experiments.regret_eval`.
 """
 
 from __future__ import annotations
