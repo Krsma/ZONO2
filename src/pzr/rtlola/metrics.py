@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+from typing import Sequence
 
 import numpy as np
 from numpy.typing import NDArray
@@ -14,6 +15,10 @@ class RtlolaMatrixMetrics:
 
     dynamic_generator_count: int
     total_generator_count: int
+    active_dynamic_generator_count: int
+    active_total_generator_count: int
+    zero_dynamic_generator_count: int
+    zero_total_generator_count: int
     full_width_sum: float
     width_mean: float
     width_max: float
@@ -27,12 +32,59 @@ class RtlolaMatrixMetrics:
     gen_coupling: float
     gen_pca_explained: float
 
-    def cost(self, generator_weight: float = 0.01) -> float:
-        return float(self.full_width_sum + generator_weight * self.dynamic_generator_count)
+    def cost(self) -> float:
+        return float(self.full_width_sum)
 
 
 def generator_count(matrix: NDArray[np.float64]) -> int:
     return max(int(matrix.shape[1]) - 1, 0)
+
+
+def active_generator_count(matrix: NDArray[np.float64], *, atol: float = 1e-12) -> int:
+    """Count nonzero support columns in an RTLola zonotope matrix."""
+    z = np.asarray(matrix, dtype=np.float64)
+    if z.ndim != 2 or z.shape[1] < 1:
+        raise ValueError(f"expected 2D zonotope matrix with center column, got {z.shape}")
+    generators = z[:, 1:]
+    if not generators.size:
+        return 0
+    norms = np.linalg.norm(generators, axis=0)
+    return int(np.count_nonzero(norms > atol))
+
+
+def row_widths(matrix: NDArray[np.float64]) -> NDArray[np.float64]:
+    """Return interval widths for every row in an RTLola zonotope matrix."""
+    z = np.asarray(matrix, dtype=np.float64)
+    if z.ndim != 2 or z.shape[1] < 1:
+        raise ValueError(f"expected 2D zonotope matrix with center column, got {z.shape}")
+    generators = z[:, 1:]
+    if not generators.size:
+        return np.zeros(z.shape[0], dtype=np.float64)
+    return 2.0 * np.abs(generators).sum(axis=1)
+
+
+def selected_row_width_sum(
+    matrix: NDArray[np.float64],
+    rows: Sequence[int],
+) -> float:
+    """Sum row interval widths for a monitor-relevant state-row subset."""
+    widths = row_widths(matrix)
+    if not rows:
+        return float(np.sum(widths))
+    indices = np.asarray(tuple(rows), dtype=np.int64)
+    if np.any(indices < 0) or np.any(indices >= widths.shape[0]):
+        raise ValueError(
+            f"relevant row index outside matrix dimension {widths.shape[0]}: {tuple(rows)}"
+        )
+    return _safe(float(np.sum(widths[indices])))
+
+
+def relevant_row_cost(
+    dynamic_matrix: NDArray[np.float64],
+    rows: Sequence[int],
+) -> float:
+    """Online reducer-selection cost for rows feeding scenario metrics."""
+    return float(selected_row_width_sum(dynamic_matrix, rows))
 
 
 def matrix_metrics(
@@ -47,9 +99,13 @@ def matrix_metrics(
         raise ValueError("zonotope matrix contains non-finite values")
 
     total = np.asarray(total_matrix, dtype=np.float64) if total_matrix is not None else z
+    dynamic_count = generator_count(z)
+    total_count = generator_count(total)
+    active_dynamic_count = active_generator_count(z)
+    active_total_count = active_generator_count(total)
     center = z[:, 0]
     generators = z[:, 1:]
-    widths = 2.0 * np.abs(generators).sum(axis=1) if generators.size else np.zeros(z.shape[0])
+    widths = row_widths(z)
     gen_norms = (
         np.linalg.norm(generators, axis=0)
         if generators.size else np.asarray([0.0], dtype=np.float64)
@@ -69,8 +125,12 @@ def matrix_metrics(
             pca_explained = _safe(float((sv[0] * sv[0]) / total_var))
 
     return RtlolaMatrixMetrics(
-        dynamic_generator_count=generator_count(z),
-        total_generator_count=generator_count(total),
+        dynamic_generator_count=dynamic_count,
+        total_generator_count=total_count,
+        active_dynamic_generator_count=active_dynamic_count,
+        active_total_generator_count=active_total_count,
+        zero_dynamic_generator_count=max(0, dynamic_count - active_dynamic_count),
+        zero_total_generator_count=max(0, total_count - active_total_count),
         full_width_sum=_safe(float(np.sum(widths))),
         width_mean=_safe(float(np.mean(widths))) if widths.size else 0.0,
         width_max=_safe(float(np.max(widths))) if widths.size else 0.0,

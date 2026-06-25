@@ -33,6 +33,8 @@ def default_actions() -> tuple[RtlolaAction, ...]:
         RtlolaAction("girard", lambda b: ZonotopeConfig.girard(b)),
         RtlolaAction("scott", lambda b: ZonotopeConfig.scott(b)),
         RtlolaAction("interval_hull", lambda b: ZonotopeConfig.interval_hull(b)),
+        RtlolaAction("pca", lambda b: ZonotopeConfig.pca(b)),
+        RtlolaAction("althoff_a", lambda b: ZonotopeConfig.althoff_a(b)),
         RtlolaAction("colinear_scale", lambda b: ZonotopeConfig.colinear_scale(b)),
         RtlolaAction("colinear", lambda _b: ZonotopeConfig.colinear(), explicit_budget=False),
         RtlolaAction("interval", lambda _b: ZonotopeConfig.interval(), explicit_budget=False),

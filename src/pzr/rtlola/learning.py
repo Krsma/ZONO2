@@ -19,7 +19,11 @@ from pzr.rtlola.runner import (
     RtlolaBenchmarkConfig,
     RtlolaRunResult,
     RtlolaStepRecord,
+    _public_bounds,
+    _selected_interval_error,
     _false_positive,
+    _false_negative,
+    _trigger_positive,
     _state_interval_bounds,
     compute_ground_truth,
     results_to_dataframe,
@@ -115,6 +119,7 @@ class RtlolaLearnedPolicy:
         )
         if not candidate_actions:
             candidate_actions = (self.fallback,)
+        none_action = self.actions.get("none")
         try:
             return beam_search(
                 engine,
@@ -125,6 +130,7 @@ class RtlolaLearnedPolicy:
                 budget,
                 beam_width,
                 fallback=self.fallback,
+                none_action=none_action,
             )
         except ValueError:
             return beam_search(
@@ -136,6 +142,7 @@ class RtlolaLearnedPolicy:
                 budget,
                 beam_width,
                 fallback=self.fallback,
+                none_action=none_action,
             )
 
 
@@ -144,6 +151,8 @@ def train_and_evaluate_regret(
     *,
     show_progress: bool = False,
 ) -> RtlolaRegretResult:
+    if config.scenario != "omni_robot":
+        raise ValueError("RTLola regret distillation is currently implemented for omni_robot only")
     actions = default_actions()
     by_name = action_by_name(actions)
     fallback = by_name["interval"]
@@ -374,6 +383,7 @@ def _evaluate_learned_episode(
     records: list[RtlolaStepRecord] = []
     for step, event in enumerate(trace):
         state = engine.snapshot(step=step, time=event.time)
+        pre_metrics = engine.metrics(state)
         future = tuple(trace[step + 1:step + 1 + config.horizon])
         decision = learned_policy.choose(
             engine, state, event, future, config.budget, config.beam_width,
@@ -392,21 +402,43 @@ def _evaluate_learned_episode(
             seed=seed,
             method="learned_ranked_beam",
             step=step,
+            pre_generator_count=pre_metrics.dynamic_generator_count,
             generator_count=committed.metrics.dynamic_generator_count,
             total_generator_count=committed.metrics.total_generator_count,
+            active_dynamic_generator_count=committed.metrics.active_dynamic_generator_count,
+            active_total_generator_count=committed.metrics.active_total_generator_count,
+            zero_dynamic_generator_count=committed.metrics.zero_dynamic_generator_count,
+            zero_total_generator_count=committed.metrics.zero_total_generator_count,
             reduced=decision.first_action.name != "none",
             reducer_used=decision.first_action.name,
             state_zonotope_width_sum=committed.metrics.full_width_sum,
             exact_state_zonotope_width_sum=gt.width_sum,
             state_zonotope_approx_error_sum=approx_error,
-            false_positive=_false_positive(committed.verdict, gt.verdicts),
+            relevant_state_width_sum=committed.metrics.full_width_sum,
+            exact_relevant_state_width_sum=gt.width_sum,
+            relevant_state_approx_error_sum=_selected_interval_error(
+                lower, upper, gt.lower, gt.upper, (),
+            ),
+            approx_loss=approx_error,
+            false_positive=_false_positive(
+                committed.verdict, gt.verdicts, OMNI_EXPECTED_VERDICT_KEYS,
+            ),
+            false_negative=_false_negative(
+                committed.verdict, gt.verdicts, OMNI_EXPECTED_VERDICT_KEYS,
+            ),
+            trigger_positive=_trigger_positive(committed.verdict, OMNI_EXPECTED_VERDICT_KEYS),
             verdicts=committed.verdict,
+            public_bounds=_public_bounds(committed.verdict, OMNI_EXPECTED_VERDICT_KEYS),
             reduction_time_ms=0.0,
             predicted_cost=decision.predicted_cost,
             predicted_sequence=decision.predicted_sequence,
             evaluated_leaves=decision.evaluated_leaves,
             pruned_branches=decision.pruned_branches,
-            budget_violation=committed.metrics.dynamic_generator_count > config.budget,
+            post_event_over_bound=committed.metrics.dynamic_generator_count > config.budget,
+            budget_violation=False,
+            fallback_used=decision.fallback_used,
+            reducer_failure_count=decision.reducer_failure_count,
+            infeasible_candidate_count=decision.infeasible_candidate_count,
         ))
     return RtlolaRunResult("learned_ranked_beam", seed, tuple(records))
 
@@ -421,6 +453,7 @@ def _evaluate_candidates(
     fallback: RtlolaAction,
 ) -> list[RtlolaCandidateCost]:
     rows: list[RtlolaCandidateCost] = []
+    none_action = action_by_name(actions).get("none")
     for first in actions:
         try:
             search = beam_search(
@@ -432,6 +465,7 @@ def _evaluate_candidates(
                 config.budget,
                 config.beam_width,
                 fallback=fallback,
+                none_action=none_action,
             )
         except ValueError:
             continue
@@ -439,7 +473,7 @@ def _evaluate_candidates(
             continue
         rows.append(RtlolaCandidateCost(first.name, search.predicted_cost, search.predicted_sequence))
     if not rows:
-        raise ValueError("RTLola regret oracle found no budget-feasible candidate")
+        raise ValueError("RTLola regret oracle found no candidate that ran with the bound")
     rows.sort(key=lambda row: (row.cost, row.sequence))
     return rows
 

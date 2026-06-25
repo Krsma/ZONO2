@@ -24,11 +24,30 @@ PROFILE_DEFAULTS = {
 }
 
 
+def _parse_methods(value: str) -> list[str]:
+    methods = [part.strip() for part in value.split(",") if part.strip()]
+    if not methods:
+        raise argparse.ArgumentTypeError("--methods must contain at least one method name")
+    return methods
+
+
 def main(argv: list[str] | None = None) -> None:
     parser = argparse.ArgumentParser(description="Run RTLola-native PZR benchmark")
     parser.add_argument("--profile", choices=PROFILE_DEFAULTS, default="smoke")
     parser.add_argument("--scenario", default="omni_robot")
+    parser.add_argument(
+        "--trace-kind",
+        default="default",
+        help="RTLola trace kind; robot_arm supports figure8_violated, figure8, square_violated, square",
+    )
     parser.add_argument("--method-set", choices=["static", "mpc", "all"], default="all")
+    parser.add_argument(
+        "--methods",
+        type=_parse_methods,
+        default=None,
+        help="Comma-separated RTLola methods to run; overrides --method-set",
+    )
+    parser.add_argument("--reference-mode", choices=["exact", "off"], default="exact")
     parser.add_argument("--budget", type=int, default=None)
     parser.add_argument("--length", type=int, default=None)
     parser.add_argument("--horizon", type=int, default=None)
@@ -47,7 +66,10 @@ def main(argv: list[str] | None = None) -> None:
     params = {
         **PROFILE_DEFAULTS[args.profile],
         "scenario": args.scenario,
+        "trace_kind": args.trace_kind,
         "method_set": args.method_set,
+        "methods": args.methods,
+        "reference_mode": args.reference_mode,
         "output_dir": str(args.output),
         "learned_mode": args.learned_mode,
         "regret_iterations": args.regret_iterations,
@@ -76,7 +98,11 @@ def main(argv: list[str] | None = None) -> None:
         write_regret_artifacts(
             learned,
             args.output / "learning" / config.scenario,
-            metadata={"scenario": config.scenario, "budget": config.budget},
+            metadata={
+                "scenario": config.scenario,
+                "trace_kind": config.trace_kind,
+                "budget": config.budget,
+            },
         )
 
     save_benchmark_results(result, args.output)

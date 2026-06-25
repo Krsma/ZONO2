@@ -1,0 +1,12 @@
+Low-Cost Robot Arm MJCF assets
+
+This directory vendors the Apache-2.0 low-cost robot arm MuJoCo model from
+the sibling rlola-eval experiment assets.
+
+The model description identifies the arm as a simplified MJCF of the
+Low-Cost Robot Arm originally developed by Alexander Koch and updated by the
+HuggingFace LeRobot Team as Kochv1.1. It is derived from the public URDF
+description referenced in README.md.
+
+See LICENSE and README.md in this directory for the upstream attribution and
+license text.

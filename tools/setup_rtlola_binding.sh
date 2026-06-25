@@ -5,7 +5,7 @@ ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA="${PZR_CONDA:-$ROOT_DIR/external/miniconda3/bin/conda}"
 ENV_NAME="${PZR_RTLOLA_ENV:-pzr-rtlola}"
 BINDING_REMOTE="${PZR_RTLOLA_BINDING_REMOTE:-git@projects.cispa.saarland:group-finkbeiner/tools/RTLola/rlolapythonbinding.git}"
-BINDING_REV="${PZR_RTLOLA_BINDING_REV:-72622a3}"
+BINDING_REV="${PZR_RTLOLA_BINDING_REV:-a2184eb}"
 if [ -n "${PZR_RTLOLA_BINDING_DIR:-}" ]; then
   BINDING_DIR="$PZR_RTLOLA_BINDING_DIR"
 elif [ -e "$ROOT_DIR/vendor/rlola-python-binding/.git" ]; then

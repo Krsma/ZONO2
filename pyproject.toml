@@ -40,6 +40,17 @@ pzr-rtlola-benchmark = "pzr.rtlola.cli:main"
 [tool.setuptools.packages.find]
 where = ["src"]
 
+[tool.setuptools.package-data]
+pzr = [
+    "rtlola/traces/robot_arm/*.csv",
+    "envs/mujoco_models/low_cost_robot_arm/*.xml",
+    "envs/mujoco_models/low_cost_robot_arm/*.md",
+    "envs/mujoco_models/low_cost_robot_arm/LICENSE",
+    "envs/mujoco_models/low_cost_robot_arm/NOTICE",
+    "envs/mujoco_models/low_cost_robot_arm/*.png",
+    "envs/mujoco_models/low_cost_robot_arm/assets/*.stl",
+]
+
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]

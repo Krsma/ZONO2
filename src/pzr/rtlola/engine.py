@@ -144,6 +144,25 @@ class RtlolaEngine:
         dyn, total = self.matrices(state)
         return matrix_metrics(dyn, total)
 
+    def approx_loss(self, reference: RtlolaStateRef, candidate: RtlolaStateRef) -> float:
+        """Return the binding-native approximation loss from reference to candidate."""
+        self._validate_state(reference)
+        self._validate_state(candidate)
+        previous = self.planner.state()
+        try:
+            self.planner.apply_state(reference.state)
+            loss = float(self.planner.approx_loss_state(candidate.state))
+        except Exception as exc:  # noqa: BLE001 - keep binding errors contextual.
+            raise RuntimeError(
+                "failed to compute RTLola binding approximation loss "
+                f"(reference_step={reference.step}, candidate_step={candidate.step})"
+            ) from exc
+        finally:
+            self.planner.apply_state(previous)
+        if not np.isfinite(loss):
+            raise RuntimeError("RTLola binding approximation loss was non-finite")
+        return loss
+
     def _validate_state(self, state: RtlolaStateRef) -> None:
         if state.spec_id != self.spec_id:
             raise ValueError("RTLola state belongs to a different specification")

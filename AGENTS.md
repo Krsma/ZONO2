@@ -18,6 +18,8 @@ uncertainty as zonotopes. Source code lives under `src/pzr/`:
   `robot_arm`), requiring the optional `sim` dependencies.
 - `experiments/`: benchmark orchestration, aggregation, tables, figures,
   robot-arm animation, regret/ranking distillation, and profiles.
+- `rtlola/`: optional RTLola-native monitor wrapper, zonotope-transform action
+  search, regret/ranking distillation, and benchmark CLI.
 - `utils/`: seeding, timing, and serialization helpers.
 
 Tests are in `tests/`. The CORA comparison fixture is
@@ -82,6 +84,11 @@ saved benchmark artifacts.
 - `python -m pzr.experiments.robotics_replay render --eval-dir /tmp/pzr-robotics-replay-eval --candidate all --methods scott,mpc_beam3 --output /tmp/pzr-robotics-replay-viz`:
   render focused static-vs-MPC robotics storyboards/stills/GIFs from replay
   artifacts.
+- `tools/setup_rtlola_binding.sh`: build/install the optional
+  `rlola_python_binding` extension pinned by the `rlolapythonbinding`
+  submodule.
+- `python -m pzr.rtlola.cli --profile smoke --scenario omni_robot --output /tmp/pzr-rtlola-smoke`:
+  smoke-test the RTLola-native benchmark path after the binding is installed.
 - `tools/run_pzr_smoke_parallel.sh`: scripted parallel smoke run with bounded
   BLAS/OpenMP threads and log capture.
 - `tools/run_pzr_paper_static.sh`: static-baseline paper run, useful for fast
@@ -105,16 +112,20 @@ saved benchmark artifacts.
   across the configured budget list; set `PZR_WITH_REGRET=0` to disable it or
   `PZR_REGRET_ORACLE=beam3` to choose the teacher.
 
-`pyproject.toml` currently declares `pzr-benchmark = pzr.cli:main` and
-`pzr-robot-arm-animation = pzr.experiments.robot_arm_animation:main`. CLI
-profiles are `smoke`, `standard`, and `paper`; scenarios are `all`,
+`pyproject.toml` currently declares `pzr-benchmark = pzr.cli:main`,
+`pzr-robot-arm-animation = pzr.experiments.robot_arm_animation:main`,
+`pzr-robotics-replay = pzr.experiments.robotics_replay:main`,
+`pzr-paper-tables = pzr.experiments.paper_tables:main`, and
+`pzr-rtlola-benchmark = pzr.rtlola.cli:main`. CLI profiles are `smoke`,
+`standard`, and `paper`; scenarios are `all`,
 `omni_robot`, `simple_robot`, plus
 `point_mass` and `robot_arm` when MuJoCo imports successfully. `scenario=all`
 is the headline/default set and excludes deprecated `simple_robot` and
 `point_mass`; those remain runnable only when requested explicitly. Method sets are
-`all`, `static`, and `standard`; `all` includes every registered method,
+`all`, `static`, `standard`, `headline`, and `paper_core`; `all` includes every registered method,
 `static` excludes MPC, and `standard` preserves the old static plus legacy
-`mpc_rollout`/`mpc_sequence` set. Learned policies are disabled by default;
+`mpc_rollout`/`mpc_sequence` set. `headline` and `paper_core` select focused
+paper-facing method subsets. Learned policies are disabled by default;
 use `--learned-mode regret` to run regret/ranking distillation. `--beam-width N`
 controls the bounded-width beam MPC method and defaults to 4. Regret
 distillation defaults to the `beam3` oracle; use `--regret-oracle
@@ -269,6 +280,38 @@ Figure generation currently includes combined trigger-width timeseries,
 approximation-error timeseries, method comparison bars, FPR/error-range panels,
 and reducer-selection bars for MPC or learned methods.
 
+RTLola-native benchmark runs have separate semantics from the Python monitor
+benchmarks. In `src/pzr/rtlola/`, `budget` means the exact RTLola transform
+bound passed to `ZonotopeConfig.<method>(budget)`, not a post-event dense-column
+cap. RTLola applies transforms before accepting the next event, so post-event
+dynamic slack slots may exceed `budget`; record this through
+`post_event_over_bound`, not as a `budget_violation`. Keep
+`infer_fresh_generator_reserve` diagnostic-only. Do not reintroduce
+`budget - reserve` target selection unless the experiment explicitly changes
+away from RTLola-transform-bound semantics.
+
+RTLola result tables should distinguish dense dynamic slots from active
+nonzero generators. Use `generator_count` for the dense post-event slot count,
+and include `active_dynamic_generator_count` plus `zero_dynamic_generator_count`
+when interpreting zero-column holes.
+
+RTLola `mpc_beam` currently scores rollouts with the binding-native terminal
+approximation loss. For each branch root it first rolls out an unreduced
+`none` reference over the same horizon, then scores candidate terminal states
+with `approx_loss_state(reference_terminal, candidate_terminal)` through the
+binding. Width columns remain diagnostics and table/report metrics, not the
+MPC optimization objective. With `--reference-mode exact`, reported
+`approx_loss` is also computed through the binding against the unreduced
+ground-truth state; with `--reference-mode off`, exact-run `approx_loss` is
+left unset even though MPC still uses finite-horizon reference loss internally.
+
+Earlier RTLola robot-arm MPC diagnostics showed that Scott-heavy `mpc_beam`
+behavior was not caused by Girard infeasibility after the transform-bound
+cleanup: Girard, Scott, interval hull, and PCA all ran under the transform
+bound. Those diagnostics used the previous short-horizon relevant-width
+objective. Re-run current binding-loss experiments before making claims about
+Scott dominance, objective quality, or trajectory dependence.
+
 Robot-arm animation writes per-run GIFs, first/middle/last PNG and PDF stills,
 storyboard PNG/PDF files, and metadata JSON under the requested output
 directory. The storyboard is the primary paper-facing artifact. The CLI
@@ -357,3 +400,5 @@ ablations. Those ablations were intentionally deferred.
 
 Treat `AUDIT.md` as a list of claims to verify against code and tests, not as
 ground truth. Some findings may be research-metric choices rather than bugs.
+Use `science/EXPERIMENT_READINESS.md` for the current consolidated experiment
+readiness notes; older CoRL planning documents were intentionally removed.
