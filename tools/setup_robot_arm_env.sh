@@ -31,12 +31,10 @@ import matplotlib
 import mujoco
 import numpy
 import pandas
-import scipy
 from rlola_python_binding import RLolaMonitor, ZonotopeConfig
 
 print(f"numpy {numpy.__version__}")
 print(f"pandas {pandas.__version__}")
-print(f"scipy {scipy.__version__}")
 print(f"matplotlib {matplotlib.__version__}")
 print(f"mujoco {mujoco.__version__}")
 print("rtlola binding ok")
@@ -48,7 +46,6 @@ Robot-arm environment ready.
 Use:
   tools/run_rtlola_robot_arm.sh --output /tmp/pzr-rtlola-arm
 
-This environment intentionally excludes safety-gymnasium. The robot-arm
-RTLola/MuJoCO path does not need it, and its pinned pygame dependency can
-conflict with the Python 3.11 robot-arm stack.
+This environment contains only the RTLola benchmark and optional MuJoCo
+dependencies; retired robotics simulator stacks are intentionally excluded.
 EOF

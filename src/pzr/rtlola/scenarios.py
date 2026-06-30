@@ -3,15 +3,13 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Callable, Sequence
+from typing import Callable
 
-from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStepResult
-from pzr.rtlola.metrics import relevant_row_cost
+from pzr.rtlola.engine import RtlolaEvent
 from pzr.rtlola.omni import OMNI_EXPECTED_VERDICT_KEYS, OMNI_SPEC, generate_omni_events
 from pzr.rtlola.robot_arm import (
     ARM_EXPECTED_VERDICT_KEYS,
     ARM_PUBLIC_STREAM_KEYS,
-    ARM_RELEVANT_ROWS,
     ARM_SPEC,
     DEFAULT_TRACE_KIND,
     TRACE_KINDS,
@@ -20,12 +18,21 @@ from pzr.rtlola.robot_arm import (
 
 
 TraceFactory = Callable[[int, int, str], tuple[RtlolaEvent, ...]]
-CostFactory = Callable[[RtlolaEngine, RtlolaStepResult], float]
 
 
 @dataclass(frozen=True)
-class RtlolaScenarioSpec:
-    """Registered RTLola scenario metadata."""
+class RtlolaTrace:
+    """Immutable events and provenance for one scenario trace."""
+
+    scenario: str
+    trace_kind: str
+    seed: int
+    events: tuple[RtlolaEvent, ...]
+
+
+@dataclass(frozen=True)
+class RtlolaScenario:
+    """Registered RTLola specification and trace adapter."""
 
     name: str
     spec: str
@@ -35,9 +42,26 @@ class RtlolaScenarioSpec:
     expected_verdict_keys: tuple[str, ...]
     public_stream_keys: tuple[str, ...]
     trigger_keys: tuple[str, ...]
-    relevant_rows: tuple[int, ...]
     trace_factory: TraceFactory
-    cost: CostFactory
+
+    def generate_trace(
+        self,
+        length: int,
+        seed: int,
+        trace_kind: str = "default",
+    ) -> RtlolaTrace:
+        selected = self.default_trace_kind if trace_kind == "default" else trace_kind
+        if selected not in self.trace_kinds:
+            raise ValueError(
+                f"trace_kind for scenario {self.name!r} must be one of "
+                f"{self.trace_kinds}, got {selected!r}"
+            )
+        return RtlolaTrace(
+            scenario=self.name,
+            trace_kind=selected,
+            seed=int(seed),
+            events=self.trace_factory(length, seed, selected),
+        )
 
     def generate_events(
         self,
@@ -45,25 +69,7 @@ class RtlolaScenarioSpec:
         seed: int,
         trace_kind: str = "default",
     ) -> tuple[RtlolaEvent, ...]:
-        selected = self.default_trace_kind if trace_kind == "default" else trace_kind
-        if selected not in self.trace_kinds:
-            raise ValueError(
-                f"trace_kind for scenario {self.name!r} must be one of "
-                f"{self.trace_kinds}, got {selected!r}"
-            )
-        return self.trace_factory(length, seed, selected)
-
-
-def _default_cost(_engine: RtlolaEngine, step: RtlolaStepResult) -> float:
-    return step.metrics.cost()
-
-
-def _relevant_rows_cost(rows: Sequence[int]) -> CostFactory:
-    def cost(engine: RtlolaEngine, step: RtlolaStepResult) -> float:
-        matrix = engine.matrices(step.state)[0]
-        return relevant_row_cost(matrix, rows)
-
-    return cost
+        return self.generate_trace(length, seed, trace_kind).events
 
 
 def _omni_trace_factory(length: int, seed: int, _trace_kind: str) -> tuple[RtlolaEvent, ...]:
@@ -74,9 +80,9 @@ def _arm_trace_factory(length: int, seed: int, trace_kind: str) -> tuple[RtlolaE
     return generate_robot_arm_events(length, seed=seed, trace_kind=trace_kind)
 
 
-def registered_scenarios() -> tuple[RtlolaScenarioSpec, ...]:
+def registered_scenarios() -> tuple[RtlolaScenario, ...]:
     return (
-        RtlolaScenarioSpec(
+        RtlolaScenario(
             name="omni_robot",
             spec=OMNI_SPEC,
             event_arity=3,
@@ -85,11 +91,9 @@ def registered_scenarios() -> tuple[RtlolaScenarioSpec, ...]:
             expected_verdict_keys=OMNI_EXPECTED_VERDICT_KEYS,
             public_stream_keys=OMNI_EXPECTED_VERDICT_KEYS,
             trigger_keys=OMNI_EXPECTED_VERDICT_KEYS,
-            relevant_rows=(),
             trace_factory=_omni_trace_factory,
-            cost=_default_cost,
         ),
-        RtlolaScenarioSpec(
+        RtlolaScenario(
             name="robot_arm",
             spec=ARM_SPEC,
             event_arity=6,
@@ -98,14 +102,12 @@ def registered_scenarios() -> tuple[RtlolaScenarioSpec, ...]:
             expected_verdict_keys=ARM_EXPECTED_VERDICT_KEYS,
             public_stream_keys=ARM_PUBLIC_STREAM_KEYS,
             trigger_keys=ARM_EXPECTED_VERDICT_KEYS,
-            relevant_rows=ARM_RELEVANT_ROWS,
             trace_factory=_arm_trace_factory,
-            cost=_relevant_rows_cost(ARM_RELEVANT_ROWS),
         ),
     )
 
 
-def scenario_by_name(name: str) -> RtlolaScenarioSpec:
+def scenario_by_name(name: str) -> RtlolaScenario:
     for scenario in registered_scenarios():
         if scenario.name == name:
             return scenario

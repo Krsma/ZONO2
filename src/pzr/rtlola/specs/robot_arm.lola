@@ -1,0 +1,102 @@
+import math
+
+input time: Float
+input a1m: Float64
+input a2m: Float64
+input a3m: Float64
+input a4m: Float64
+input a5m: Float64
+
+constant Q: Float64 := 0.000767
+constant J: Float64 := 0.001309
+constant I: Float64 := 0.008727
+constant H: Float64 := 0.003491
+
+output a1R: Variable @a1m
+constant a1H: Variable
+output a1 := a1m + (Q + J + I) * a1R + H * a1H
+
+output a2R: Variable @a2m
+constant a2H: Variable
+output a2 := a2m + (Q + J + I) * a2R + H * a2H
+
+output a3R: Variable @a3m
+constant a3H: Variable
+output a3 := a3m + (Q + J + I) * a3R + H * a3H
+
+output a4R: Variable @a4m
+constant a4H: Variable
+output a4 := a4m + (Q + J + I) * a4R + H * a4H
+
+output a5R: Variable @a5m
+constant a5H: Variable
+output a5 := a5m + (Q + J + I) * a5R + H * a5H
+
+output s1 := sin(a1)
+output s2 := sin(a2)
+output s3 := sin(a3)
+output s4 := sin(a4)
+output s5 := sin(a5)
+
+output c1 := cos(a1)
+output c2 := cos(a2)
+output c3 := cos(a3)
+output c4 := cos(a4)
+output c5 := cos(a5)
+
+output w5y := 0.013097 + 0.0105 * c5 - 0.00045 * s5
+constant w5x: Float64 := -0.1118
+output w5z := 0.0105 * s5 + 0.00045 * c5
+
+output w4x := -0.10048 + w5x * c4 + w5z * s4
+output w4y := 0.00005 + w5y
+output w4z := 0.0026999 - w5x * s4 + w5z * c4
+
+output w3x := -0.0148 + w4x * c3 - w4z * s3
+output w3y := 0.0065 + w4y
+output w3z := 0.1083 + w4x * s3 + w4z * c3
+
+output w2x := w3x * c2 + w3z * s2
+output w2y := -0.0209 + w3y
+output w2z := 0.0154 - w3x * s2 + w3z * c2
+
+output px := 0.012 + w2x * c1 + w2y * s1
+output py := -w2x * s1 + w2y * c1
+output pz := 0.0409 + w2z
+
+output count: Float64 @a1m := count.offset(by: -1).defaults(to: 0.0) + 1.0
+output sum_x := sum_x.offset(by: -1).defaults(to: 0.0) + px
+output sum_y := sum_y.offset(by: -1).defaults(to: 0.0) + py
+output sum_z := sum_z.offset(by: -1).defaults(to: 0.0) + pz
+
+output avg_x := sum_x / count
+output avg_y := sum_y / count
+output avg_z := sum_z / count
+
+constant expected_x: Float64 := -0.18
+constant expected_y: Float64 := 0.0
+constant expected_z: Float64 := 0.05
+
+output dx := avg_x - expected_x
+output dy := avg_y - expected_y
+output dz := avg_z - expected_z
+#[public]
+output dist_to_expected := sqrt((dx * dx) + (dy * dy) + (dz * dz))
+
+constant max_dist: Float64 := 0.05
+constant threshold: Float64 := 0.0
+#[public]
+output dist_to_expected_exceeded := pAbove(dist_to_expected, max_dist) > threshold && time > 4.0
+trigger pAbove(dist_to_expected, max_dist) > threshold && time > 4.0 "Toolhead drift detected"
+
+output dpx := px - px.offset(by: -1).defaults(to: expected_x)
+output dpy := py - py.offset(by: -1).defaults(to: expected_y)
+output dpz := pz - pz.offset(by: -1).defaults(to: expected_z)
+output step_len := sqrt((dpx * dpx) + (dpy * dpy) + (dpz * dpz))
+#[public]
+output tpl := tpl.offset(by: -1).defaults(to: 0.0) + step_len
+
+constant max_toolpath_length: Float64 := 1000.0
+#[public]
+output tpl_exceeded := pAbove(tpl, max_toolpath_length) > threshold
+trigger pAbove(tpl, max_toolpath_length) > threshold "Toolhead travelled 1km: Service now!"

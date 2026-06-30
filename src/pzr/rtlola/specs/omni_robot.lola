@@ -1,0 +1,25 @@
+import math
+
+input time: Float
+input dir: Float64
+input am: Float64
+
+output dt := time - time.offset(by: -1).defaults(to: 0.0)
+
+constant delta: Variable
+
+output epsilon: Variable @true
+output a := am + 0.01 * epsilon + 0.005 * delta
+output a_filter := 0.7 * a + 0.3 * a_filter.offset(by: -1).defaults(to: 0.0)
+output velocity := velocity.offset(by: -1).defaults(to: 0.0) + a_filter * dt
+output distance := 0.5 * a_filter * dt * dt + velocity.offset(by: -1).defaults(to: 0.0) * dt
+output position_x := position_x.offset(by: -1).defaults(to: 0.0) + cos(dir) * distance
+output position_y := position_y.offset(by: -1).defaults(to: 0.0) + sin(dir) * distance
+
+#[public]
+output position_x_above_geofence := pAbove(position_x, 4.0) > 0.01
+#[public]
+output position_y_above_geofence := pAbove(position_y, 4.0) > 0.01
+
+trigger pAbove(position_x, 4.0) > 0.01 "Violated Geofence in X-Direction"
+trigger pAbove(position_y, 4.0) > 0.01 "Violated Geofence in Y-Direction"

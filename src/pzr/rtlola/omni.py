@@ -1,57 +1,41 @@
-"""RTLola Omni robot specification and trace conversion."""
+"""RTLola Omni robot specification and deterministic trace generation."""
 
 from __future__ import annotations
 
+from pathlib import Path
+
+import numpy as np
+
 from pzr.rtlola.engine import RtlolaEvent
-from pzr.systems.omni_robot import OmniRobotMeasurement, generate_omni_robot_trace
 
 OMNI_EXPECTED_VERDICT_KEYS = (
     "position_x_above_geofence",
     "position_y_above_geofence",
 )
 
-# Paper-oriented RTLola spec. This is intentionally kept as a Python constant
-# for the first integration pass so tests can inspect it directly.
-OMNI_SPEC = """
-import math
-
-input time: Float
-input dir: Float64
-input am: Float64
-
-output dt := time - time.offset(by: -1).defaults(to: 0.0)
-
-constant delta: Variable
-
-output epsilon: Variable @true
-output a := am + 0.01 * epsilon + 0.005 * delta
-output a_filter := 0.7 * a + 0.3 * a_filter.offset(by: -1).defaults(to: 0.0)
-output velocity := velocity.offset(by: -1).defaults(to: 0.0) + a_filter * dt
-output distance := 0.5 * a_filter * dt * dt + velocity.offset(by: -1).defaults(to: 0.0) * dt
-output position_x := position_x.offset(by: -1).defaults(to: 0.0) + cos(dir) * distance
-output position_y := position_y.offset(by: -1).defaults(to: 0.0) + sin(dir) * distance
-
-#[public]
-output position_x_above_geofence := pAbove(position_x, 4.0) > 0.01
-#[public]
-output position_y_above_geofence := pAbove(position_y, 4.0) > 0.01
-
-trigger pAbove(position_x, 4.0) > 0.01 "Violated Geofence in X-Direction"
-trigger pAbove(position_y, 4.0) > 0.01 "Violated Geofence in Y-Direction"
-"""
+OMNI_SPEC_PATH = Path(__file__).parent / "specs" / "omni_robot.lola"
+OMNI_SPEC = OMNI_SPEC_PATH.read_text()
 
 
-def measurement_to_event(measurement: OmniRobotMeasurement) -> RtlolaEvent:
-    """Convert the existing Python Omni trace record to RTLola input order."""
-    return RtlolaEvent(
-        time=float(measurement.time),
-        values=(
-            float(measurement.time),
-            float(measurement.direction),
-            float(measurement.acceleration),
-        ),
-    )
-
-
-def generate_omni_events(length: int, seed: int = 0) -> tuple[RtlolaEvent, ...]:
-    return tuple(measurement_to_event(m) for m in generate_omni_robot_trace(length, seed=seed))
+def generate_omni_events(
+    length: int,
+    seed: int = 0,
+    *,
+    dt: float = 1.0,
+) -> tuple[RtlolaEvent, ...]:
+    """Reproduce the established stochastic Omni input trace exactly."""
+    rng = np.random.default_rng(seed)
+    direction = 0.0
+    events: list[RtlolaEvent] = []
+    for index in range(length):
+        direction += float(rng.normal(0.0, 0.18))
+        acceleration = (
+            0.18 * np.sin(index / 5.0)
+            + float(rng.normal(0.0, 0.04))
+        )
+        time = float(index * dt)
+        events.append(RtlolaEvent(
+            time=time,
+            values=(time, direction, acceleration),
+        ))
+    return tuple(events)

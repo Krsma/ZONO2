@@ -4,17 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA="${PZR_CONDA:-$ROOT_DIR/external/miniconda3/bin/conda}"
 ENV_NAME="${PZR_RTLOLA_ENV:-pzr-rtlola}"
-BINDING_REMOTE="${PZR_RTLOLA_BINDING_REMOTE:-git@projects.cispa.saarland:group-finkbeiner/tools/RTLola/rlolapythonbinding.git}"
-BINDING_REV="${PZR_RTLOLA_BINDING_REV:-a2184eb}"
-if [ -n "${PZR_RTLOLA_BINDING_DIR:-}" ]; then
-  BINDING_DIR="$PZR_RTLOLA_BINDING_DIR"
-elif [ -e "$ROOT_DIR/vendor/rlola-python-binding/.git" ]; then
-  BINDING_DIR="$ROOT_DIR/vendor/rlola-python-binding"
-elif [ -d "$ROOT_DIR/rlolapythonbinding" ]; then
-  BINDING_DIR="$ROOT_DIR/rlolapythonbinding"
-else
-  BINDING_DIR="$ROOT_DIR/vendor/rlola-python-binding"
-fi
+BINDING_REV="ca5976da9e105e48153b58e70f1f4d8c7aaa4cf6"
+BINDING_DIR="$ROOT_DIR/rlolapythonbinding"
 
 if ! command -v cargo >/dev/null 2>&1; then
   if [ -f "$HOME/.cargo/env" ]; then
@@ -48,18 +39,25 @@ CONDA_NO_PLUGINS=true "$CONDA" install --solver classic -y -n "$ENV_NAME" \
   fontconfig pkg-config openblas libopenblas
 CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" python -m pip install --upgrade pip
 CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" \
-  python -m pip install -e ".[dev,learning]" maturin numpy
+  python -m pip install -e ".[dev]" maturin numpy
 
 if [ ! -e "$BINDING_DIR/.git" ]; then
-  mkdir -p "$(dirname "$BINDING_DIR")"
-  git submodule add "$BINDING_REMOTE" "$BINDING_DIR"
+  echo "RTLola binding submodule is not initialized." >&2
+  echo "Run: git submodule update --init --recursive" >&2
+  exit 1
 fi
 
-git -C "$BINDING_DIR" fetch --all --tags
-git -C "$BINDING_DIR" checkout "$BINDING_REV"
+ACTUAL_REV="$(git -C "$BINDING_DIR" rev-parse HEAD)"
+if [ "$ACTUAL_REV" != "$BINDING_REV" ]; then
+  echo "Unexpected RTLola binding revision: $ACTUAL_REV" >&2
+  echo "Expected the superproject pin: $BINDING_REV" >&2
+  echo "Run: git submodule update --init --recursive" >&2
+  exit 1
+fi
 
 ENV_PREFIX="$ROOT_DIR/external/miniconda3/envs/$ENV_NAME"
 CARGO_NET_GIT_FETCH_WITH_CLI=true \
+RUSTC_BOOTSTRAP=kmeans \
 PKG_CONFIG_PATH="$ENV_PREFIX/lib/pkgconfig:$ENV_PREFIX/share/pkgconfig:${PKG_CONFIG_PATH:-}" \
 LD_PRELOAD="$ENV_PREFIX/lib/libopenblas.so${LD_PRELOAD:+ $LD_PRELOAD}" \
 LD_LIBRARY_PATH="$ENV_PREFIX/lib:${LD_LIBRARY_PATH:-}" \

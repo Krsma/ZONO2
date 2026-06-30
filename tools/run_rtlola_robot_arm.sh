@@ -26,7 +26,7 @@ ARGS=(
   --budget "${PZR_ROBOT_ARM_BUDGET:-80}"
   --length "${PZR_ROBOT_ARM_LENGTH:-200}"
   --seeds "${PZR_ROBOT_ARM_SEEDS:-3}"
-  --method-set "${PZR_ROBOT_ARM_METHOD_SET:-all}"
+  --method-set "${PZR_ROBOT_ARM_METHOD_SET:-core}"
   --output "${PZR_ROBOT_ARM_OUTPUT:-/tmp/pzr-rtlola-arm}"
   --no-progress
 )
@@ -37,4 +37,4 @@ LD_PRELOAD="$ENV_PREFIX/lib/libopenblas.so${LD_PRELOAD:+ $LD_PRELOAD}" \
 LD_LIBRARY_PATH="$ENV_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
 MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/pzr-matplotlib-cache}" \
 CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" \
-  python -m pzr.rtlola.cli "${ARGS[@]}" "$@"
+  pzr-benchmark "${ARGS[@]}" "$@"

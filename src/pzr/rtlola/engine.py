@@ -58,14 +58,6 @@ class RtlolaEngine:
         self.planner = RLolaMonitor(spec)
         self._last_live_time = -np.inf
 
-    def live_state(self) -> RtlolaStateRef:
-        return RtlolaStateRef(
-            state=self.live.state(),
-            spec_id=self.spec_id,
-            step=0,
-            time=-np.inf,
-        )
-
     def snapshot(self, *, step: int, time: float) -> RtlolaStateRef:
         return RtlolaStateRef(self.live.state(), self.spec_id, int(step), float(time))
 
@@ -77,7 +69,7 @@ class RtlolaEngine:
         budget: int,
     ) -> RtlolaStepResult:
         self._validate_state(state)
-        self._validate_event(event, allow_equal_time=True)
+        self._validate_event(event)
         if event.time < state.time:
             raise ValueError(
                 f"branch event time {event.time} is earlier than snapshot time {state.time}"
@@ -108,7 +100,7 @@ class RtlolaEngine:
         *,
         step: int,
     ) -> RtlolaStepResult:
-        self._validate_event(event, allow_equal_time=False)
+        self._validate_event(event)
         if event.time <= self._last_live_time:
             raise ValueError(
                 f"live event time must be strictly increasing "
@@ -167,7 +159,7 @@ class RtlolaEngine:
         if state.spec_id != self.spec_id:
             raise ValueError("RTLola state belongs to a different specification")
 
-    def _validate_event(self, event: RtlolaEvent, *, allow_equal_time: bool) -> None:
+    def _validate_event(self, event: RtlolaEvent) -> None:
         if len(event.values) != self.event_arity:
             raise ValueError(f"expected {self.event_arity} event values, got {len(event.values)}")
         if not np.isfinite(event.time):
@@ -175,8 +167,6 @@ class RtlolaEngine:
         for value in event.values:
             if isinstance(value, float) and not np.isfinite(value):
                 raise ValueError("event contains non-finite float value")
-        _ = allow_equal_time
-
     def _validate_budget_for_state(
         self,
         state: RtlolaStateRef,

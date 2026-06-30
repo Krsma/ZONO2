@@ -107,6 +107,7 @@ def beam_search(
     none_action: RtlolaAction | None = None,
     cost_fn: CostFunction | None = None,
     use_reference_loss: bool = False,
+    forced_first_action: RtlolaAction | None = None,
 ) -> RtlolaSearchResult:
     """Bounded-width deterministic search over RTLola action sequences."""
     if beam_width < 1:
@@ -140,7 +141,8 @@ def beam_search(
     action_budget = int(budget)
     beam: list[BeamItem] = []
     failures = 0
-    for action in actions:
+    root_actions = (forced_first_action,) if forced_first_action is not None else actions
+    for action in root_actions:
         if none_action is not None and action.name == none_action.name:
             continue
         step = _try_action(engine, state, current_event, action, action_budget)

@@ -3,18 +3,23 @@
 from __future__ import annotations
 
 import argparse
+import hashlib
 from pathlib import Path
 
 import pandas as pd
 
-from pzr.experiments.evaluation import aggregate_summary
 from pzr.rtlola.learning import train_and_evaluate_regret, write_regret_artifacts
-from pzr.rtlola.runner import (
+from pzr.rtlola.benchmark import (
     RTLOLA_AGGREGATE_METRICS,
     RtlolaBenchmarkConfig,
+    aggregate_summary,
+    results_to_dataframe,
     run_benchmark,
     save_benchmark_results,
+    summarize_results,
 )
+from pzr.rtlola.binding import BINDING_REVISION
+from pzr.rtlola.scenarios import scenario_by_name
 
 
 PROFILE_DEFAULTS = {
@@ -40,7 +45,11 @@ def main(argv: list[str] | None = None) -> None:
         default="default",
         help="RTLola trace kind; robot_arm supports figure8_violated, figure8, square_violated, square",
     )
-    parser.add_argument("--method-set", choices=["static", "mpc", "all"], default="all")
+    parser.add_argument(
+        "--method-set",
+        choices=["core", "static", "mpc", "all"],
+        default="core",
+    )
     parser.add_argument(
         "--methods",
         type=_parse_methods,
@@ -86,9 +95,10 @@ def main(argv: list[str] | None = None) -> None:
 
     result = run_benchmark(config)
     if args.learned_mode == "regret":
+        scenario = scenario_by_name(config.scenario)
         learned = train_and_evaluate_regret(config, show_progress=not args.no_progress)
-        learned_summary = summarize_learned(learned.eval_results)
-        learned_timeseries = learned_timeseries_df(learned.eval_results)
+        learned_summary = summarize_results(learned.eval_results)
+        learned_timeseries = results_to_dataframe(learned.eval_results)
         result.summary = pd.concat([result.summary, learned_summary], ignore_index=True)
         result.timeseries = pd.concat([result.timeseries, learned_timeseries], ignore_index=True)
         result.aggregate = aggregate_summary(
@@ -102,24 +112,15 @@ def main(argv: list[str] | None = None) -> None:
                 "scenario": config.scenario,
                 "trace_kind": config.trace_kind,
                 "budget": config.budget,
+                "horizon": config.horizon,
+                "binding_revision": BINDING_REVISION,
+                "spec_sha256": hashlib.sha256(
+                    scenario.spec.encode("utf-8"),
+                ).hexdigest(),
             },
         )
 
     save_benchmark_results(result, args.output)
     print(f"RTLola benchmark complete: {args.output}")
-
-
-def summarize_learned(results):
-    from pzr.rtlola.runner import summarize_results
-
-    return summarize_results(results)
-
-
-def learned_timeseries_df(results):
-    from pzr.rtlola.runner import results_to_dataframe
-
-    return results_to_dataframe(results)
-
-
 if __name__ == "__main__":
     main()

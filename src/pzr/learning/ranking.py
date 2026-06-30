@@ -1,4 +1,4 @@
-"""Regret-ranking policy for learned reducer selection."""
+"""Scenario-neutral regret-ranking model and training data."""
 
 from __future__ import annotations
 
@@ -9,11 +9,6 @@ from typing import Literal
 import numpy as np
 from numpy.typing import NDArray
 from tqdm.auto import tqdm
-
-from pzr.zonotope.core import Zonotope
-from pzr.zonotope.protected import ProtectedReducer, reduce_with_protection
-from pzr.zonotope.reduction import Reducer, ReductionResult
-
 
 @dataclass
 class RegretDataset:
@@ -102,30 +97,6 @@ class RegretRankingPolicy:
         regrets = self.predict_regret(features)
         order = np.argsort(regrets, kind="stable")
         return [self.candidate_names[i] for i in order]
-
-    def select_reducer(
-        self,
-        features: NDArray[np.float64],
-        candidates: dict[str, Reducer | ProtectedReducer],
-        z: Zonotope,
-        budget: int,
-        protected_indices: tuple[int, ...] = (),
-    ) -> tuple[str, ReductionResult] | None:
-        """Try reducers in predicted regret order until one succeeds."""
-        for name in self.rank_reducers(features):
-            reducer = candidates.get(name)
-            if reducer is None:
-                continue
-            try:
-                result = reduce_with_protection(
-                    reducer, z, budget,
-                    protected_indices=protected_indices,
-                )
-            except ValueError:
-                continue
-            if result.certificate.is_sound:
-                return name, result
-        return None
 
     def save(self, path: Path) -> None:
         """Save policy weights to a NumPy archive."""

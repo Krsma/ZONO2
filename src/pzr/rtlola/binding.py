@@ -4,6 +4,8 @@ from __future__ import annotations
 
 from typing import Any
 
+BINDING_REVISION = "ca5976da9e105e48153b58e70f1f4d8c7aaa4cf6"
+
 
 class RtlolaBindingUnavailable(RuntimeError):
     """Raised when the optional RTLola binding has not been installed."""

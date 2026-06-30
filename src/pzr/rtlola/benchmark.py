@@ -1,8 +1,8 @@
-"""Benchmark runner for RTLola-native monitors."""
+"""RTLola-native benchmark execution, aggregation, and artifacts."""
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass
+from dataclasses import asdict, dataclass, field
 from pathlib import Path
 import re
 import time
@@ -12,14 +12,23 @@ import numpy as np
 import pandas as pd
 import yaml
 
-from pzr.experiments.evaluation import aggregate_summary
-from pzr.rtlola.actions import RtlolaAction, action_by_name, default_actions
-from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
-from pzr.rtlola.metrics import selected_row_width_sum
-from pzr.rtlola.scenarios import RtlolaScenarioSpec, scenario_by_name
+from pzr.rtlola.actions import (
+    MPC_ACTION_NAMES,
+    RtlolaAction,
+    default_action_catalog,
+)
+from pzr.rtlola.binding import BINDING_REVISION
+from pzr.rtlola.engine import (
+    RtlolaEngine,
+    RtlolaEvent,
+    RtlolaStateRef,
+    RtlolaStepResult,
+)
+from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
 from pzr.rtlola.search import RtlolaSearchResult, beam_search, choose_static_action
 
 
+CORE_STATIC_METHODS = ("none", "girard", "scott", "interval_hull", "pca")
 STATIC_METHODS = (
     "none",
     "girard",
@@ -27,12 +36,13 @@ STATIC_METHODS = (
     "interval_hull",
     "pca",
     "althoff_a",
+    "clustering",
+    "combastel",
     "colinear_scale",
-    "colinear",
 )
 MPC_METHODS = ("mpc_beam",)
 ALL_METHODS = (*STATIC_METHODS, *MPC_METHODS)
-MPC_ACTION_NAMES = ("girard", "scott", "interval_hull", "pca")
+CORE_METHODS = (*CORE_STATIC_METHODS, *MPC_METHODS)
 RTLOLA_AGGREGATE_METRICS = [
     "mean_state_zonotope_width",
     "max_state_zonotope_width",
@@ -44,8 +54,6 @@ RTLOLA_AGGREGATE_METRICS = [
     "mean_state_zonotope_approx_error",
     "max_state_zonotope_approx_error",
     "state_zonotope_abs_error_range",
-    "mean_relevant_state_width",
-    "mean_relevant_state_approx_error",
     "mean_approx_loss",
     "max_approx_loss",
     "false_positive_rate",
@@ -69,7 +77,7 @@ class RtlolaBenchmarkConfig:
     horizon: int = 2
     beam_width: int = 4
     seeds: int = 3
-    method_set: str = "all"
+    method_set: str = "core"
     methods: list[str] | None = None
     reference_mode: str = "exact"
     output_dir: str = "results/rtlola"
@@ -79,6 +87,11 @@ class RtlolaBenchmarkConfig:
     regret_train_seeds: int | None = None
     regret_eval_seeds: int | None = None
     regret_loss: str = "pairwise"
+    binding_revision: str = field(init=False, default=BINDING_REVISION)
+    mpc_candidate_names: tuple[str, ...] = field(
+        init=False,
+        default=MPC_ACTION_NAMES,
+    )
 
 
 @dataclass(frozen=True)
@@ -98,22 +111,19 @@ class RtlolaStepRecord:
     state_zonotope_width_sum: float
     exact_state_zonotope_width_sum: float
     state_zonotope_approx_error_sum: float
-    relevant_state_width_sum: float
-    exact_relevant_state_width_sum: float
-    relevant_state_approx_error_sum: float
     approx_loss: float
     false_positive: bool | float
     false_negative: bool | float
     trigger_positive: bool
     verdicts: dict[str, object]
     public_bounds: dict[str, tuple[float, float]]
-    reduction_time_ms: float
+    decision_time_ms: float
+    binding_runtime_ns: float
     predicted_cost: float = 0.0
     predicted_sequence: tuple[str, ...] = ()
     evaluated_leaves: int = 0
     pruned_branches: int = 0
     post_event_over_bound: bool = False
-    budget_violation: bool = False
     fallback_used: bool = False
     reducer_failure_count: int = 0
     infeasible_candidate_count: int = 0
@@ -127,7 +137,6 @@ class RtlolaGroundTruthStep:
     upper: np.ndarray
     dynamic_matrix: np.ndarray
     state: RtlolaStateRef
-    relevant_width_sum: float
     width_sum: float
     verdicts: dict[str, object]
     public_bounds: dict[str, tuple[float, float]]
@@ -145,12 +154,7 @@ class RtlolaRunResult:
 
     @property
     def total_time_ms(self) -> float:
-        return float(sum(step.reduction_time_ms for step in self.steps))
-
-    @property
-    def budget_violations(self) -> int:
-        return sum(1 for step in self.steps if step.budget_violation)
-
+        return float(sum(step.decision_time_ms for step in self.steps))
 
 @dataclass
 class RtlolaBenchmarkResult:
@@ -163,34 +167,91 @@ class RtlolaBenchmarkResult:
 
 def methods_for_config(config: RtlolaBenchmarkConfig) -> tuple[str, ...]:
     if config.methods is not None:
-        unknown = [method for method in config.methods if method not in ALL_METHODS]
+        available = {
+            *ALL_METHODS,
+            "colinear",
+            "interval",
+        }
+        unknown = [method for method in config.methods if method not in available]
         if unknown:
-            valid = ", ".join(ALL_METHODS)
+            valid = ", ".join(sorted(available))
             bad = ", ".join(unknown)
             raise ValueError(f"unknown RTLola method(s): {bad}; valid methods: {valid}")
         return tuple(config.methods)
+    if config.method_set == "core":
+        return CORE_METHODS
     if config.method_set == "static":
         return STATIC_METHODS
     if config.method_set == "mpc":
         return MPC_METHODS
     if config.method_set == "all":
         return (*STATIC_METHODS, *MPC_METHODS)
-    raise ValueError("method_set must be one of: static, mpc, all")
+    raise ValueError("method_set must be one of: core, static, mpc, all")
 
 
-def mpc_actions(by_name: dict[str, RtlolaAction]) -> tuple[RtlolaAction, ...]:
-    """Return budgeted, apples-to-apples actions used by RTLola MPC."""
-    return tuple(by_name[name] for name in MPC_ACTION_NAMES)
+def bootstrap_ci(
+    values: np.ndarray,
+    *,
+    n_bootstrap: int = 1000,
+    confidence: float = 0.95,
+    seed: int = 42,
+) -> tuple[float, float, float]:
+    """Return a deterministic bootstrap mean and confidence interval."""
+    finite = np.asarray(values, dtype=np.float64)
+    finite = finite[np.isfinite(finite)]
+    if finite.size == 0:
+        return float("nan"), float("nan"), float("nan")
+    rng = np.random.default_rng(seed)
+    means = np.asarray([
+        np.mean(rng.choice(finite, size=finite.size, replace=True))
+        for _ in range(n_bootstrap)
+    ])
+    alpha = (1.0 - confidence) / 2.0
+    return (
+        float(np.mean(finite)),
+        float(np.quantile(means, alpha)),
+        float(np.quantile(means, 1.0 - alpha)),
+    )
+
+
+def aggregate_summary(
+    summary: pd.DataFrame,
+    *,
+    metric_columns: Sequence[str] = RTLOLA_AGGREGATE_METRICS,
+) -> pd.DataFrame:
+    """Aggregate seed-level RTLola metrics by method."""
+    rows: list[dict[str, object]] = []
+    for method, group in summary.groupby("method"):
+        row: dict[str, object] = {"method": method}
+        for column in metric_columns:
+            if column not in group:
+                continue
+            mean, lo, hi = bootstrap_ci(group[column].to_numpy(dtype=np.float64))
+            row[f"{column}_mean"] = mean
+            row[f"{column}_ci95_lo"] = lo
+            row[f"{column}_ci95_hi"] = hi
+        rows.append(row)
+    return pd.DataFrame(rows)
 
 
 def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
     if config.reference_mode not in {"exact", "off"}:
         raise ValueError("reference_mode must be one of: exact, off")
+    if config.length < 1:
+        raise ValueError("length must be >= 1")
+    if config.seeds < 1:
+        raise ValueError("seeds must be >= 1")
+    if config.budget < 0:
+        raise ValueError("budget must be non-negative")
+    if config.horizon < 0:
+        raise ValueError("horizon must be non-negative")
+    if config.beam_width < 1:
+        raise ValueError("beam_width must be >= 1")
     scenario = scenario_by_name(config.scenario)
-    actions = default_actions()
-    by_name = action_by_name(actions)
-    fallback = by_name["interval"]
-    mpc_candidates = mpc_actions(by_name)
+    catalog = default_action_catalog()
+    by_name = catalog.by_name
+    fallback = catalog.fallback
+    mpc_candidates = catalog.mpc_candidates
     raw: list[RtlolaRunResult] = []
     for seed in range(config.seeds):
         trace = scenario.generate_events(config.length, seed, trace_kind=config.trace_kind)
@@ -224,7 +285,7 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
 
 def _run_single(
     config: RtlolaBenchmarkConfig,
-    scenario: RtlolaScenarioSpec,
+    scenario: RtlolaScenario,
     trace: Sequence[RtlolaEvent],
     method: str,
     mpc_candidates: tuple[RtlolaAction, ...],
@@ -251,7 +312,7 @@ def _run_single(
                 first_action=first,
                 first_action_budget=config.budget,
                 first_step=first_step,
-                predicted_cost=scenario.cost(engine, first_step),
+                predicted_cost=first_step.metrics.cost(),
                 predicted_sequence=("none",),
                 evaluated_leaves=1,
                 pruned_branches=0,
@@ -267,7 +328,6 @@ def _run_single(
                 config.beam_width,
                 fallback=fallback,
                 none_action=by_name["none"],
-                cost_fn=scenario.cost,
                 use_reference_loss=True,
             )
         else:
@@ -279,7 +339,6 @@ def _run_single(
                 config.budget,
                 fallback=fallback,
                 none_action=by_name["none"],
-                cost_fn=scenario.cost,
             )
 
         committed = engine.live_step(
@@ -289,93 +348,105 @@ def _run_single(
             step=index + 1,
         )
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        dynamic_matrix = engine.matrices(committed.state)[0]
-        lower, upper = _state_interval_bounds(dynamic_matrix)
-        relevant_width = selected_row_width_sum(dynamic_matrix, scenario.relevant_rows)
-        if ground_truth is not None:
-            gt = ground_truth[index]
-            if lower.shape != gt.lower.shape:
-                raise RuntimeError(
-                    "RTLola reduced and exact state-zonotope dimensions differ "
-                    f"(method={method}, seed={seed}, step={index}, "
-                    f"reduced_dim={lower.shape[0]}, exact_dim={gt.lower.shape[0]})"
-                )
-            approx_error = float(np.sum(np.abs(lower - gt.lower) + np.abs(upper - gt.upper)))
-            relevant_error = _selected_interval_error(
-                lower,
-                upper,
-                gt.lower,
-                gt.upper,
-                scenario.relevant_rows,
-            )
-            approx_loss = engine.approx_loss(gt.state, committed.state)
-            false_positive = _false_positive(
-                committed.verdict, gt.verdicts, scenario.expected_verdict_keys,
-            )
-            false_negative = _false_negative(
-                committed.verdict, gt.verdicts, scenario.expected_verdict_keys,
-            )
-            exact_width = gt.width_sum
-            exact_relevant_width = gt.relevant_width_sum
-        else:
-            approx_error = float("nan")
-            relevant_error = float("nan")
-            approx_loss = float("nan")
-            false_positive = float("nan")
-            false_negative = float("nan")
-            exact_width = float("nan")
-            exact_relevant_width = float("nan")
-        public_bounds = _public_bounds(committed.verdict, scenario.public_stream_keys)
-        trigger_positive = _trigger_positive(committed.verdict, scenario.trigger_keys)
-        post_event_over_bound = committed.metrics.dynamic_generator_count > config.budget
-        violation = False
-        steps.append(RtlolaStepRecord(
+        steps.append(make_step_record(
+            engine=engine,
+            scenario=scenario,
             seed=seed,
             method=method,
             step=index,
+            budget=config.budget,
             pre_generator_count=pre_metrics.dynamic_generator_count,
-            generator_count=committed.metrics.dynamic_generator_count,
-            total_generator_count=committed.metrics.total_generator_count,
-            active_dynamic_generator_count=committed.metrics.active_dynamic_generator_count,
-            active_total_generator_count=committed.metrics.active_total_generator_count,
-            zero_dynamic_generator_count=committed.metrics.zero_dynamic_generator_count,
-            zero_total_generator_count=committed.metrics.zero_total_generator_count,
-            reduced=decision.first_action.name != "none",
-            reducer_used=decision.first_action.name,
-            state_zonotope_width_sum=committed.metrics.full_width_sum,
-            exact_state_zonotope_width_sum=exact_width,
-            state_zonotope_approx_error_sum=approx_error,
-            relevant_state_width_sum=relevant_width,
-            exact_relevant_state_width_sum=exact_relevant_width,
-            relevant_state_approx_error_sum=relevant_error,
-            approx_loss=approx_loss,
-            false_positive=false_positive,
-            false_negative=false_negative,
-            trigger_positive=trigger_positive,
-            verdicts=committed.verdict,
-            public_bounds=public_bounds,
-            reduction_time_ms=elapsed_ms,
-            predicted_cost=decision.predicted_cost,
-            predicted_sequence=decision.predicted_sequence,
-            evaluated_leaves=decision.evaluated_leaves,
-            pruned_branches=decision.pruned_branches,
-            post_event_over_bound=post_event_over_bound,
-            budget_violation=violation,
-            fallback_used=decision.fallback_used,
-            reducer_failure_count=decision.reducer_failure_count,
-            infeasible_candidate_count=decision.infeasible_candidate_count,
+            committed=committed,
+            decision=decision,
+            decision_time_ms=elapsed_ms,
+            ground_truth=ground_truth[index] if ground_truth is not None else None,
         ))
-        if violation:
-            raise RuntimeError(
-                "committed RTLola step exceeded dynamic budget "
-                f"(method={method}, seed={seed}, step={index}, "
-                f"count={committed.metrics.dynamic_generator_count}, budget={config.budget})"
-            )
     return RtlolaRunResult(method=method, seed=seed, steps=tuple(steps))
 
 
+def make_step_record(
+    *,
+    engine: RtlolaEngine,
+    scenario: RtlolaScenario,
+    seed: int,
+    method: str,
+    step: int,
+    budget: int,
+    pre_generator_count: int,
+    committed: RtlolaStepResult,
+    decision: RtlolaSearchResult,
+    decision_time_ms: float,
+    ground_truth: RtlolaGroundTruthStep | None,
+) -> RtlolaStepRecord:
+    """Create one benchmark row for any static, predictive, or learned policy."""
+    dynamic_matrix = engine.matrices(committed.state)[0]
+    lower, upper = _state_interval_bounds(dynamic_matrix)
+    if ground_truth is not None:
+        if lower.shape != ground_truth.lower.shape:
+            raise RuntimeError(
+                "RTLola reduced and exact state-zonotope dimensions differ "
+                f"(method={method}, seed={seed}, step={step}, "
+                f"reduced_dim={lower.shape[0]}, exact_dim={ground_truth.lower.shape[0]})"
+            )
+        approx_error = float(np.sum(
+            np.abs(lower - ground_truth.lower)
+            + np.abs(upper - ground_truth.upper)
+        ))
+        approx_loss = engine.approx_loss(ground_truth.state, committed.state)
+        false_positive = _false_positive(
+            committed.verdict,
+            ground_truth.verdicts,
+            scenario.expected_verdict_keys,
+        )
+        false_negative = _false_negative(
+            committed.verdict,
+            ground_truth.verdicts,
+            scenario.expected_verdict_keys,
+        )
+        exact_width = ground_truth.width_sum
+    else:
+        approx_error = float("nan")
+        approx_loss = float("nan")
+        false_positive = float("nan")
+        false_negative = float("nan")
+        exact_width = float("nan")
+    return RtlolaStepRecord(
+        seed=seed,
+        method=method,
+        step=step,
+        pre_generator_count=pre_generator_count,
+        generator_count=committed.metrics.dynamic_generator_count,
+        total_generator_count=committed.metrics.total_generator_count,
+        active_dynamic_generator_count=committed.metrics.active_dynamic_generator_count,
+        active_total_generator_count=committed.metrics.active_total_generator_count,
+        zero_dynamic_generator_count=committed.metrics.zero_dynamic_generator_count,
+        zero_total_generator_count=committed.metrics.zero_total_generator_count,
+        reduced=decision.first_action.name != "none",
+        reducer_used=decision.first_action.name,
+        state_zonotope_width_sum=committed.metrics.full_width_sum,
+        exact_state_zonotope_width_sum=exact_width,
+        state_zonotope_approx_error_sum=approx_error,
+        approx_loss=approx_loss,
+        false_positive=false_positive,
+        false_negative=false_negative,
+        trigger_positive=_trigger_positive(committed.verdict, scenario.trigger_keys),
+        verdicts=committed.verdict,
+        public_bounds=_public_bounds(committed.verdict, scenario.public_stream_keys),
+        decision_time_ms=decision_time_ms,
+        binding_runtime_ns=_binding_runtime_ns(committed.verdict),
+        predicted_cost=decision.predicted_cost,
+        predicted_sequence=decision.predicted_sequence,
+        evaluated_leaves=decision.evaluated_leaves,
+        pruned_branches=decision.pruned_branches,
+        post_event_over_bound=committed.metrics.dynamic_generator_count > budget,
+        fallback_used=decision.fallback_used,
+        reducer_failure_count=decision.reducer_failure_count,
+        infeasible_candidate_count=decision.infeasible_candidate_count,
+    )
+
+
 def infer_fresh_generator_reserve(
-    scenario: RtlolaScenarioSpec,
+    scenario: RtlolaScenario,
     trace: Sequence[RtlolaEvent],
     by_name: dict[str, RtlolaAction],
     *,
@@ -415,11 +486,11 @@ def infer_fresh_generator_reserve(
 def compute_ground_truth(
     trace: Sequence[RtlolaEvent],
     *,
-    scenario: RtlolaScenarioSpec | None = None,
+    scenario: RtlolaScenario | None = None,
 ) -> tuple[RtlolaGroundTruthStep, ...]:
     """Run the RTLola monitor without reductions for exact state-zonotope metrics."""
     scenario = scenario or scenario_by_name("omni_robot")
-    actions = action_by_name(default_actions())
+    actions = default_action_catalog().by_name
     engine = RtlolaEngine(
         scenario.spec,
         event_arity=scenario.event_arity,
@@ -439,7 +510,6 @@ def compute_ground_truth(
             upper=upper,
             dynamic_matrix=zono.copy(),
             state=committed.state,
-            relevant_width_sum=selected_row_width_sum(zono, scenario.relevant_rows),
             width_sum=float(np.sum(upper - lower)),
             verdicts=dict(verdict),
             public_bounds=_public_bounds(verdict, scenario.public_stream_keys),
@@ -467,20 +537,17 @@ def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
                 "state_zonotope_width_sum": step.state_zonotope_width_sum,
                 "exact_state_zonotope_width_sum": step.exact_state_zonotope_width_sum,
                 "state_zonotope_approx_error_sum": step.state_zonotope_approx_error_sum,
-                "relevant_state_width_sum": step.relevant_state_width_sum,
-                "exact_relevant_state_width_sum": step.exact_relevant_state_width_sum,
-                "relevant_state_approx_error_sum": step.relevant_state_approx_error_sum,
                 "approx_loss": step.approx_loss,
                 "false_positive": step.false_positive,
                 "false_negative": step.false_negative,
                 "trigger_positive": step.trigger_positive,
-                "reduction_time_ms": step.reduction_time_ms,
+                "decision_time_ms": step.decision_time_ms,
+                "binding_runtime_ns": step.binding_runtime_ns,
                 "predicted_cost": step.predicted_cost,
                 "predicted_sequence": ",".join(step.predicted_sequence),
                 "evaluated_leaves": step.evaluated_leaves,
                 "pruned_branches": step.pruned_branches,
                 "post_event_over_bound": step.post_event_over_bound,
-                "budget_violation": step.budget_violation,
                 "fallback_used": step.fallback_used,
                 "reducer_failure_count": step.reducer_failure_count,
                 "infeasible_candidate_count": step.infeasible_candidate_count,
@@ -510,14 +577,6 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             [step.state_zonotope_approx_error_sum for step in run.steps],
             dtype=np.float64,
         )
-        relevant_widths = np.asarray(
-            [step.relevant_state_width_sum for step in run.steps],
-            dtype=np.float64,
-        )
-        relevant_errors = np.asarray(
-            [step.relevant_state_approx_error_sum for step in run.steps],
-            dtype=np.float64,
-        )
         approx_losses = np.asarray([step.approx_loss for step in run.steps], dtype=np.float64)
         fps = np.asarray([step.false_positive for step in run.steps], dtype=np.float64)
         fns = np.asarray([step.false_negative for step in run.steps], dtype=np.float64)
@@ -539,15 +598,9 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             "max_zero_dynamic_generator_count": int(np.max(zero_gens)),
             "total_reductions": run.total_reductions,
             "total_time_ms": run.total_time_ms,
-            "budget_violations": run.budget_violations,
-            "unsound_certificates": 0,
             "mean_state_zonotope_approx_error": float(np.mean(approx_errors)),
             "max_state_zonotope_approx_error": float(np.max(approx_errors)),
             "state_zonotope_abs_error_range": float(np.max(approx_errors) - np.min(approx_errors)),
-            "mean_relevant_state_width": float(np.mean(relevant_widths)),
-            "max_relevant_state_width": float(np.max(relevant_widths)),
-            "mean_relevant_state_approx_error": float(np.mean(relevant_errors)),
-            "max_relevant_state_approx_error": float(np.max(relevant_errors)),
             "mean_approx_loss": float(np.mean(approx_losses)),
             "max_approx_loss": float(np.max(approx_losses)),
             "false_positive_rate": _nanmean(fps),
@@ -567,6 +620,15 @@ def _nanmean(values: np.ndarray) -> float:
     if values.size == 0 or np.isnan(values).all():
         return float("nan")
     return float(np.nanmean(values))
+
+
+def _binding_runtime_ns(verdict: dict[str, object]) -> float:
+    value = verdict.get("runtime_ns", float("nan"))
+    try:
+        runtime = float(value)
+    except (TypeError, ValueError):
+        return float("nan")
+    return runtime if np.isfinite(runtime) else float("nan")
 
 
 def _state_interval_bounds(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
@@ -602,19 +664,6 @@ def _false_negative(
 
 def _trigger_positive(verdict: dict[str, object], keys: Sequence[str]) -> bool:
     return any(bool(verdict.get(key, False)) for key in keys)
-
-
-def _selected_interval_error(
-    lower: np.ndarray,
-    upper: np.ndarray,
-    exact_lower: np.ndarray,
-    exact_upper: np.ndarray,
-    rows: Sequence[int],
-) -> float:
-    if not rows:
-        return float(np.sum(np.abs(lower - exact_lower) + np.abs(upper - exact_upper)))
-    idx = np.asarray(tuple(rows), dtype=np.int64)
-    return float(np.sum(np.abs(lower[idx] - exact_lower[idx]) + np.abs(upper[idx] - exact_upper[idx])))
 
 
 def _public_bounds(verdict: dict[str, object], keys: Sequence[str]) -> dict[str, tuple[float, float]]:
@@ -690,7 +739,7 @@ def _write_dashboard_artifacts(
         "total_time_ms",
         "mean_approx_loss",
         "max_approx_loss",
-        "mean_relevant_state_width",
+        "mean_state_zonotope_width",
     ]].copy()
     pareto.to_csv(scenario_dir / "pareto_runtime_vs_loss.csv", index=False)
     figures_dir = output_dir / "figures"
@@ -747,10 +796,10 @@ def _plot_pareto(pareto: pd.DataFrame, stem: Path) -> None:
     grouped = pareto.groupby("method", as_index=False).agg({
         "total_time_ms": "mean",
         "mean_approx_loss": "mean",
-        "mean_relevant_state_width": "mean",
+        "mean_state_zonotope_width": "mean",
     })
     y_col = (
-        "mean_relevant_state_width"
+        "mean_state_zonotope_width"
         if grouped["mean_approx_loss"].isna().all() else "mean_approx_loss"
     )
     fig, ax = plt.subplots(figsize=(6.0, 4.0))
@@ -759,7 +808,7 @@ def _plot_pareto(pareto: pd.DataFrame, stem: Path) -> None:
         ax.annotate(row.method, (row.total_time_ms, getattr(row, y_col)), fontsize=8)
     ax.set_xlabel("Runtime [ms]")
     ax.set_ylabel(
-        "Mean relevant state width" if y_col == "mean_relevant_state_width"
+        "Mean state-zonotope width" if y_col == "mean_state_zonotope_width"
         else "Mean approximation loss"
     )
     fig.tight_layout()

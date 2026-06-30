@@ -5,43 +5,34 @@ build-backend = "setuptools.build_meta"
 [project]
 name = "predictive-zonotope-reduction"
 version = "0.2.0"
-description = "Dynamic zonotope reduction for state estimation under uncertainty."
+description = "Predictive reducer selection for RTLola zonotope monitors."
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "numpy>=1.24",
     "pandas>=2.0",
-    "scipy>=1.10",
     "matplotlib>=3.7",
-    "pillow>=10",
     "pyyaml>=6.0",
     "tqdm>=4.65",
 ]
 
 [project.optional-dependencies]
-learning = [
-    "torch>=2.0",
-]
 sim = [
     "mujoco>=3.0",
-    "safety-gymnasium>=1.0",
 ]
 dev = [
     "pytest>=8",
 ]
 
 [project.scripts]
-pzr-benchmark = "pzr.cli:main"
-pzr-robot-arm-animation = "pzr.experiments.robot_arm_animation:main"
-pzr-robotics-replay = "pzr.experiments.robotics_replay:main"
-pzr-paper-tables = "pzr.experiments.paper_tables:main"
-pzr-rtlola-benchmark = "pzr.rtlola.cli:main"
+pzr-benchmark = "pzr.rtlola.cli:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]
 
 [tool.setuptools.package-data]
 pzr = [
+    "rtlola/specs/*.lola",
     "rtlola/traces/robot_arm/*.csv",
     "envs/mujoco_models/low_cost_robot_arm/*.xml",
     "envs/mujoco_models/low_cost_robot_arm/*.md",

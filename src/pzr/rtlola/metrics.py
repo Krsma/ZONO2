@@ -3,8 +3,6 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
-from typing import Sequence
-
 import numpy as np
 from numpy.typing import NDArray
 
@@ -61,30 +59,6 @@ def row_widths(matrix: NDArray[np.float64]) -> NDArray[np.float64]:
     if not generators.size:
         return np.zeros(z.shape[0], dtype=np.float64)
     return 2.0 * np.abs(generators).sum(axis=1)
-
-
-def selected_row_width_sum(
-    matrix: NDArray[np.float64],
-    rows: Sequence[int],
-) -> float:
-    """Sum row interval widths for a monitor-relevant state-row subset."""
-    widths = row_widths(matrix)
-    if not rows:
-        return float(np.sum(widths))
-    indices = np.asarray(tuple(rows), dtype=np.int64)
-    if np.any(indices < 0) or np.any(indices >= widths.shape[0]):
-        raise ValueError(
-            f"relevant row index outside matrix dimension {widths.shape[0]}: {tuple(rows)}"
-        )
-    return _safe(float(np.sum(widths[indices])))
-
-
-def relevant_row_cost(
-    dynamic_matrix: NDArray[np.float64],
-    rows: Sequence[int],
-) -> float:
-    """Online reducer-selection cost for rows feeding scenario metrics."""
-    return float(selected_row_width_sum(dynamic_matrix, rows))
 
 
 def matrix_metrics(

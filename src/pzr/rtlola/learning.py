@@ -1,36 +1,36 @@
-"""Regret/ranking distillation for RTLola actions."""
+"""Scenario-neutral regret distillation for RTLola reducer actions."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
+import json
 from pathlib import Path
+import time
 from typing import Sequence
 
 import numpy as np
 import pandas as pd
 
-from pzr.imitation.regret import RegretDataset, RegretRankingPolicy, train_regret_policy
-from pzr.rtlola.actions import RtlolaAction, action_by_name, default_actions
-from pzr.rtlola.binding import require_binding
-from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
-from pzr.rtlola.metrics import RtlolaMatrixMetrics
-from pzr.rtlola.omni import OMNI_EXPECTED_VERDICT_KEYS, OMNI_SPEC, generate_omni_events
-from pzr.rtlola.runner import (
+from pzr.learning.ranking import (
+    RegretDataset,
+    RegretRankingPolicy,
+    train_regret_policy,
+)
+from pzr.rtlola.actions import RtlolaAction, RtlolaActionCatalog, default_action_catalog
+from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
     RtlolaRunResult,
-    RtlolaStepRecord,
-    _public_bounds,
-    _selected_interval_error,
-    _false_positive,
-    _false_negative,
-    _trigger_positive,
-    _state_interval_bounds,
     compute_ground_truth,
+    make_step_record,
     results_to_dataframe,
     summarize_results,
 )
-from pzr.rtlola.search import beam_search
-from pzr.utils.serialization import save_json
+from pzr.rtlola.binding import require_binding
+from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
+from pzr.rtlola.metrics import RtlolaMatrixMetrics
+from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
+from pzr.rtlola.search import RtlolaSearchResult, beam_search
+
 
 RTL_FEATURE_NAMES = (
     "dynamic_generator_count",
@@ -88,17 +88,21 @@ class RtlolaRegretResult:
 
 
 class RtlolaLearnedPolicy:
-    """Rank RTLola actions with a trained regret policy."""
+    """Choose a certified binding transform directly from a learned ranking."""
 
     def __init__(
         self,
         policy: RegretRankingPolicy,
-        actions: tuple[RtlolaAction, ...],
-        fallback: RtlolaAction,
+        catalog: RtlolaActionCatalog,
     ) -> None:
+        expected = tuple(catalog.mpc_candidate_names)
+        if tuple(policy.candidate_names) != expected:
+            raise ValueError(
+                "learned policy candidate catalog does not match RTLola MPC "
+                f"candidates: policy={policy.candidate_names}, expected={expected}"
+            )
         self.policy = policy
-        self.actions = action_by_name(actions)
-        self.fallback = fallback
+        self.catalog = catalog
 
     def choose(
         self,
@@ -107,43 +111,69 @@ class RtlolaLearnedPolicy:
         event: RtlolaEvent,
         future_events: Sequence[RtlolaEvent],
         budget: int,
-        beam_width: int,
-    ):
-        # This is intentionally a ranked-beam policy for now: the learned model
-        # ranks actions, then RTLola beam search evaluates the ranked set.
-        # A top-1 distilled classifier policy is a separate follow-up.
+    ) -> RtlolaSearchResult:
+        pre_metrics = engine.metrics(state)
+        if pre_metrics.dynamic_generator_count <= budget:
+            step = engine.branch_step(
+                state,
+                event,
+                self.catalog.no_op,
+                budget,
+            )
+            return RtlolaSearchResult(
+                first_action=self.catalog.no_op,
+                first_action_budget=budget,
+                first_step=step,
+                predicted_cost=0.0,
+                predicted_sequence=(self.catalog.no_op.name,),
+                evaluated_leaves=1,
+                pruned_branches=0,
+            )
+
         features = extract_features(engine, state, budget, future_events)
-        ranked = self.policy.rank_reducers(features)
-        candidate_actions = tuple(
-            self.actions[name] for name in ranked if name in self.actions
-        )
-        if not candidate_actions:
-            candidate_actions = (self.fallback,)
-        none_action = self.actions.get("none")
+        predictions = self.policy.predict_regret(features)
+        predicted_by_name = dict(zip(self.policy.candidate_names, predictions))
+        failures = 0
+        for name in self.policy.rank_reducers(features):
+            action = self.catalog.by_name[name]
+            try:
+                step = engine.branch_step(state, event, action, budget)
+            except (RuntimeError, ValueError):
+                failures += 1
+                continue
+            return RtlolaSearchResult(
+                first_action=action,
+                first_action_budget=budget,
+                first_step=step,
+                predicted_cost=float(predicted_by_name[name]),
+                predicted_sequence=(action.name,),
+                evaluated_leaves=1,
+                pruned_branches=0,
+                reducer_failure_count=failures,
+                infeasible_candidate_count=failures,
+            )
+
         try:
-            return beam_search(
-                engine,
+            step = engine.branch_step(
                 state,
                 event,
-                future_events,
-                candidate_actions,
+                self.catalog.fallback,
                 budget,
-                beam_width,
-                fallback=self.fallback,
-                none_action=none_action,
             )
-        except ValueError:
-            return beam_search(
-                engine,
-                state,
-                event,
-                future_events,
-                (self.fallback,),
-                budget,
-                beam_width,
-                fallback=self.fallback,
-                none_action=none_action,
-            )
+        except (RuntimeError, ValueError) as exc:
+            raise ValueError("learned RTLola policy and fallback were infeasible") from exc
+        return RtlolaSearchResult(
+            first_action=self.catalog.fallback,
+            first_action_budget=budget,
+            first_step=step,
+            predicted_cost=float("nan"),
+            predicted_sequence=(self.catalog.fallback.name,),
+            evaluated_leaves=1,
+            pruned_branches=0,
+            fallback_used=True,
+            reducer_failure_count=failures,
+            infeasible_candidate_count=failures,
+        )
 
 
 def train_and_evaluate_regret(
@@ -151,32 +181,33 @@ def train_and_evaluate_regret(
     *,
     show_progress: bool = False,
 ) -> RtlolaRegretResult:
-    if config.scenario != "omni_robot":
-        raise ValueError("RTLola regret distillation is currently implemented for omni_robot only")
-    actions = default_actions()
-    by_name = action_by_name(actions)
-    fallback = by_name["interval"]
-    candidate_names = tuple(action.name for action in actions)
+    scenario = scenario_by_name(config.scenario)
+    catalog = default_action_catalog()
+    candidate_names = tuple(catalog.mpc_candidate_names)
     all_traces: list[RtlolaRegretTrace] = []
     policy: RegretRankingPolicy | None = None
     training_frames: list[pd.DataFrame] = []
-    train_seeds = range(config.regret_train_seeds or config.seeds)
-    eval_seeds = range(config.regret_eval_seeds or max(1, config.seeds // 3))
+    train_seed_count = config.regret_train_seeds or config.seeds
+    eval_seed_count = config.regret_eval_seeds or max(1, config.seeds // 3)
 
     for iteration in range(config.regret_iterations):
-        for seed in train_seeds:
-            trace = generate_omni_events(config.length, seed=seed + iteration * 1000)
+        for seed in range(train_seed_count):
+            trace = scenario.generate_trace(
+                config.length,
+                seed + iteration * 1000,
+                config.trace_kind,
+            )
             learned = (
-                RtlolaLearnedPolicy(policy, actions, fallback)
+                RtlolaLearnedPolicy(policy, catalog)
                 if policy is not None else None
             )
             all_traces.extend(_collect_episode(
-                trace=trace,
+                scenario=scenario,
+                trace=trace.events,
                 seed=seed,
                 iteration=iteration,
                 config=config,
-                actions=actions,
-                fallback=fallback,
+                catalog=catalog,
                 learned_policy=learned,
             ))
         dataset = _build_dataset(all_traces, candidate_names)
@@ -187,20 +218,28 @@ def train_and_evaluate_regret(
             show_progress=show_progress,
             loss=config.regret_loss,  # type: ignore[arg-type]
         )
-        training_frames.append(pd.DataFrame([{"iteration": iteration, **asdict(training)}]))
+        training_frames.append(pd.DataFrame([{
+            "iteration": iteration,
+            **asdict(training),
+        }]))
 
     if policy is None:
         raise ValueError("RTLola regret distillation produced no policy")
 
-    learned_policy = RtlolaLearnedPolicy(policy, actions, fallback)
+    learned_policy = RtlolaLearnedPolicy(policy, catalog)
     eval_results = tuple(
         _evaluate_learned_episode(
-            trace=generate_omni_events(config.length, seed=seed),
+            scenario=scenario,
+            trace=scenario.generate_trace(
+                config.length,
+                seed,
+                config.trace_kind,
+            ).events,
             seed=seed,
             config=config,
             learned_policy=learned_policy,
         )
-        for seed in eval_seeds
+        for seed in range(eval_seed_count)
     )
     return RtlolaRegretResult(
         policy=policy,
@@ -225,28 +264,30 @@ def extract_features(
     overflow = 0.0
     rollout_state = state
     _, _, ZonotopeConfig = require_binding()
-    # Exact future preview for features only. It may overflow; that is a signal.
     for event in future_events:
-        verdict, child = engine.planner.accept_event_from_state(
+        _, child = engine.planner.accept_event_from_state(
             rollout_state.state,
             list(event.values),
             event.time,
             ZonotopeConfig.none(),
         )
-        _ = verdict
-        rollout_state = RtlolaStateRef(child, engine.spec_id, rollout_state.step + 1, event.time)
-        m = engine.metrics(rollout_state)
-        widths.append(m.full_width_sum)
-        counts.append(float(m.dynamic_generator_count))
-        if m.dynamic_generator_count > budget:
-            overflow += 1.0
-    future = np.array([
-        float(np.mean(widths)),
-        float(np.max(widths)),
-        float(widths[-1]),
-        float(widths[-1] - metrics.full_width_sum),
+        rollout_state = RtlolaStateRef(
+            child,
+            engine.spec_id,
+            rollout_state.step + 1,
+            event.time,
+        )
+        future_metrics = engine.metrics(rollout_state)
+        widths.append(future_metrics.full_width_sum)
+        counts.append(float(future_metrics.dynamic_generator_count))
+        overflow += float(future_metrics.dynamic_generator_count > budget)
+    future = np.asarray([
+        np.mean(widths),
+        np.max(widths),
+        widths[-1],
+        widths[-1] - metrics.full_width_sum,
         overflow,
-        float(np.mean(counts)),
+        np.mean(counts),
     ], dtype=np.float64)
     future[~np.isfinite(future)] = 0.0
     return np.concatenate([base, future])
@@ -255,44 +296,58 @@ def extract_features(
 def write_regret_artifacts(
     result: RtlolaRegretResult,
     output_dir: Path,
-    metadata: dict,
+    metadata: dict[str, object],
 ) -> None:
     output_dir.mkdir(parents=True, exist_ok=True)
-    result.policy.save(output_dir / "learned_ranked_beam.npz")
+    result.policy.save(output_dir / "learned_direct_ranker.npz")
     regret_traces_to_dataframe(result.traces).to_csv(
-        output_dir / "regret_candidate_costs.csv", index=False,
+        output_dir / "regret_candidate_costs.csv",
+        index=False,
     )
     regret_trace_summary(result.traces).to_csv(
-        output_dir / "regret_trace_summary.csv", index=False,
+        output_dir / "regret_trace_summary.csv",
+        index=False,
     )
     pd.concat(result.training_frames, ignore_index=True).to_csv(
-        output_dir / "regret_training.csv", index=False,
+        output_dir / "regret_training.csv",
+        index=False,
     )
     regret_ranking_metrics(result.traces).to_csv(
-        output_dir / "regret_ranking_metrics.csv", index=False,
+        output_dir / "regret_ranking_metrics.csv",
+        index=False,
     )
     summarize_results(result.eval_results).to_csv(
-        output_dir / "regret_eval_summary.csv", index=False,
+        output_dir / "regret_eval_summary.csv",
+        index=False,
     )
     results_to_dataframe(result.eval_results).to_csv(
-        output_dir / "regret_eval_timeseries.csv", index=False,
+        output_dir / "regret_eval_timeseries.csv",
+        index=False,
     )
-    save_json(
-        {
-            **metadata,
-            "policy_behavior": "ranked_beam",
-            "total_traces": len(result.traces),
-        },
-        output_dir / "regret_metadata.json",
+    payload = {
+        **metadata,
+        "policy_behavior": "direct_ranked_action",
+        "candidate_names": list(result.policy.candidate_names),
+        "feature_names": list(result.policy.feature_names),
+        "total_traces": len(result.traces),
+    }
+    (output_dir / "regret_metadata.json").write_text(
+        json.dumps(payload, indent=2, sort_keys=True),
     )
 
 
-def regret_traces_to_dataframe(traces: Sequence[RtlolaRegretTrace]) -> pd.DataFrame:
+def regret_traces_to_dataframe(
+    traces: Sequence[RtlolaRegretTrace],
+) -> pd.DataFrame:
     rows = []
-    for idx, trace in enumerate(traces):
-        for name, cost, regret in zip(trace.candidate_names, trace.costs, trace.regrets):
+    for decision_id, trace in enumerate(traces):
+        for name, cost, regret in zip(
+            trace.candidate_names,
+            trace.costs,
+            trace.regrets,
+        ):
             rows.append({
-                "decision_id": idx,
+                "decision_id": decision_id,
                 "seed": trace.seed,
                 "iteration": trace.iteration,
                 "step": trace.step,
@@ -307,20 +362,30 @@ def regret_traces_to_dataframe(traces: Sequence[RtlolaRegretTrace]) -> pd.DataFr
     return pd.DataFrame(rows)
 
 
-def regret_trace_summary(traces: Sequence[RtlolaRegretTrace]) -> pd.DataFrame:
+def regret_trace_summary(
+    traces: Sequence[RtlolaRegretTrace],
+) -> pd.DataFrame:
     if not traces:
         return pd.DataFrame()
     best = [trace.best_action for trace in traces]
-    margins = np.asarray([trace.second_best_margin for trace in traces], dtype=np.float64)
+    margins = np.asarray(
+        [trace.second_best_margin for trace in traces],
+        dtype=np.float64,
+    )
     return pd.DataFrame([{
         "decisions": len(traces),
         "mean_second_best_margin": float(np.mean(margins)),
         "median_second_best_margin": float(np.median(margins)),
-        **{f"best_{name}_count": best.count(name) for name in sorted(set(best))},
+        **{
+            f"best_{name}_count": best.count(name)
+            for name in sorted(set(best))
+        },
     }])
 
 
-def regret_ranking_metrics(traces: Sequence[RtlolaRegretTrace]) -> pd.DataFrame:
+def regret_ranking_metrics(
+    traces: Sequence[RtlolaRegretTrace],
+) -> pd.DataFrame:
     return pd.DataFrame([
         {
             "seed": trace.seed,
@@ -338,109 +403,97 @@ def regret_ranking_metrics(traces: Sequence[RtlolaRegretTrace]) -> pd.DataFrame:
 
 def _collect_episode(
     *,
+    scenario: RtlolaScenario,
     trace: Sequence[RtlolaEvent],
     seed: int,
     iteration: int,
     config: RtlolaBenchmarkConfig,
-    actions: tuple[RtlolaAction, ...],
-    fallback: RtlolaAction,
+    catalog: RtlolaActionCatalog,
     learned_policy: RtlolaLearnedPolicy | None,
 ) -> list[RtlolaRegretTrace]:
-    engine = RtlolaEngine(OMNI_SPEC, event_arity=3, expected_verdict_keys=OMNI_EXPECTED_VERDICT_KEYS)
+    engine = _engine_for_scenario(scenario)
     traces: list[RtlolaRegretTrace] = []
     for step, event in enumerate(trace):
         state = engine.snapshot(step=step, time=event.time)
         future = tuple(trace[step + 1:step + 1 + config.horizon])
-        rows = _evaluate_candidates(engine, state, event, future, actions, config, fallback)
-        features = extract_features(engine, state, config.budget, future)
-        traces.append(_trace_from_rows(
-            rows=rows,
-            features=features,
-            seed=seed,
-            step=step,
-            iteration=iteration,
-        ))
-        if learned_policy is None:
-            chosen = min(rows, key=lambda row: (row.cost, row.sequence)).name
-            action = action_by_name(actions)[chosen]
+        if engine.metrics(state).dynamic_generator_count <= config.budget:
+            action = catalog.no_op
         else:
-            action = learned_policy.choose(
-                engine, state, event, future, config.budget, config.beam_width,
-            ).first_action
+            rows = _evaluate_candidates(
+                engine,
+                state,
+                event,
+                future,
+                catalog,
+                config,
+            )
+            features = extract_features(engine, state, config.budget, future)
+            traces.append(_trace_from_rows(
+                rows=rows,
+                features=features,
+                seed=seed,
+                step=step,
+                iteration=iteration,
+            ))
+            if learned_policy is None:
+                best = min(rows, key=lambda row: (row.cost, row.sequence))
+                action = catalog.by_name[best.name]
+            else:
+                action = learned_policy.choose(
+                    engine,
+                    state,
+                    event,
+                    future,
+                    config.budget,
+                ).first_action
         engine.live_step(event, action, config.budget, step=step + 1)
     return traces
 
 
 def _evaluate_learned_episode(
     *,
+    scenario: RtlolaScenario,
     trace: Sequence[RtlolaEvent],
     seed: int,
     config: RtlolaBenchmarkConfig,
     learned_policy: RtlolaLearnedPolicy,
 ) -> RtlolaRunResult:
-    engine = RtlolaEngine(OMNI_SPEC, event_arity=3, expected_verdict_keys=OMNI_EXPECTED_VERDICT_KEYS)
-    ground_truth = compute_ground_truth(trace)
-    records: list[RtlolaStepRecord] = []
+    engine = _engine_for_scenario(scenario)
+    ground_truth = compute_ground_truth(trace, scenario=scenario)
+    records = []
     for step, event in enumerate(trace):
         state = engine.snapshot(step=step, time=event.time)
-        pre_metrics = engine.metrics(state)
+        pre_count = engine.metrics(state).dynamic_generator_count
         future = tuple(trace[step + 1:step + 1 + config.horizon])
+        start = time.perf_counter()
         decision = learned_policy.choose(
-            engine, state, event, future, config.budget, config.beam_width,
+            engine,
+            state,
+            event,
+            future,
+            config.budget,
         )
-        committed = engine.live_step(event, decision.first_action, config.budget, step=step + 1)
-        gt = ground_truth[step]
-        lower, upper = _state_interval_bounds(engine.matrices(committed.state)[0])
-        if lower.shape != gt.lower.shape:
-            raise RuntimeError(
-                "RTLola learned reduced and exact state-zonotope dimensions differ "
-                f"(seed={seed}, step={step}, "
-                f"reduced_dim={lower.shape[0]}, exact_dim={gt.lower.shape[0]})"
-            )
-        approx_error = float(np.sum(np.abs(lower - gt.lower) + np.abs(upper - gt.upper)))
-        records.append(RtlolaStepRecord(
+        committed = engine.live_step(
+            event,
+            decision.first_action,
+            decision.first_action_budget,
+            step=step + 1,
+        )
+        elapsed_ms = (time.perf_counter() - start) * 1000.0
+        records.append(make_step_record(
+            engine=engine,
+            scenario=scenario,
             seed=seed,
-            method="learned_ranked_beam",
+            method="learned_direct",
             step=step,
-            pre_generator_count=pre_metrics.dynamic_generator_count,
-            generator_count=committed.metrics.dynamic_generator_count,
-            total_generator_count=committed.metrics.total_generator_count,
-            active_dynamic_generator_count=committed.metrics.active_dynamic_generator_count,
-            active_total_generator_count=committed.metrics.active_total_generator_count,
-            zero_dynamic_generator_count=committed.metrics.zero_dynamic_generator_count,
-            zero_total_generator_count=committed.metrics.zero_total_generator_count,
-            reduced=decision.first_action.name != "none",
-            reducer_used=decision.first_action.name,
-            state_zonotope_width_sum=committed.metrics.full_width_sum,
-            exact_state_zonotope_width_sum=gt.width_sum,
-            state_zonotope_approx_error_sum=approx_error,
-            relevant_state_width_sum=committed.metrics.full_width_sum,
-            exact_relevant_state_width_sum=gt.width_sum,
-            relevant_state_approx_error_sum=_selected_interval_error(
-                lower, upper, gt.lower, gt.upper, (),
-            ),
-            approx_loss=approx_error,
-            false_positive=_false_positive(
-                committed.verdict, gt.verdicts, OMNI_EXPECTED_VERDICT_KEYS,
-            ),
-            false_negative=_false_negative(
-                committed.verdict, gt.verdicts, OMNI_EXPECTED_VERDICT_KEYS,
-            ),
-            trigger_positive=_trigger_positive(committed.verdict, OMNI_EXPECTED_VERDICT_KEYS),
-            verdicts=committed.verdict,
-            public_bounds=_public_bounds(committed.verdict, OMNI_EXPECTED_VERDICT_KEYS),
-            reduction_time_ms=0.0,
-            predicted_cost=decision.predicted_cost,
-            predicted_sequence=decision.predicted_sequence,
-            evaluated_leaves=decision.evaluated_leaves,
-            pruned_branches=decision.pruned_branches,
-            post_event_over_bound=committed.metrics.dynamic_generator_count > config.budget,
-            budget_violation=False,
-            fallback_used=decision.fallback_used,
-            reducer_failure_count=decision.reducer_failure_count,
-            infeasible_candidate_count=decision.infeasible_candidate_count,
+            budget=config.budget,
+            pre_generator_count=pre_count,
+            committed=committed,
+            decision=decision,
+            decision_time_ms=elapsed_ms,
+            ground_truth=ground_truth[step],
         ))
-    return RtlolaRunResult("learned_ranked_beam", seed, tuple(records))
+    return RtlolaRunResult("learned_direct", seed, tuple(records))
 
 
 def _evaluate_candidates(
@@ -448,32 +501,37 @@ def _evaluate_candidates(
     state: RtlolaStateRef,
     event: RtlolaEvent,
     future: Sequence[RtlolaEvent],
-    actions: tuple[RtlolaAction, ...],
+    catalog: RtlolaActionCatalog,
     config: RtlolaBenchmarkConfig,
-    fallback: RtlolaAction,
 ) -> list[RtlolaCandidateCost]:
+    """Score forced roots, then continue with the full MPC candidate pool."""
     rows: list[RtlolaCandidateCost] = []
-    none_action = action_by_name(actions).get("none")
-    for first in actions:
+    for first in catalog.mpc_candidates:
         try:
             search = beam_search(
                 engine,
                 state,
                 event,
                 future,
-                (first,),
+                catalog.mpc_candidates,
                 config.budget,
                 config.beam_width,
-                fallback=fallback,
-                none_action=none_action,
+                fallback=catalog.fallback,
+                none_action=catalog.no_op,
+                use_reference_loss=True,
+                forced_first_action=first,
             )
         except ValueError:
             continue
         if search.first_action.name != first.name:
             continue
-        rows.append(RtlolaCandidateCost(first.name, search.predicted_cost, search.predicted_sequence))
+        rows.append(RtlolaCandidateCost(
+            first.name,
+            search.predicted_cost,
+            search.predicted_sequence,
+        ))
     if not rows:
-        raise ValueError("RTLola regret oracle found no candidate that ran with the bound")
+        raise ValueError("RTLola regret oracle found no feasible candidate")
     rows.sort(key=lambda row: (row.cost, row.sequence))
     return rows
 
@@ -497,12 +555,15 @@ def _trace_from_rows(
     return RtlolaRegretTrace(
         features=features,
         candidate_names=tuple(row.name for row in ordered),
-        costs=tuple(float(v) for v in costs),
-        regrets=tuple(float(v) for v in regrets),
+        costs=tuple(float(value) for value in costs),
+        regrets=tuple(float(value) for value in regrets),
         best_action=best.name,
         best_cost=float(best.cost),
         second_best_margin=float(margin),
-        tie_count=sum(1 for row in rows if abs(row.cost - best.cost) <= tie_tol),
+        tie_count=sum(
+            abs(row.cost - best.cost) <= tie_tol
+            for row in rows
+        ),
         step=step,
         seed=seed,
         iteration=iteration,
@@ -514,12 +575,18 @@ def _build_dataset(
     candidate_names: tuple[str, ...],
 ) -> RegretDataset:
     if not traces:
-        raise ValueError("no RTLola regret traces collected")
+        raise ValueError(
+            "no RTLola reduction decisions were observed; lower the budget "
+            "or increase the training trace length"
+        )
     features = np.stack([trace.features for trace in traces])
     regrets = []
     for trace in traces:
         by_name = dict(zip(trace.candidate_names, trace.regrets))
-        regrets.append([float(by_name.get(name, 1.0)) for name in candidate_names])
+        regrets.append([
+            float(by_name.get(name, 1.0))
+            for name in candidate_names
+        ])
     return RegretDataset(
         features=features,
         regrets=np.asarray(regrets, dtype=np.float64),
@@ -528,8 +595,11 @@ def _build_dataset(
     )
 
 
-def _features_from_metrics(metrics: RtlolaMatrixMetrics, budget: int) -> np.ndarray:
-    values = np.array([
+def _features_from_metrics(
+    metrics: RtlolaMatrixMetrics,
+    budget: int,
+) -> np.ndarray:
+    values = np.asarray([
         metrics.dynamic_generator_count,
         metrics.total_generator_count,
         metrics.dimension,
@@ -548,3 +618,14 @@ def _features_from_metrics(metrics: RtlolaMatrixMetrics, budget: int) -> np.ndar
     ], dtype=np.float64)
     values[~np.isfinite(values)] = 0.0
     return values
+
+
+def _engine_for_scenario(scenario: RtlolaScenario) -> RtlolaEngine:
+    return RtlolaEngine(
+        scenario.spec,
+        event_arity=scenario.event_arity,
+        expected_verdict_keys=(
+            *scenario.expected_verdict_keys,
+            *scenario.public_stream_keys,
+        ),
+    )
