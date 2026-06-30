@@ -36,6 +36,9 @@ pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
 tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
   --output /tmp/pzr-arm
 
+PZR_OUT_DIR=results/rtlola-arm-fpr-overnight \
+  tools/run_rtlola_robot_arm_fpr_overnight.sh
+
 pzr-benchmark --profile smoke --scenario omni_robot --budget 10 \
   --methods girard,mpc_beam --learned-mode regret \
   --regret-iterations 1 --regret-epochs 2 \
@@ -83,6 +86,12 @@ cleanup.
 Robot-arm trigger labels and public metrics come from
 `rtlola/specs/robot_arm.lola`. Constant encoder-calibration slack must remain
 unchanged by dynamic reduction.
+
+For full-length classification metrics use `--reference-mode verdict`.
+Verdict reference caches contain only exact trigger booleans and are reusable
+across methods and budgets. FPR uses exact negative steps as its denominator;
+FNR uses exact positive steps. Keep `exact` mode for short matrix/loss studies
+because it retains the full unreduced state history.
 
 ## Repository Safety
 

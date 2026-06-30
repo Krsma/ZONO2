@@ -59,6 +59,20 @@ pzr-benchmark --profile smoke --scenario robot_arm \
   --output /tmp/pzr-arm-learned
 ```
 
+Prepare or resume the full FPR-first robot-arm sweep:
+
+```bash
+PZR_OUT_DIR=results/rtlola-arm-fpr-overnight \
+  tools/run_rtlola_robot_arm_fpr_overnight.sh
+```
+
+The overnight wrapper evaluates full available held-out traces at budgets
+`40,80,120,180` with Girard, Scott, interval hull, PCA, Combastel, and beam
+MPC. It then trains one budget-aware ranker on the non-violated figure-eight
+and square traces and evaluates it on both violated traces. Cells have
+completion markers and logs, so rerunning the same output directory resumes.
+Set `PZR_SKIP_LEARNING=1` for benchmark-only execution.
+
 Method sets are:
 
 - `core`: exact no-reduction baseline, Girard, Scott, interval hull, PCA, and
@@ -89,6 +103,13 @@ state is within the transform bound. `interval` is an emergency fallback.
 - Trigger labels come from RTLola `#[public]` outputs. State-zonotope widths
   and symbolic public bounds are diagnostics, not substitute trigger
   semantics.
+- Use `--reference-mode verdict` for full-length FPR/FNR evaluation. It
+  streams the unreduced monitor and caches only exact trigger booleans;
+  `--reference-mode exact` additionally retains every unreduced matrix and is
+  intended only for short approximation-loss studies.
+- FPR is false positives divided by exact negative steps; FNR is false
+  negatives divided by exact positive steps. Saved timeseries contain trigger
+  booleans and numeric public bounds, not raw symbolic binding objects.
 
 ## Artifacts
 
@@ -97,6 +118,9 @@ scenario directory, plus `config.yaml`, trigger-confusion data, runtime/loss
 figures, and public-stream range figures. Learned runs also write policy,
 candidate-cost, training, ranking, metadata, and held-out evaluation files
 under `learning/<scenario>/`.
+The overnight wrapper additionally writes `combined_summary.csv`,
+`combined_trigger_confusion.csv`, `combined_reducer_counts.csv`, and
+`mpc_vs_static_fpr.csv` at its output root.
 
 Generated files under `results/` must be regenerated through the CLI rather
 than edited manually.

@@ -3,6 +3,8 @@
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
+import hashlib
+import json
 from pathlib import Path
 import re
 import time
@@ -18,6 +20,7 @@ from pzr.rtlola.actions import (
     default_action_catalog,
 )
 from pzr.rtlola.binding import BINDING_REVISION
+from pzr.rtlola.binding import require_binding
 from pzr.rtlola.engine import (
     RtlolaEngine,
     RtlolaEvent,
@@ -58,6 +61,10 @@ RTLOLA_AGGREGATE_METRICS = [
     "max_approx_loss",
     "false_positive_rate",
     "false_negative_rate",
+    "false_positive_count",
+    "false_negative_count",
+    "reference_positive_count",
+    "reference_negative_count",
     "trigger_positive_rate",
     "post_event_over_bound_count",
     "post_event_over_bound_rate",
@@ -80,6 +87,7 @@ class RtlolaBenchmarkConfig:
     method_set: str = "core"
     methods: list[str] | None = None
     reference_mode: str = "exact"
+    reference_cache: str | None = None
     output_dir: str = "results/rtlola"
     learned_mode: str = "none"
     regret_iterations: int = 3
@@ -87,6 +95,9 @@ class RtlolaBenchmarkConfig:
     regret_train_seeds: int | None = None
     regret_eval_seeds: int | None = None
     regret_loss: str = "pairwise"
+    regret_budgets: list[int] | None = None
+    regret_train_trace_kinds: list[str] | None = None
+    regret_eval_trace_kinds: list[str] | None = None
     binding_revision: str = field(init=False, default=BINDING_REVISION)
     mpc_candidate_names: list[str] = field(
         init=False,
@@ -115,7 +126,9 @@ class RtlolaStepRecord:
     false_positive: bool | float
     false_negative: bool | float
     trigger_positive: bool
-    verdicts: dict[str, object]
+    exact_trigger_positive: bool | float
+    trigger_verdicts: dict[str, bool]
+    exact_trigger_verdicts: dict[str, bool]
     public_bounds: dict[str, tuple[float, float]]
     decision_time_ms: float
     binding_runtime_ns: float
@@ -143,10 +156,19 @@ class RtlolaGroundTruthStep:
 
 
 @dataclass(frozen=True)
+class RtlolaTriggerReferenceStep:
+    """Exact RTLola trigger verdicts without retained zonotope state."""
+
+    verdicts: dict[str, bool]
+
+
+@dataclass(frozen=True)
 class RtlolaRunResult:
     method: str
     seed: int
     steps: tuple[RtlolaStepRecord, ...]
+    budget: int | None = None
+    trace_kind: str = "default"
 
     @property
     def total_reductions(self) -> int:
@@ -219,10 +241,15 @@ def aggregate_summary(
     *,
     metric_columns: Sequence[str] = RTLOLA_AGGREGATE_METRICS,
 ) -> pd.DataFrame:
-    """Aggregate seed-level RTLola metrics by method."""
+    """Aggregate seed-level RTLola metrics by method and experiment cell."""
     rows: list[dict[str, object]] = []
-    for method, group in summary.groupby("method"):
-        row: dict[str, object] = {"method": method}
+    group_columns = [
+        column for column in ("method", "budget", "trace_kind")
+        if column in summary
+    ]
+    for group_key, group in summary.groupby(group_columns, dropna=False):
+        keys = group_key if isinstance(group_key, tuple) else (group_key,)
+        row: dict[str, object] = dict(zip(group_columns, keys))
         for column in metric_columns:
             if column not in group:
                 continue
@@ -235,8 +262,8 @@ def aggregate_summary(
 
 
 def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
-    if config.reference_mode not in {"exact", "off"}:
-        raise ValueError("reference_mode must be one of: exact, off")
+    if config.reference_mode not in {"exact", "verdict", "off"}:
+        raise ValueError("reference_mode must be one of: exact, verdict, off")
     if config.length < 1:
         raise ValueError("length must be >= 1")
     if config.seeds < 1:
@@ -259,6 +286,26 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
             compute_ground_truth(trace, scenario=scenario)
             if config.reference_mode == "exact" else None
         )
+        trigger_reference = (
+            tuple(
+                RtlolaTriggerReferenceStep({
+                    key: bool(step.verdicts.get(key, False))
+                    for key in scenario.trigger_keys
+                })
+                for step in ground_truth
+            )
+            if ground_truth is not None
+            else (
+                load_or_compute_trigger_reference(
+                    trace,
+                    scenario=scenario,
+                    trace_kind=config.trace_kind,
+                    seed=seed,
+                    cache_path=_reference_cache_path(config.reference_cache, seed, config.seeds),
+                )
+                if config.reference_mode == "verdict" else None
+            )
+        )
         for method in methods_for_config(config):
             raw.append(_run_single(
                 config,
@@ -270,6 +317,7 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
                 fallback,
                 seed,
                 ground_truth,
+                trigger_reference,
             ))
     timeseries = results_to_dataframe(raw)
     summary = summarize_results(raw)
@@ -293,6 +341,7 @@ def _run_single(
     fallback: RtlolaAction,
     seed: int,
     ground_truth: Sequence[RtlolaGroundTruthStep] | None,
+    trigger_reference: Sequence[RtlolaTriggerReferenceStep] | None,
 ) -> RtlolaRunResult:
     engine = RtlolaEngine(
         scenario.spec,
@@ -360,8 +409,18 @@ def _run_single(
             decision=decision,
             decision_time_ms=elapsed_ms,
             ground_truth=ground_truth[index] if ground_truth is not None else None,
+            trigger_reference=(
+                trigger_reference[index]
+                if trigger_reference is not None else None
+            ),
         ))
-    return RtlolaRunResult(method=method, seed=seed, steps=tuple(steps))
+    return RtlolaRunResult(
+        method=method,
+        seed=seed,
+        steps=tuple(steps),
+        budget=config.budget,
+        trace_kind=config.trace_kind,
+    )
 
 
 def make_step_record(
@@ -377,6 +436,7 @@ def make_step_record(
     decision: RtlolaSearchResult,
     decision_time_ms: float,
     ground_truth: RtlolaGroundTruthStep | None,
+    trigger_reference: RtlolaTriggerReferenceStep | None = None,
 ) -> RtlolaStepRecord:
     """Create one benchmark row for any static, predictive, or learned policy."""
     dynamic_matrix = engine.matrices(committed.state)[0]
@@ -393,23 +453,28 @@ def make_step_record(
             + np.abs(upper - ground_truth.upper)
         ))
         approx_loss = engine.approx_loss(ground_truth.state, committed.state)
-        false_positive = _false_positive(
-            committed.verdict,
-            ground_truth.verdicts,
-            scenario.expected_verdict_keys,
-        )
-        false_negative = _false_negative(
-            committed.verdict,
-            ground_truth.verdicts,
-            scenario.expected_verdict_keys,
-        )
         exact_width = ground_truth.width_sum
     else:
         approx_error = float("nan")
         approx_loss = float("nan")
+        exact_width = float("nan")
+    predicted_triggers = {
+        key: bool(committed.verdict.get(key, False))
+        for key in scenario.trigger_keys
+    }
+    exact_triggers = (
+        dict(trigger_reference.verdicts)
+        if trigger_reference is not None else {}
+    )
+    predicted_positive = any(predicted_triggers.values())
+    if exact_triggers:
+        exact_positive: bool | float = any(exact_triggers.values())
+        false_positive: bool | float = predicted_positive and not exact_positive
+        false_negative: bool | float = not predicted_positive and exact_positive
+    else:
+        exact_positive = float("nan")
         false_positive = float("nan")
         false_negative = float("nan")
-        exact_width = float("nan")
     return RtlolaStepRecord(
         seed=seed,
         method=method,
@@ -429,8 +494,10 @@ def make_step_record(
         approx_loss=approx_loss,
         false_positive=false_positive,
         false_negative=false_negative,
-        trigger_positive=_trigger_positive(committed.verdict, scenario.trigger_keys),
-        verdicts=committed.verdict,
+        trigger_positive=predicted_positive,
+        exact_trigger_positive=exact_positive,
+        trigger_verdicts=predicted_triggers,
+        exact_trigger_verdicts=exact_triggers,
         public_bounds=_public_bounds(committed.verdict, scenario.public_stream_keys),
         decision_time_ms=decision_time_ms,
         binding_runtime_ns=_binding_runtime_ns(committed.verdict),
@@ -517,6 +584,119 @@ def compute_ground_truth(
     return tuple(out)
 
 
+def load_or_compute_trigger_reference(
+    trace: Sequence[RtlolaEvent],
+    *,
+    scenario: RtlolaScenario,
+    trace_kind: str,
+    seed: int,
+    cache_path: Path | None,
+) -> tuple[RtlolaTriggerReferenceStep, ...]:
+    """Load or stream an exact trigger-only reference."""
+    selected_trace = (
+        scenario.default_trace_kind
+        if trace_kind == "default" else trace_kind
+    )
+    metadata = {
+        "scenario": scenario.name,
+        "trace_kind": selected_trace,
+        "seed": int(seed),
+        "length": len(trace),
+        "trace_sha256": _trace_sha256(trace),
+        "spec_sha256": hashlib.sha256(scenario.spec.encode("utf-8")).hexdigest(),
+        "binding_revision": BINDING_REVISION,
+        "trigger_keys": list(scenario.trigger_keys),
+    }
+    if cache_path is not None and cache_path.exists():
+        try:
+            payload = json.loads(cache_path.read_text())
+        except (OSError, json.JSONDecodeError) as exc:
+            raise ValueError(
+                f"invalid trigger reference cache: {cache_path}"
+            ) from exc
+        if payload.get("metadata") != metadata:
+            raise ValueError(
+                f"trigger reference metadata mismatch: {cache_path}"
+            )
+        rows = payload.get("steps")
+        if not isinstance(rows, list) or len(rows) != len(trace):
+            raise ValueError(
+                f"trigger reference step count mismatch: {cache_path}"
+            )
+        try:
+            return tuple(
+                RtlolaTriggerReferenceStep({
+                    key: bool(row[key])
+                    for key in scenario.trigger_keys
+                })
+                for row in rows
+            )
+        except (KeyError, TypeError) as exc:
+            raise ValueError(
+                f"invalid trigger reference rows: {cache_path}"
+            ) from exc
+
+    _, RLolaMonitor, ZonotopeConfig = require_binding()
+    monitor = RLolaMonitor(scenario.spec)
+    none = ZonotopeConfig.none()
+    steps: list[RtlolaTriggerReferenceStep] = []
+    for index, event in enumerate(trace):
+        verdict = monitor.accept_event(
+            list(event.values),
+            float(event.time),
+            none,
+        )
+        missing = [
+            key for key in scenario.trigger_keys
+            if key not in verdict
+        ]
+        if missing:
+            raise RuntimeError(
+                f"RTLola trigger reference missing keys at step {index}: {missing}"
+            )
+        steps.append(RtlolaTriggerReferenceStep({
+            key: bool(verdict[key])
+            for key in scenario.trigger_keys
+        }))
+    result = tuple(steps)
+    if cache_path is not None:
+        cache_path.parent.mkdir(parents=True, exist_ok=True)
+        payload = json.dumps({
+            "metadata": metadata,
+            "steps": [step.verdicts for step in result],
+        }, indent=2, sort_keys=True)
+        temporary = cache_path.with_name(f".{cache_path.name}.tmp")
+        temporary.write_text(payload)
+        temporary.replace(cache_path)
+    return result
+
+
+def _trace_sha256(trace: Sequence[RtlolaEvent]) -> str:
+    payload = [
+        [float(event.time), [
+            None if value is None else float(value)
+            for value in event.values
+        ]]
+        for event in trace
+    ]
+    return hashlib.sha256(
+        json.dumps(payload, separators=(",", ":")).encode("utf-8"),
+    ).hexdigest()
+
+
+def _reference_cache_path(
+    value: str | None,
+    seed: int,
+    seed_count: int,
+) -> Path | None:
+    if value is None:
+        return None
+    path = Path(value)
+    if seed_count == 1:
+        return path
+    return path.with_name(f"{path.stem}.seed_{seed}{path.suffix}")
+
+
 def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
     rows = []
     for run in results:
@@ -524,6 +704,8 @@ def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             row = {
                 "seed": step.seed,
                 "method": step.method,
+                "budget": run.budget,
+                "trace_kind": run.trace_kind,
                 "step": step.step,
                 "pre_generator_count": step.pre_generator_count,
                 "generator_count": step.generator_count,
@@ -541,6 +723,7 @@ def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
                 "false_positive": step.false_positive,
                 "false_negative": step.false_negative,
                 "trigger_positive": step.trigger_positive,
+                "exact_trigger_positive": step.exact_trigger_positive,
                 "decision_time_ms": step.decision_time_ms,
                 "binding_runtime_ns": step.binding_runtime_ns,
                 "predicted_cost": step.predicted_cost,
@@ -552,7 +735,11 @@ def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
                 "reducer_failure_count": step.reducer_failure_count,
                 "infeasible_candidate_count": step.infeasible_candidate_count,
             }
-            row.update(step.verdicts)
+            row.update(step.trigger_verdicts)
+            row.update({
+                f"exact_{key}": value
+                for key, value in step.exact_trigger_verdicts.items()
+            })
             for key, bounds in step.public_bounds.items():
                 row[f"{key}_lower"] = bounds[0]
                 row[f"{key}_upper"] = bounds[1]
@@ -580,7 +767,16 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
         approx_losses = np.asarray([step.approx_loss for step in run.steps], dtype=np.float64)
         fps = np.asarray([step.false_positive for step in run.steps], dtype=np.float64)
         fns = np.asarray([step.false_negative for step in run.steps], dtype=np.float64)
+        exact_positives = np.asarray(
+            [step.exact_trigger_positive for step in run.steps],
+            dtype=np.float64,
+        )
         trigger_positives = np.asarray([step.trigger_positive for step in run.steps], dtype=np.float64)
+        has_reference = np.isfinite(exact_positives)
+        reference_positive_count = int(np.sum(exact_positives[has_reference] == 1.0))
+        reference_negative_count = int(np.sum(exact_positives[has_reference] == 0.0))
+        false_positive_count = int(np.nansum(fps))
+        false_negative_count = int(np.nansum(fns))
         post_event_over_bound_count = sum(1 for step in run.steps if step.post_event_over_bound)
         fallback_count = sum(1 for step in run.steps if step.fallback_used)
         reducer_failure_count = sum(step.reducer_failure_count for step in run.steps)
@@ -588,6 +784,8 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
         rows.append({
             "method": run.method,
             "seed": run.seed,
+            "budget": run.budget,
+            "trace_kind": run.trace_kind,
             "mean_state_zonotope_width": float(np.mean(widths)),
             "max_state_zonotope_width": float(np.max(widths)),
             "mean_generator_count": float(np.mean(gens)),
@@ -603,8 +801,18 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             "state_zonotope_abs_error_range": float(np.max(approx_errors) - np.min(approx_errors)),
             "mean_approx_loss": float(np.mean(approx_losses)),
             "max_approx_loss": float(np.max(approx_losses)),
-            "false_positive_rate": _nanmean(fps),
-            "false_negative_rate": _nanmean(fns),
+            "false_positive_count": false_positive_count,
+            "false_negative_count": false_negative_count,
+            "reference_positive_count": reference_positive_count,
+            "reference_negative_count": reference_negative_count,
+            "false_positive_rate": (
+                false_positive_count / reference_negative_count
+                if reference_negative_count else float("nan")
+            ),
+            "false_negative_rate": (
+                false_negative_count / reference_positive_count
+                if reference_positive_count else float("nan")
+            ),
             "trigger_positive_rate": _nanmean(trigger_positives),
             "post_event_over_bound_count": post_event_over_bound_count,
             "post_event_over_bound_rate": post_event_over_bound_count / len(run.steps) if run.steps else 0.0,
@@ -638,32 +846,6 @@ def _state_interval_bounds(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     center = z[:, 0]
     radius = np.abs(z[:, 1:]).sum(axis=1) if z.shape[1] > 1 else np.zeros(z.shape[0])
     return center - radius, center + radius
-
-
-def _false_positive(
-    reduced_verdict: dict[str, object],
-    exact_verdict: dict[str, object],
-    keys: Sequence[str],
-) -> bool:
-    for key in keys:
-        if bool(reduced_verdict.get(key, False)) and not bool(exact_verdict.get(key, False)):
-            return True
-    return False
-
-
-def _false_negative(
-    reduced_verdict: dict[str, object],
-    exact_verdict: dict[str, object],
-    keys: Sequence[str],
-) -> bool:
-    for key in keys:
-        if not bool(reduced_verdict.get(key, False)) and bool(exact_verdict.get(key, False)):
-            return True
-    return False
-
-
-def _trigger_positive(verdict: dict[str, object], keys: Sequence[str]) -> bool:
-    return any(bool(verdict.get(key, False)) for key in keys)
 
 
 def _public_bounds(verdict: dict[str, object], keys: Sequence[str]) -> dict[str, tuple[float, float]]:
@@ -730,7 +912,7 @@ def _write_dashboard_artifacts(
     output_dir: Path,
 ) -> None:
     scenario = scenario_by_name(result.config.scenario)
-    _trigger_confusion(result.timeseries, scenario.trigger_keys).to_csv(
+    trigger_confusion(result.timeseries, scenario.trigger_keys).to_csv(
         scenario_dir / "trigger_confusion.csv", index=False,
     )
     pareto = result.summary[[
@@ -753,39 +935,52 @@ def _write_dashboard_artifacts(
         )
 
 
-def _trigger_confusion(timeseries: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
+def trigger_confusion(timeseries: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
     rows = []
-    for method, frame in timeseries.groupby("method"):
-        rows.append({
-            "method": method,
-            "trigger_keys": ",".join(keys),
-            "false_positive_steps": _series_sum(frame, "false_positive"),
-            "false_negative_steps": _series_sum(frame, "false_negative"),
-            "trigger_positive_steps": int(frame["trigger_positive"].sum()) if "trigger_positive" in frame else 0,
-            "steps": int(len(frame)),
-            "false_positive_rate": _series_mean(frame, "false_positive"),
-            "false_negative_rate": _series_mean(frame, "false_negative"),
-            "trigger_positive_rate": _series_mean(frame, "trigger_positive"),
-        })
+    group_columns = [
+        column for column in ("method", "budget", "trace_kind")
+        if column in timeseries
+    ]
+    for group_key, frame in timeseries.groupby(group_columns, dropna=False):
+        values = group_key if isinstance(group_key, tuple) else (group_key,)
+        group_values = dict(zip(group_columns, values))
+        for key in ("__any__", *keys):
+            predicted_column = "trigger_positive" if key == "__any__" else key
+            exact_column = (
+                "exact_trigger_positive"
+                if key == "__any__" else f"exact_{key}"
+            )
+            predicted = _boolean_series(frame, predicted_column)
+            exact = _boolean_series(frame, exact_column)
+            valid = exact.notna()
+            predicted_valid = predicted[valid].astype(bool)
+            exact_valid = exact[valid].astype(bool)
+            fp = int((predicted_valid & ~exact_valid).sum())
+            fn = int((~predicted_valid & exact_valid).sum())
+            positives = int(exact_valid.sum())
+            negatives = int((~exact_valid).sum())
+            rows.append({
+                **group_values,
+                "trigger_key": key,
+                "false_positive_steps": fp,
+                "false_negative_steps": fn,
+                "reference_positive_steps": positives,
+                "reference_negative_steps": negatives,
+                "trigger_positive_steps": int(predicted.fillna(False).sum()),
+                "steps": int(len(frame)),
+                "false_positive_rate": fp / negatives if negatives else float("nan"),
+                "false_negative_rate": fn / positives if positives else float("nan"),
+                "trigger_positive_rate": float(predicted.mean()),
+            })
     return pd.DataFrame(rows)
 
 
-def _series_mean(frame: pd.DataFrame, column: str) -> float:
-    if column not in frame or frame.empty:
-        return float("nan")
-    values = pd.to_numeric(frame[column], errors="coerce")
-    if values.isna().all():
-        return float("nan")
-    return float(values.mean(skipna=True))
-
-
-def _series_sum(frame: pd.DataFrame, column: str) -> float:
-    if column not in frame or frame.empty:
-        return float("nan")
-    values = pd.to_numeric(frame[column], errors="coerce")
-    if values.isna().all():
-        return float("nan")
-    return float(values.sum(skipna=True))
+def _boolean_series(frame: pd.DataFrame, column: str) -> pd.Series:
+    if column not in frame:
+        return pd.Series(np.nan, index=frame.index, dtype=object)
+    return frame[column].map(
+        lambda value: np.nan if pd.isna(value) else bool(value),
+    )
 
 
 def _plot_pareto(pareto: pd.DataFrame, stem: Path) -> None:

@@ -20,7 +20,8 @@ from pzr.rtlola.actions import RtlolaAction, RtlolaActionCatalog, default_action
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
     RtlolaRunResult,
-    compute_ground_truth,
+    RtlolaTriggerReferenceStep,
+    load_or_compute_trigger_reference,
     make_step_record,
     results_to_dataframe,
     summarize_results,
@@ -77,6 +78,8 @@ class RtlolaRegretTrace:
     step: int
     seed: int
     iteration: int
+    budget: int
+    trace_kind: str
 
 
 @dataclass(frozen=True)
@@ -180,10 +183,20 @@ def train_and_evaluate_regret(
     config: RtlolaBenchmarkConfig,
     *,
     show_progress: bool = False,
+    reference_cache_dir: Path | None = None,
 ) -> RtlolaRegretResult:
     scenario = scenario_by_name(config.scenario)
     catalog = default_action_catalog()
     candidate_names = tuple(catalog.mpc_candidate_names)
+    budgets = tuple(config.regret_budgets or [config.budget])
+    train_trace_kinds = tuple(
+        config.regret_train_trace_kinds or [config.trace_kind]
+    )
+    eval_trace_kinds = tuple(
+        config.regret_eval_trace_kinds or [config.trace_kind]
+    )
+    if not budgets or any(budget < 0 for budget in budgets):
+        raise ValueError("regret budgets must be non-empty and non-negative")
     all_traces: list[RtlolaRegretTrace] = []
     policy: RegretRankingPolicy | None = None
     training_frames: list[pd.DataFrame] = []
@@ -191,25 +204,29 @@ def train_and_evaluate_regret(
     eval_seed_count = config.regret_eval_seeds or max(1, config.seeds // 3)
 
     for iteration in range(config.regret_iterations):
-        for seed in range(train_seed_count):
-            trace = scenario.generate_trace(
-                config.length,
-                seed + iteration * 1000,
-                config.trace_kind,
-            )
-            learned = (
-                RtlolaLearnedPolicy(policy, catalog)
-                if policy is not None else None
-            )
-            all_traces.extend(_collect_episode(
-                scenario=scenario,
-                trace=trace.events,
-                seed=seed,
-                iteration=iteration,
-                config=config,
-                catalog=catalog,
-                learned_policy=learned,
-            ))
+        for trace_kind in train_trace_kinds:
+            for budget in budgets:
+                for seed in range(train_seed_count):
+                    trace = scenario.generate_trace(
+                        config.length,
+                        seed + iteration * 1000,
+                        trace_kind,
+                    )
+                    learned = (
+                        RtlolaLearnedPolicy(policy, catalog)
+                        if policy is not None else None
+                    )
+                    all_traces.extend(_collect_episode(
+                        scenario=scenario,
+                        trace=trace.events,
+                        trace_kind=trace.trace_kind,
+                        budget=budget,
+                        seed=seed,
+                        iteration=iteration,
+                        config=config,
+                        catalog=catalog,
+                        learned_policy=learned,
+                    ))
         dataset = _build_dataset(all_traces, candidate_names)
         policy, training = train_regret_policy(
             dataset,
@@ -227,24 +244,36 @@ def train_and_evaluate_regret(
         raise ValueError("RTLola regret distillation produced no policy")
 
     learned_policy = RtlolaLearnedPolicy(policy, catalog)
-    eval_results = tuple(
-        _evaluate_learned_episode(
-            scenario=scenario,
-            trace=scenario.generate_trace(
-                config.length,
-                seed,
-                config.trace_kind,
-            ).events,
-            seed=seed,
-            config=config,
-            learned_policy=learned_policy,
-        )
-        for seed in range(eval_seed_count)
-    )
+    eval_results: list[RtlolaRunResult] = []
+    for trace_kind in eval_trace_kinds:
+        for seed in range(eval_seed_count):
+            trace = scenario.generate_trace(config.length, seed, trace_kind)
+            cache_path = (
+                reference_cache_dir / f"{trace.trace_kind}.seed_{seed}.json"
+                if reference_cache_dir is not None else None
+            )
+            trigger_reference = load_or_compute_trigger_reference(
+                trace.events,
+                scenario=scenario,
+                trace_kind=trace.trace_kind,
+                seed=seed,
+                cache_path=cache_path,
+            )
+            for budget in budgets:
+                eval_results.append(_evaluate_learned_episode(
+                    scenario=scenario,
+                    trace=trace.events,
+                    trace_kind=trace.trace_kind,
+                    trigger_reference=trigger_reference,
+                    budget=budget,
+                    seed=seed,
+                    config=config,
+                    learned_policy=learned_policy,
+                ))
     return RtlolaRegretResult(
         policy=policy,
         traces=tuple(all_traces),
-        eval_results=eval_results,
+        eval_results=tuple(eval_results),
         training_frames=tuple(training_frames),
     )
 
@@ -351,6 +380,8 @@ def regret_traces_to_dataframe(
                 "seed": trace.seed,
                 "iteration": trace.iteration,
                 "step": trace.step,
+                "budget": trace.budget,
+                "trace_kind": trace.trace_kind,
                 "candidate": name,
                 "cost": cost,
                 "regret": regret,
@@ -391,6 +422,8 @@ def regret_ranking_metrics(
             "seed": trace.seed,
             "iteration": trace.iteration,
             "step": trace.step,
+            "budget": trace.budget,
+            "trace_kind": trace.trace_kind,
             "best_action": trace.best_action,
             "second_best_margin": trace.second_best_margin,
             "max_regret": float(np.max(trace.regrets)),
@@ -405,6 +438,8 @@ def _collect_episode(
     *,
     scenario: RtlolaScenario,
     trace: Sequence[RtlolaEvent],
+    trace_kind: str,
+    budget: int,
     seed: int,
     iteration: int,
     config: RtlolaBenchmarkConfig,
@@ -416,7 +451,7 @@ def _collect_episode(
     for step, event in enumerate(trace):
         state = engine.snapshot(step=step, time=event.time)
         future = tuple(trace[step + 1:step + 1 + config.horizon])
-        if engine.metrics(state).dynamic_generator_count <= config.budget:
+        if engine.metrics(state).dynamic_generator_count <= budget:
             action = catalog.no_op
         else:
             rows = _evaluate_candidates(
@@ -426,14 +461,17 @@ def _collect_episode(
                 future,
                 catalog,
                 config,
+                budget=budget,
             )
-            features = extract_features(engine, state, config.budget, future)
+            features = extract_features(engine, state, budget, future)
             traces.append(_trace_from_rows(
                 rows=rows,
                 features=features,
                 seed=seed,
                 step=step,
                 iteration=iteration,
+                budget=budget,
+                trace_kind=trace_kind,
             ))
             if learned_policy is None:
                 best = min(rows, key=lambda row: (row.cost, row.sequence))
@@ -444,9 +482,9 @@ def _collect_episode(
                     state,
                     event,
                     future,
-                    config.budget,
+                    budget,
                 ).first_action
-        engine.live_step(event, action, config.budget, step=step + 1)
+        engine.live_step(event, action, budget, step=step + 1)
     return traces
 
 
@@ -454,12 +492,14 @@ def _evaluate_learned_episode(
     *,
     scenario: RtlolaScenario,
     trace: Sequence[RtlolaEvent],
+    trace_kind: str,
+    trigger_reference: Sequence[RtlolaTriggerReferenceStep],
+    budget: int,
     seed: int,
     config: RtlolaBenchmarkConfig,
     learned_policy: RtlolaLearnedPolicy,
 ) -> RtlolaRunResult:
     engine = _engine_for_scenario(scenario)
-    ground_truth = compute_ground_truth(trace, scenario=scenario)
     records = []
     for step, event in enumerate(trace):
         state = engine.snapshot(step=step, time=event.time)
@@ -471,7 +511,7 @@ def _evaluate_learned_episode(
             state,
             event,
             future,
-            config.budget,
+            budget,
         )
         committed = engine.live_step(
             event,
@@ -486,14 +526,21 @@ def _evaluate_learned_episode(
             seed=seed,
             method="learned_direct",
             step=step,
-            budget=config.budget,
+            budget=budget,
             pre_generator_count=pre_count,
             committed=committed,
             decision=decision,
             decision_time_ms=elapsed_ms,
-            ground_truth=ground_truth[step],
+            ground_truth=None,
+            trigger_reference=trigger_reference[step],
         ))
-    return RtlolaRunResult("learned_direct", seed, tuple(records))
+    return RtlolaRunResult(
+        "learned_direct",
+        seed,
+        tuple(records),
+        budget=budget,
+        trace_kind=trace_kind,
+    )
 
 
 def _evaluate_candidates(
@@ -503,8 +550,11 @@ def _evaluate_candidates(
     future: Sequence[RtlolaEvent],
     catalog: RtlolaActionCatalog,
     config: RtlolaBenchmarkConfig,
+    *,
+    budget: int | None = None,
 ) -> list[RtlolaCandidateCost]:
     """Score forced roots, then continue with the full MPC candidate pool."""
+    selected_budget = config.budget if budget is None else budget
     rows: list[RtlolaCandidateCost] = []
     for first in catalog.mpc_candidates:
         try:
@@ -514,7 +564,7 @@ def _evaluate_candidates(
                 event,
                 future,
                 catalog.mpc_candidates,
-                config.budget,
+                selected_budget,
                 config.beam_width,
                 fallback=catalog.fallback,
                 none_action=catalog.no_op,
@@ -543,6 +593,8 @@ def _trace_from_rows(
     seed: int,
     step: int,
     iteration: int,
+    budget: int,
+    trace_kind: str,
 ) -> RtlolaRegretTrace:
     ordered = sorted(rows, key=lambda row: row.name)
     best = min(rows, key=lambda row: (row.cost, row.sequence))
@@ -567,6 +619,8 @@ def _trace_from_rows(
         step=step,
         seed=seed,
         iteration=iteration,
+        budget=budget,
+        trace_kind=trace_kind,
     )
 
 

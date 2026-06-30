@@ -103,7 +103,7 @@ def test_regret_training_smoke_is_scenario_generic_and_writes_artifacts(tmp_path
 def test_robot_arm_regret_training_uses_same_generic_pipeline():
     result = train_and_evaluate_regret(RtlolaBenchmarkConfig(
         scenario="robot_arm",
-        trace_kind="figure8_violated",
+        trace_kind="figure8",
         length=7,
         seeds=1,
         budget=80,
@@ -113,7 +113,21 @@ def test_robot_arm_regret_training_uses_same_generic_pipeline():
         regret_epochs=1,
         regret_train_seeds=1,
         regret_eval_seeds=1,
+        regret_budgets=[40, 80],
+        regret_train_trace_kinds=["figure8", "square"],
+        regret_eval_trace_kinds=["figure8_violated", "square_violated"],
     ))
 
     assert result.traces
-    assert result.eval_results[0].method == "learned_direct"
+    assert {
+        (run.budget, run.trace_kind)
+        for run in result.eval_results
+    } == {
+        (40, "figure8_violated"),
+        (80, "figure8_violated"),
+        (40, "square_violated"),
+        (80, "square_violated"),
+    }
+    assert all(run.method == "learned_direct" for run in result.eval_results)
+    assert {trace.budget for trace in result.traces} == {40, 80}
+    assert {trace.trace_kind for trace in result.traces} == {"figure8", "square"}

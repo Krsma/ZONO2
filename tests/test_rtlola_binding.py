@@ -1,3 +1,6 @@
+from dataclasses import replace
+import json
+
 import numpy as np
 import pytest
 
@@ -179,3 +182,46 @@ def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
     assert "active_dynamic_generator_count" in result.timeseries
     assert "zero_dynamic_generator_count" in result.timeseries
     assert "budget_violation" not in result.timeseries
+
+
+def test_verdict_reference_is_cached_and_raw_symbolic_values_are_not_saved(tmp_path):
+    cache = tmp_path / "reference.json"
+    config = RtlolaBenchmarkConfig(
+        scenario="robot_arm",
+        trace_kind=DEFAULT_TRACE_KIND,
+        length=4,
+        seeds=1,
+        budget=80,
+        methods=["girard"],
+        reference_mode="verdict",
+        reference_cache=str(cache),
+    )
+
+    first = run_benchmark(config)
+    second = run_benchmark(config)
+
+    assert cache.stat().st_size > 0
+    cached = json.loads(cache.read_text())
+    assert cached["metadata"]["trace_sha256"]
+    assert all(
+        isinstance(value, bool)
+        for row in cached["steps"]
+        for value in row.values()
+    )
+    assert first.summary.loc[0, "reference_negative_count"] >= 0
+    assert first.summary.loc[0, "reference_positive_count"] >= 0
+    negative_count = int(first.summary.loc[0, "reference_negative_count"])
+    if negative_count:
+        assert first.summary.loc[0, "false_positive_rate"] == pytest.approx(
+            first.summary.loc[0, "false_positive_count"] / negative_count,
+        )
+    assert "exact_trigger_positive" in first.timeseries
+    assert "exact_tpl_exceeded" in first.timeseries
+    assert "tpl" not in first.timeseries
+    assert "tpl_lower" in first.timeseries
+    assert second.timeseries["exact_trigger_positive"].equals(
+        first.timeseries["exact_trigger_positive"],
+    )
+
+    with pytest.raises(ValueError, match="metadata mismatch"):
+        run_benchmark(replace(config, length=3))

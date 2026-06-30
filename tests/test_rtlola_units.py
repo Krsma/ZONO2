@@ -1,9 +1,11 @@
 from types import SimpleNamespace
 
 import numpy as np
+import pandas as pd
 import pytest
 
 from pzr.rtlola.actions import RtlolaAction
+from pzr.rtlola.benchmark import trigger_confusion
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
 from pzr.rtlola.metrics import (
     active_generator_count,
@@ -19,6 +21,78 @@ from pzr.rtlola.robot_arm import (
 )
 from pzr.rtlola.scenarios import scenario_by_name
 from pzr.rtlola.search import beam_search
+from pzr.rtlola.sweep_report import consolidate_sweep
+
+
+def test_trigger_confusion_uses_reference_class_denominators():
+    timeseries = pd.DataFrame({
+        "method": ["girard"] * 4,
+        "trigger_positive": [True, False, False, True],
+        "exact_trigger_positive": [False, False, True, True],
+        "alarm": [True, False, False, True],
+        "exact_alarm": [False, False, True, True],
+    })
+
+    confusion = trigger_confusion(timeseries, ("alarm",))
+
+    assert list(confusion["trigger_key"]) == ["__any__", "alarm"]
+    assert (confusion["false_positive_steps"] == 1).all()
+    assert (confusion["false_negative_steps"] == 1).all()
+    assert (confusion["reference_negative_steps"] == 2).all()
+    assert (confusion["reference_positive_steps"] == 2).all()
+    assert (confusion["false_positive_rate"] == 0.5).all()
+    assert (confusion["false_negative_rate"] == 0.5).all()
+
+
+def test_sweep_report_compares_mpc_with_best_static(tmp_path):
+    scenario_dir = tmp_path / "runs" / "figure8_violated" / "budget_40" / "robot_arm"
+    scenario_dir.mkdir(parents=True)
+    pd.DataFrame([
+        {
+            "method": "girard",
+            "seed": 0,
+            "budget": 40,
+            "trace_kind": "figure8_violated",
+            "false_positive_rate": 0.4,
+            "false_negative_rate": 0.1,
+            "total_time_ms": 10.0,
+            "fallback_count": 0,
+            "reducer_failure_count": 0,
+        },
+        {
+            "method": "mpc_beam",
+            "seed": 0,
+            "budget": 40,
+            "trace_kind": "figure8_violated",
+            "false_positive_rate": 0.3,
+            "false_negative_rate": 0.2,
+            "total_time_ms": 30.0,
+            "fallback_count": 1,
+            "reducer_failure_count": 2,
+        },
+    ]).to_csv(scenario_dir / "summary.csv", index=False)
+    pd.DataFrame([
+        {
+            "method": "girard",
+            "budget": 40,
+            "trace_kind": "figure8_violated",
+            "reducer_used": "girard",
+        },
+        {
+            "method": "mpc_beam",
+            "budget": 40,
+            "trace_kind": "figure8_violated",
+            "reducer_used": "scott",
+        },
+    ]).to_csv(scenario_dir / "timeseries.csv", index=False)
+
+    consolidate_sweep(tmp_path)
+
+    comparison = pd.read_csv(tmp_path / "mpc_vs_static_fpr.csv")
+    assert comparison.loc[0, "best_static_method"] == "girard"
+    assert comparison.loc[0, "absolute_fpr_reduction"] == pytest.approx(0.1)
+    assert comparison.loc[0, "relative_fpr_reduction"] == pytest.approx(0.25)
+    assert (tmp_path / "combined_reducer_counts.csv").stat().st_size > 0
 
 
 def test_matrix_metrics_distinguish_dense_active_and_constant_generators():
