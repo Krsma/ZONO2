@@ -83,7 +83,9 @@ class RtlolaEngine:
                 float(event.time),
                 config,
             )
-        except Exception as exc:  # noqa: BLE001 - enrich binding failures.
+        except BaseException as exc:  # PyO3 PanicException is not an Exception.
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             raise RuntimeError(
                 "RTLola planner branch failed "
                 f"(step={state.step + 1}, time={event.time}, action={action.name})"
@@ -110,7 +112,9 @@ class RtlolaEngine:
         config = action.make_config(budget)
         try:
             verdict = self.live.accept_event(list(event.values), float(event.time), config)
-        except Exception as exc:  # noqa: BLE001 - enrich binding failures.
+        except BaseException as exc:  # PyO3 PanicException is not an Exception.
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             raise RuntimeError(
                 "RTLola live step failed "
                 f"(step={step}, time={event.time}, action={action.name})"
@@ -126,7 +130,9 @@ class RtlolaEngine:
         try:
             dyn = np.asarray(self.planner.state_zonotope(state.state, False), dtype=np.float64)
             total = np.asarray(self.planner.state_zonotope(state.state, True), dtype=np.float64)
-        except Exception as exc:  # noqa: BLE001
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             raise RuntimeError(
                 f"failed to extract RTLola zonotope matrices at step {state.step}"
             ) from exc
@@ -144,7 +150,9 @@ class RtlolaEngine:
         try:
             self.planner.apply_state(reference.state)
             loss = float(self.planner.approx_loss_state(candidate.state))
-        except Exception as exc:  # noqa: BLE001 - keep binding errors contextual.
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
             raise RuntimeError(
                 "failed to compute RTLola binding approximation loss "
                 f"(reference_step={reference.step}, candidate_step={candidate.step})"

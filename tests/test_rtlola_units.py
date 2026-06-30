@@ -4,6 +4,7 @@ import numpy as np
 import pytest
 
 from pzr.rtlola.actions import RtlolaAction
+from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
 from pzr.rtlola.metrics import (
     active_generator_count,
     generator_count,
@@ -99,3 +100,29 @@ def test_beam_search_supports_forced_root_with_full_continuation_pool():
 
     assert result.predicted_sequence == ("first", "future")
     assert result.predicted_cost == pytest.approx(1.0)
+
+
+def test_engine_wraps_binding_panics_so_search_can_fallback():
+    class BindingPanic(BaseException):
+        pass
+
+    class PanickingPlanner:
+        def accept_event_from_state(self, *args):
+            raise BindingPanic("native transform panic")
+
+    engine = RtlolaEngine.__new__(RtlolaEngine)
+    engine.spec_id = "spec"
+    engine.event_arity = 1
+    engine.planner = PanickingPlanner()
+    state = RtlolaStateRef(object(), "spec", 0, 0.0)
+    action = RtlolaAction("panic", lambda _budget: object(), explicit_budget=False)
+
+    with pytest.raises(RuntimeError, match="planner branch failed") as captured:
+        engine.branch_step(
+            state,
+            RtlolaEvent(1.0, (1.0,)),
+            action,
+            budget=0,
+        )
+
+    assert isinstance(captured.value.__cause__, BindingPanic)
