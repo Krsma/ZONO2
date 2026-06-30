@@ -1,107 +1,102 @@
 # Predictive Zonotope Reduction
 
-Research code for sound, bounded-memory reducer selection in runtime monitors
-that track uncertainty as zonotopes. The core invariant is policy-independent:
-selectors may be static, predictive, or learned, but only certified reducers
-mutate monitor state.
+This repository evaluates static, predictive, and learned reducer selection for
+RTLola monitors whose uncertainty state is represented as a zonotope. RTLola
+owns monitor evaluation and every state-changing reduction. Python provides
+scenario traces, bounded search, learning, metrics, and artifact generation.
 
-## Current Status
+## Architecture
 
-- Main package: Python 3.11+, source under `src/pzr/`.
-- Optional RTLola integration: `src/pzr/rtlola/`, backed by the
-  `rlolapythonbinding` submodule at commit `72622a3`.
-- Current local baseline before this documentation cleanup:
-  `pytest -q` -> `291 passed, 1 skipped`; the skipped test requires an
-  installed `rlola_python_binding` extension.
-- Generated experiment outputs belong under `results/` and should be
-  regenerated through CLIs rather than hand-edited.
+- `src/pzr/rtlola/`: binding adapter, packaged RTLola specifications, scenario
+  traces, native transform catalog, MPC search, benchmark runner, and CLI.
+- `src/pzr/learning/`: scenario-neutral regret-ranking model.
+- `rlolapythonbinding/`: pinned RTLola Python binding submodule.
+- `tests/`: pure unit tests and binding-backed semantic tests.
+- `tools/`: binding/MuJoCo environment setup and robot-arm smoke wrapper.
 
-## Layout
+The installed package has no Python-native monitor or reducer implementation.
 
-- `zonotope/`: zonotope primitive, certified reducers, scoring, protection.
-- `monitoring/`: monitor adapter protocol, states, and trigger evaluation.
-- `mpc/`: receding-horizon reducer selection over certified actions.
-- `imitation/`: feature extraction and regret/ranking learned selectors.
-- `systems/`: math-only benchmark monitors.
-- `envs/`: optional MuJoCo-backed monitors.
-- `experiments/`: benchmark, replay, robotics probes, figures, tables.
-- `rtlola/`: RTLola-native monitor wrapper, action search, benchmark CLI.
-- `tests/`: pytest coverage for reducers, monitors, MPC, replay, and RTLola
-  contracts.
+## Setup
 
-## Install
+Initialize the pinned submodule and build the dedicated environment:
 
 ```bash
-python -m pip install -e ".[dev]"
-python -m pip install -e ".[dev,learning,sim]"
-```
-
-Use the second command only when learning and simulator-backed paths are needed.
-For the RTLola robot-arm experiment, prefer the dedicated environment helper
-instead of the broad `sim` extra:
-
-```bash
+git submodule update --init --recursive
 tools/setup_robot_arm_env.sh
-tools/run_rtlola_robot_arm.sh --length 40 --seeds 1 --method-set static --output /tmp/pzr-rtlola-arm-smoke
 ```
 
-The robot-arm RTLola/MuJoCO path does not need `safety-gymnasium`. Keeping it
-out of this environment avoids the old `pygame`/Gymnasium resolver conflicts
-that can downgrade NumPy or MuJoCO.
+The wrapper builds the binding from the exact superproject revision and
+installs the package plus optional MuJoCo validation support. The current
+binding dependency on `kmeans` uses a nightly feature; setup scopes
+`RUSTC_BOOTSTRAP` to that crate only.
 
-## Core Commands
+## Commands
+
+Run tests in the binding environment:
 
 ```bash
-pytest
-pytest tests/test_full_eval.py -x -q
-
-pzr-benchmark --profile smoke --scenario omni_robot --output /tmp/pzr-smoke
-pzr-benchmark --profile standard --output results/my-run
-pzr-benchmark --profile paper --scenario all --method-set paper_core --output results/paper-core
-
-python -m pzr.experiments.robotics_replay sweep \
-  --candidate all --trace-source procedural --monitor physical \
-  --scenario-family stress --budgets 8,10,12,16,20,24 \
-  --length 80 --seeds 2 --output /tmp/pzr-robotics-sweep
-
-pzr-rtlola-benchmark --profile smoke --scenario omni_robot --output /tmp/pzr-rtlola-smoke
-pzr-rtlola-benchmark --profile smoke --scenario robot_arm --trace-kind figure8_violated --budget 80 --output /tmp/pzr-rtlola-arm
-tools/run_rtlola_robot_arm.sh --output /tmp/pzr-rtlola-arm
+LD_PRELOAD="$PWD/external/miniconda3/envs/pzr-robot-arm/lib/libopenblas.so" \
+PYTHONPATH=src external/miniconda3/envs/pzr-robot-arm/bin/python -m pytest
 ```
 
-`scenario=all` runs the current default/headline benchmark scenarios and
-excludes deprecated diagnostic scenarios. Explicitly runnable scenarios include
-`omni_robot`, `simple_robot`, `point_mass`, and `robot_arm` when optional
-MuJoCo imports are available.
-
-## RTLola Binding
-
-The submodule `rlolapythonbinding/` now exposes snapshot-capable monitor state:
-`EvaluatorState`, `state()`, `apply_state()`, `accept_event_from_state()`,
-`current_zonotope()`, `state_zonotope()`, and `approx_loss()`.
-
-PZR uses this for safe branch search in `src/pzr/rtlola/`. The current binding
-does not expose arbitrary matrix writeback into RTLola, so the RTLola path
-selects RTLola built-in `ZonotopeConfig` transforms rather than applying native
-PZR reducers back into the RTLola engine.
-
-To build the optional extension:
+Run focused benchmarks:
 
 ```bash
-tools/setup_rtlola_binding.sh
-pytest tests/test_rtlola_metrics.py tests/test_rtlola_binding_contract.py -q
+pzr-benchmark --profile smoke --scenario omni_robot \
+  --method-set core --output /tmp/pzr-omni
+
+tools/run_rtlola_robot_arm.sh --length 40 --seeds 1 \
+  --method-set core --output /tmp/pzr-arm
 ```
 
-The robot-arm wrapper handles the OpenBLAS preload needed by the RTLola
-extension. For manual RTLola runs, use the preload printed by the relevant
-setup script; without it, importing the extension can fail with an unresolved
-`cblas_dgemm` symbol.
+Run regret/ranking distillation:
 
-## Reference Docs
+```bash
+pzr-benchmark --profile smoke --scenario robot_arm \
+  --trace-kind figure8_violated --budget 80 --method-set core \
+  --learned-mode regret --regret-iterations 1 --regret-epochs 10 \
+  --regret-train-seeds 1 --regret-eval-seeds 1 \
+  --output /tmp/pzr-arm-learned
+```
 
-- `AGENTS.md`: operational repository instructions.
-- `AUDIT.md`: current readiness audit and known blockers.
-- `science/SCIENCE.md`: compact science and soundness notes.
-- `science/RTLOLA_INTEGRATION_NOTES.md`: RTLola binding and integration state.
-- `science/EXPERIMENT_READINESS.md`: consolidated experiment-readiness notes.
-- `paper/related_work_foundation.md`: paper-facing related-work framing.
+Method sets are:
+
+- `core`: exact no-reduction baseline, Girard, Scott, interval hull, PCA, and
+  binding-loss beam MPC.
+- `static`: exact baseline plus every bounded native binding transform.
+- `mpc`: beam MPC only.
+- `all`: `static` plus beam MPC.
+
+The MPC and learned candidate set remains `girard`, `scott`,
+`interval_hull`, and `pca`. `none` is automatic only while the pre-event
+state is within the transform bound. `interval` is an emergency fallback.
+
+## Semantic Contract
+
+- `budget` is passed directly to `ZonotopeConfig.<method>(budget)`. It is an
+  RTLola pre-event transform bound, not a post-event dense-column cap.
+- Fresh event slack may make the committed state exceed that number. This is
+  reported as `post_event_over_bound`.
+- Dense dynamic slots, active nonzero dynamic generators, zero dynamic slots,
+  and total generators including constant slack are reported separately.
+- MPC and teacher costs use binding-native terminal `approx_loss_state`
+  against an unreduced rollout over the same horizon.
+- Learned inference ranks native transforms and directly tries them through
+  the binding. It never writes a Python-reduced matrix into RTLola.
+- `none` and fallback actions are excluded from learned targets.
+- Robot-arm constant calibration generators are kept outside dynamic
+  reduction and protected by binding-backed regression tests.
+- Trigger labels come from RTLola `#[public]` outputs. State-zonotope widths
+  and symbolic public bounds are diagnostics, not substitute trigger
+  semantics.
+
+## Artifacts
+
+Each run writes `timeseries.csv`, `summary.csv`, and `aggregate.csv` below the
+scenario directory, plus `config.yaml`, trigger-confusion data, runtime/loss
+figures, and public-stream range figures. Learned runs also write policy,
+candidate-cost, training, ranking, metadata, and held-out evaluation files
+under `learning/<scenario>/`.
+
+Generated files under `results/` must be regenerated through the CLI rather
+than edited manually.

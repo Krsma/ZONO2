@@ -1,424 +1,95 @@
 # Repository Guidelines
 
-## Project Structure & Module Organization
+## Project Structure
 
-This is a Python 3.11 research package for predictive zonotope reduction:
-sound, bounded-memory reducer selection for runtime monitors that track
-uncertainty as zonotopes. Source code lives under `src/pzr/`:
+This Python 3.11 research package is RTLola-centered:
 
-- `zonotope/`: immutable zonotope primitive, interval metrics, certified
-  reducers, scoring heuristics, and `ProtectedReducer`.
-- `monitoring/`: monitor adapter protocol, monitor state, trigger specs, and
-  trigger evaluation.
-- `mpc/`: receding-horizon reducer selection over certified reduction actions.
-- `imitation/`: feature extraction, legacy trace datasets, and learned
-  reducer-selection policies.
-- `systems/`: math-only benchmark monitors (`omni_robot`, `simple_robot`).
-- `envs/`: MuJoCo-backed environments and monitors (`point_mass`,
-  `robot_arm`), requiring the optional `sim` dependencies.
-- `experiments/`: benchmark orchestration, aggregation, tables, figures,
-  robot-arm animation, regret/ranking distillation, and profiles.
-- `rtlola/`: optional RTLola-native monitor wrapper, zonotope-transform action
-  search, regret/ranking distillation, and benchmark CLI.
-- `utils/`: seeding, timing, and serialization helpers.
+- `src/pzr/rtlola/`: specifications, trace adapters, binding wrapper, native
+  transform catalog, search, benchmark execution, reporting, and CLI.
+- `src/pzr/learning/`: generic regret-ranking data/model/training code.
+- `rlolapythonbinding/`: pinned binding submodule.
+- `tests/`: pure tests plus binding-backed semantic contracts.
+- `tools/`: reproducible environment setup and robot-arm smoke execution.
 
-Tests are in `tests/`. The CORA comparison fixture is
-`tests/fixtures/cora_reference.json`. Generated benchmark outputs are written
-under `results/`; do not hand-edit them unless the task explicitly concerns
-saved benchmark artifacts.
+Robot-arm trace CSVs and the vendored MuJoCo model are data/validation assets,
+not an alternative Python monitor.
 
-## Build, Test, and Development Commands
+## Setup and Tests
 
-- `python -m pip install -e ".[dev]"`: install the package in editable mode
-  with pytest.
-- `python -m pip install -e ".[dev,learning,sim]"`: include optional learning
-  and MuJoCo extras for simulator-backed scenarios.
-- `pytest`: run the full test suite configured by `pyproject.toml`.
-- `pytest tests/test_full_eval.py -x -q`: focused full-evaluation smoke path.
-- `pytest tests/test_robot_arm.py -k trigger_zonotope`: focused robot-arm
-  trigger projection checks.
-- `pzr-benchmark --profile smoke --scenario omni_robot --output /tmp/pzr-smoke`:
-  quick CLI smoke run.
-- `pzr-benchmark --profile standard --output results/my-run`: standard suite.
-- `pzr-benchmark --profile paper --scenario all --method-set all --budget 10 --horizon 4 --beam-width 4 --seeds 30 --jobs 4 --output results/paper-full`:
-  benchmark-only paper-style suite; expect a multi-hour run when exhaustive
-  `mpc_sequence` is included.
-- `pzr-benchmark --profile smoke --scenario omni_robot --method-set static --learned-mode regret --regret-oracle beam3 --regret-iterations 1 --regret-epochs 20 --regret-train-seeds 2 --regret-eval-seeds 1 --output /tmp/pzr-regret-smoke`:
-  smoke-test regret/ranking distillation and learned-result persistence.
-- `pzr-benchmark --profile smoke --budget-sweep "6,8,10,12" --output results/sweep`:
-  budget trade-off run.
-- `pzr-robot-arm-animation --trace benchmark --seed 0 --length 200 --method scott --output results/robot-arm-animation`:
-  render a benchmark-distribution MuJoCo robot-arm replay as GIF, paper
-  stills, storyboard, and metadata.
-- `pzr-robot-arm-animation --trace paper --length 200 --method scott --output results/robot-arm-paper-viz`:
-  render a deterministic explanatory robot-arm trace for paper motivation.
-- `python -m pzr.cli --profile smoke --scenario simple_robot --no-progress --output /tmp/pzr-smoke`:
-  smoke-test without relying on the installed console script.
-- `python -m pzr.experiments.robot_arm_animation --trace benchmark --seed 0 --length 50 --method scott --output /tmp/pzr-arm-viz`:
-  smoke-test the robot-arm animation module without relying on the installed
-  console script.
-- `tools/setup_robot_arm_env.sh`: create the dedicated RTLola/MuJoCO
-  robot-arm environment. This intentionally excludes `safety-gymnasium` to
-  avoid the old pygame/Gymnasium resolver conflicts in the Python 3.11
-  robot-arm stack.
-- `tools/run_rtlola_robot_arm.sh --length 40 --seeds 1 --method-set static --output /tmp/pzr-rtlola-arm-smoke`:
-  smoke-test the RTLola-native robot-arm path through the dedicated conda
-  environment and required OpenBLAS preload.
-- `python -m pzr.experiments.robotics_probe --candidate all --length 60 --budget 10 --output /tmp/pzr-robotics-probe`:
-  audit candidate drone/F1TENTH robotics environments before promoting either
-  into benchmark defaults.
-- `python -m pzr.experiments.robotics_probe --candidate drone --trace-source live --length 120 --budget 10 --output /tmp/pzr-drone-live`:
-  run the live safe-control-gym drone trace collector and score reducers.
-- `tools/setup_f1tenth_sidecar.sh`: create the isolated Python 3.8 F1TENTH
-  sidecar under `external/f1tenth-py38-venv`.
-- `python -m pzr.experiments.robotics_probe --candidate f1tenth --trace-source live --length 120 --budget 10 --f1tenth-sidecar-python external/f1tenth-py38-venv/bin/python --output /tmp/pzr-f1tenth-live`:
-  run the live F1TENTH sidecar trace collector and score reducers.
-- `python -m pzr.experiments.robotics_probe --candidate all --trace-source live --length 300 --seeds 5 --warmup-steps 30 --budget 10 --f1tenth-sidecar-python external/f1tenth-py38-venv/bin/python --output /tmp/pzr-robotics-tuned-eval`:
-  exploratory multi-seed live robotics probe. This writes per-seed raw traces
-  under `seed_N/` plus top-level `candidate_scores.csv`,
-  `candidate_score_summary.csv`, `method_scores.csv`,
-  `method_score_summary.csv`, `trace_summary.csv`, metadata, and report files.
-- `python -m pzr.experiments.robotics_replay eval --candidate all --trace-source procedural --monitor physical --scenario-family stress --length 160 --seeds 3 --budget 12 --horizon 4 --beam-width 4 --output /tmp/pzr-robotics-replay-eval`:
-  run the replay-only robotics evaluator with focused static and MPC methods.
-  With `--scenario-family stress`, `--monitor physical` uses physical replay
-  monitors for both drone and F1TENTH; `--scenario-family legacy` preserves
-  the older procedural traces.
-- `python -m pzr.experiments.robotics_replay sweep --candidate all --trace-source procedural --monitor physical --scenario-family stress --budgets 8,10,12,16,20,24 --length 80 --seeds 2 --horizon 4 --beam-width 4 --output /tmp/pzr-robotics-high-k-sweep`:
-  run the robotics high-generator-budget sweep for drone and F1TENTH. This
-  uses static reducers plus `mpc_beam3` only by default and writes top-level
-  budget gain, runtime, reducer-selection, scenario, and intervention CSVs
-  plus selected-budget visual artifacts.
-- `python -m pzr.experiments.robotics_replay render --eval-dir /tmp/pzr-robotics-replay-eval --candidate all --methods scott,mpc_beam3 --output /tmp/pzr-robotics-replay-viz`:
-  render focused static-vs-MPC robotics storyboards/stills/GIFs from replay
-  artifacts.
-- `tools/setup_rtlola_binding.sh`: build/install the optional
-  `rlola_python_binding` extension pinned by the `rlolapythonbinding`
-  submodule.
-- `python -m pzr.rtlola.cli --profile smoke --scenario omni_robot --output /tmp/pzr-rtlola-smoke`:
-  smoke-test the RTLola-native benchmark path after the binding is installed.
-- `pzr-paper-tables --input results/my-icra-run/robotics_k_sweep_h4 results/my-icra-run/omni_k_sweep_h4 results/my-icra-run/horizon_scan results/my-icra-run/regret_stage --output results/my-icra-run/tables`:
-  normalize benchmark aggregates and robotics budget sweeps into
-  `combined_summary.csv` plus LaTeX fragments (`main_k_sweep.tex`,
-  `horizon_sweep.tex`, `full_methods_h4.tex`, `distillation.tex`, and
-  `overview.tex`). The ICRA matrix wrapper runs this automatically.
-- `python tools/validate_cora_reducers.py --out results/cora-validation/report.json`:
-  optional CORA/Matlab-or-Octave reducer comparison against
-  `tests/fixtures/cora_reference.json`; use `--fail-on-mismatch` only when the
-  external runner is configured and mismatches should fail CI-like checks.
-- `tools/run_pzr_smoke_parallel.sh`: scripted parallel smoke run with bounded
-  BLAS/OpenMP threads and log capture.
-- `tools/run_pzr_paper_static.sh`: static-baseline paper run, useful for fast
-  sanity checks without MPC.
-- `tools/run_pzr_paper_full.sh`: full paper run wrapper. It runs no learned
-  selector by default; set `PZR_WITH_REGRET=1` to include regret/ranking
-  distillation with `PZR_REGRET_ORACLE=beam3|sequence3|pair_rollout3|rollout_wide|sequence_wide`.
-- `tools/run_pzr_icra_table_matrix.sh`: staged, resumable ICRA table matrix
-  for `drone`, `f1tenth`, and `omni_robot`. By default it runs length 250,
-  10 seeds, budgets `8,10,12,16,20,24,30`, primary horizon 4, horizon sweep
-  `1,2,4,8,12`, and the `paper_core` methods. Regret/ranking distillation is
-  off by default; set `PZR_WITH_REGRET=1` to run it as a separate stage.
-  Exact `mpc_sequence3` is off by default and available as a small audit stage
-  controlled by
-  `PZR_INCLUDE_SEQUENCE_AUDIT`, `PZR_SEQUENCE_AUDIT_BUDGETS`, and
-  `PZR_SEQUENCE_AUDIT_SEEDS`. Completed cells write `.complete` markers, so
-  rerunning the same `PZR_OUT_DIR` resumes by default; set `PZR_RESUME=0` to
-  force reruns.
-- `tools/run_pzr_paper_live_headline_overnight.sh`: live robotics plus omni
-  headline overnight sweep. It enables regret/ranking distillation by default
-  across the configured budget list; set `PZR_WITH_REGRET=0` to disable it or
-  `PZR_REGRET_ORACLE=beam3` to choose the teacher.
+```bash
+git submodule update --init --recursive
+tools/setup_robot_arm_env.sh
 
-`pyproject.toml` currently declares `pzr-benchmark = pzr.cli:main`,
-`pzr-robot-arm-animation = pzr.experiments.robot_arm_animation:main`,
-`pzr-robotics-replay = pzr.experiments.robotics_replay:main`,
-`pzr-paper-tables = pzr.experiments.paper_tables:main`, and
-`pzr-rtlola-benchmark = pzr.rtlola.cli:main`. CLI profiles are `smoke`,
-`standard`, and `paper`; scenarios are `all`,
-`omni_robot`, `simple_robot`, plus
-`point_mass` and `robot_arm` when MuJoCo imports successfully. `scenario=all`
-is the headline/default set and excludes deprecated `simple_robot` and
-`point_mass`; those remain runnable only when requested explicitly. Method sets are
-`all`, `static`, `standard`, `headline`, and `paper_core`; `all` includes every registered method,
-`static` excludes MPC, and `standard` preserves the old static plus legacy
-`mpc_rollout`/`mpc_sequence` set. `headline` and `paper_core` select focused
-paper-facing method subsets. Learned policies are disabled by default;
-use `--learned-mode regret` to run regret/ranking distillation. `--beam-width N`
-controls the bounded-width beam MPC method and defaults to 4. Regret
-distillation defaults to the `beam3` oracle; use `--regret-oracle
-beam3|sequence3|pair_rollout3|rollout_wide|sequence_wide` to choose the MPC
-teacher. `--jobs N` parallelizes
-default benchmark runs across seeds when no custom scenarios, custom methods,
-or trace collector are provided. Keep BLAS/OpenMP thread counts at 1 for long
-`--jobs` runs; the scripts in `tools/` already export these limits and set
-`MPLCONFIGDIR=results/matplotlib-cache`.
+LD_PRELOAD="$PWD/external/miniconda3/envs/pzr-robot-arm/lib/libopenblas.so" \
+PYTHONPATH=src external/miniconda3/envs/pzr-robot-arm/bin/python -m pytest
+```
 
-## Coding Style & Naming Conventions
+The normal Python environment runs pure tests and skips binding integration
+tests. Release validation must use the binding environment with no skips.
 
-Use 4-space indentation, Python type hints, and small dataclasses or immutable
-value objects where appropriate. Keep modules and functions in `snake_case`;
-classes and enums use `PascalCase`; constants use `UPPER_SNAKE_CASE`. Prefer
-explicit `numpy` array conversions and validation at API boundaries, matching
-`src/pzr/zonotope/core.py`. Add short docstrings for public modules and domain
-objects. No formatter or linter is configured, so preserve the existing style
-and keep imports grouped as standard library, third-party, then local.
+Useful smokes:
 
-## Testing Guidelines
+```bash
+pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
+  --output /tmp/pzr-omni
 
-Tests use `pytest` and live in files named `tests/test_*.py`. Name tests by
-behavior, such as `test_box_reducer_contains_sampled_original_points`. Use
-`tmp_path` for generated artifacts and `numpy.testing` for numeric
-comparisons. New reducers, policies, monitor outputs, or benchmark artifacts
-should include soundness, budget, metadata, and artifact-shape assertions where
-relevant.
+tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
+  --output /tmp/pzr-arm
 
-MPC-related changes should assert certified budgeted states, calibration
-metadata preservation, chosen reducer accounting, predictor/search metadata
-(`evaluated_leaves` and `pruned_branches`), fallback behavior, and trigger
-projection behavior. Beam-search changes should cover wide-beam agreement
-with exact search, narrow-beam pruning, deterministic tie behavior, and
-protected-index preservation through first and future reductions. Learned-policy
-and regret/ranking changes should keep the candidate set aligned with benchmark
-reducers and should not include `IdentityReducer` unless no-op experiments are
-explicitly reopened.
+pzr-benchmark --profile smoke --scenario omni_robot --budget 10 \
+  --methods girard,mpc_beam --learned-mode regret \
+  --regret-iterations 1 --regret-epochs 2 \
+  --regret-train-seeds 1 --regret-eval-seeds 1 \
+  --output /tmp/pzr-learned
+```
 
-Figure or artifact pipeline changes should smoke-test `pzr-benchmark` with
-small profiles/seeds and assert that expected CSV and PDF outputs are
-non-empty. Robot-arm animation changes should smoke-test
-`pzr-robot-arm-animation` or `python -m pzr.experiments.robot_arm_animation`
-with a short trace and assert non-empty GIF/PNG/PDF/metadata outputs.
-Diagnostic or aggregation changes should check `summary.csv`, `aggregate.csv`,
-`timeseries.csv`, `config.yaml`, generated figure files, and learned-policy
-rows when `--learned-mode regret` is enabled.
+## Coding and Testing
 
-Parallel benchmark changes should compare serial and parallel runs on stable
-seed-level metrics. Avoid asserting raw wall-clock timings exactly.
+Use 4-space indentation, type hints, immutable dataclasses where appropriate,
+and grouped standard-library/third-party/local imports. Tests use pytest,
+`tmp_path`, and `numpy.testing`.
 
-## Soundness Boundary
+Changes to scenarios, actions, search, or learning require tests for:
 
-The project relies on policy-independent soundness: selectors may optimize
-approximate predicted cost, but only certified reducers may change monitor
-state. Every reducer must return a `ReductionResult` whose certificate is
-sound and whose reduced zonotope stays within the requested generator budget.
+- deterministic state branching and tie behavior;
+- exact RTLola transform-bound semantics;
+- dense versus active generator accounting;
+- outer-bound soundness against an unreduced branch;
+- constant calibration generator preservation;
+- trigger/public-stream keys from the packaged specification;
+- fallback and infeasible-candidate accounting;
+- learned candidate alignment and direct-inference behavior;
+- non-empty benchmark and learning artifacts.
 
-Use `ProtectedReducer` for monitors with persistent calibration generators.
-It preserves columns named by `state.calibration_indices`, reduces only the
-residual columns, and recombines protected columns first. After a protected
-reduction, calibration indices should be renumbered to
-`tuple(range(len(old_calibration_indices)))`. Do not bypass this path in
-static, MPC, rollout, or learned policies unless the task deliberately changes
-the calibration contract.
+## Trusted Boundary
 
-Use `reduce_with_protection` when applying a reducer from policy code. It
-centralizes the "plain reducer vs protected reducer" branch and keeps static,
-MPC, rollout, and learned policies consistent.
+Selectors may inspect states and choose actions, but only
+`rlola_python_binding.ZonotopeConfig` transforms may mutate monitor state.
+Do not add matrix writeback or Python-side reducers.
 
-Do not add `IdentityReducer` to default benchmark, MPC, or learned-policy
-candidate sets unless the task explicitly reopens no-op experiments.
+The default MPC/learning candidates are `girard`, `scott`, `interval_hull`,
+and `pca`. Do not add `none`, `interval`, unbounded transforms, clustering, or
+Combastel without an explicit experiment change. `none` is the exact baseline
+and automatic under-bound action; `interval` is fallback-only.
 
-## Trigger Zonotope Contract
+`budget` is the binding transform bound. Never subtract a fresh-generator
+reserve or interpret post-event dense slots as a violation. Preserve the
+distinction between dynamic, active, zero, and constant generators.
 
-Monitors expose `trigger_zonotope(state) -> Zonotope`. For most monitors this
-returns `state.zonotope`, but `RobotArmMonitor` projects the 6D joint-space
-state into a 2D Cartesian end-effector zonotope before evaluating triggers.
-Trigger `state_index` values index into the trigger zonotope, not necessarily
-the raw monitor state.
+MPC and teacher costs use binding-native terminal approximation loss. Do not
+replace it with width, trigger-straddling, or a Python proxy during unrelated
+cleanup.
 
-Any code that evaluates trigger bounds, trigger widths, trigger straddling, or
-trigger-derived features must use `monitor.trigger_zonotope(state)`. This is
-especially important in MPC costs and imitation features, where using
-`state.zonotope` directly makes robot-arm decisions optimize joint-space axes
-instead of Cartesian end-effector axes.
+Robot-arm trigger labels and public metrics come from
+`rtlola/specs/robot_arm.lola`. Constant encoder-calibration slack must remain
+unchanged by dynamic reduction.
 
-`RobotArmMonitor` uses a conservative coupled joint uncertainty basis for its
-three persistent calibration generators and three fresh noise generators per
-step. This is intentionally not independent axis-only joint noise: it makes the
-Cartesian trigger projection reducer-discriminative while still containing the
-original independent joint-error box. Robot-arm changes should preserve that
-containment property, the coupled generator structure, Cartesian trigger
-projection, and reducer-discrimination regression coverage.
+## Repository Safety
 
-Robot-arm trace visualization supports `--trace benchmark` and `--trace paper`.
-Benchmark trace rendering uses `generate_robot_arm_trace_records`, which keeps
-the existing measurement-only trace API intact while also exposing true MuJoCo
-state, target, action, end-effector position, and episode metadata. Paper trace
-rendering is a deterministic scripted-kinematic explanatory path with reachable
-joint-space waypoints whose end-effector path passes near the trigger region;
-it is not the quantitative benchmark distribution. The animation overlay should
-use separate physical and trigger-space panels: the physical panel stays at
-workspace scale, while the trigger-space panel shows the Cartesian
-end-effector zonotope polygon and interval hull as the rigorous uncertainty
-view. Do not reintroduce ghost-arm diagnostics; the visualization should focus
-on the true arm, measured arm/point, end-effector trail, trigger zonotope,
-interval hull, and end-effector trigger region.
+Do not discard uncommitted work. Use `git pull --ff-only`, pin submodules
+through the superproject, and avoid setup scripts that silently fetch or
+checkout another binding revision. Do not hand-edit generated files in
+`results/`.
 
-## Benchmark Methods & Artifacts
-
-Default benchmark methods include static protected reducers (`girard`,
-`combastel`, `pca`, `methA`, `scott`, `box`) plus legacy and focused MPC
-methods:
-
-- `mpc_rollout`: broad first-action search, then fixed protected Girard rollout
-  for future predicted overflows, with protected box fallback.
-- `mpc_rollout_methA`: top-3 first-action search, then fixed protected MethA
-  rollout for future predicted overflows, with protected box fallback.
-- `mpc_rollout_scott`: top-3 first-action search, then fixed protected Scott
-  rollout for future predicted overflows, with protected box fallback.
-- `mpc_pair_rollout3`: evaluates first-action and future-base reducer pairs
-  over the top-3 set.
-- `mpc_sequence`: exhaustive broad search over `girard`, `combastel`, `pca`,
-  `methA`, and `scott`.
-- `mpc_sequence3`: exhaustive focused search over the top-3 set
-  `girard`, `methA`, and `scott`.
-- `mpc_beam3`: deterministic beam search over the same top-3 set, using
-  `BenchmarkConfig.beam_width` / `--beam-width` (default 4).
-
-The top-3 set is intentionally `girard`, `methA`, and `scott`; it removes PCA
-and Combastel from focused MPC searches because current robot-arm diagnostics
-show PCA is harmful and Combastel is usually redundant with Girard. `all`
-includes every method above. `standard` preserves the old static plus legacy
-`mpc_rollout`/`mpc_sequence` set so existing programmatic smoke runs do not
-become unexpectedly larger.
-
-Benchmark runs save per-scenario `timeseries.csv`, `summary.csv`, and
-`aggregate.csv`, plus top-level `config.yaml`. The CLI also writes figure PDFs
-under `figures/`. `summary.csv` is per method and seed; `aggregate.csv`
-bootstraps or aggregates those seed-level rows.
-
-`timeseries.csv` includes trigger width, exact unreduced trigger width,
-approximation error, false-positive flags, reducer selections, and reduction
-timings. `summary.csv` and `aggregate.csv` include `mean_approx_error`,
-`max_approx_error`, `abs_error_range`, and `false_positive_rate` in addition
-to width, generator-count, timing, and soundness metrics. Ground truth for
-these columns is computed by running the same monitor trace without reductions
-and comparing trigger-zonotope bounds.
-
-Figure generation currently includes combined trigger-width timeseries,
-approximation-error timeseries, method comparison bars, FPR/error-range panels,
-and reducer-selection bars for MPC or learned methods.
-
-RTLola-native benchmark runs have separate semantics from the Python monitor
-benchmarks. In `src/pzr/rtlola/`, `budget` means the exact RTLola transform
-bound passed to `ZonotopeConfig.<method>(budget)`, not a post-event dense-column
-cap. RTLola applies transforms before accepting the next event, so post-event
-dynamic slack slots may exceed `budget`; record this through
-`post_event_over_bound`, not as a `budget_violation`. Keep
-`infer_fresh_generator_reserve` diagnostic-only. Do not reintroduce
-`budget - reserve` target selection unless the experiment explicitly changes
-away from RTLola-transform-bound semantics.
-
-RTLola result tables should distinguish dense dynamic slots from active
-nonzero generators. Use `generator_count` for the dense post-event slot count,
-and include `active_dynamic_generator_count` plus `zero_dynamic_generator_count`
-when interpreting zero-column holes.
-
-RTLola `mpc_beam` currently scores rollouts with the binding-native terminal
-approximation loss. For each branch root it first rolls out an unreduced
-`none` reference over the same horizon, then scores candidate terminal states
-with `approx_loss_state(reference_terminal, candidate_terminal)` through the
-binding. Width columns remain diagnostics and table/report metrics, not the
-MPC optimization objective. With `--reference-mode exact`, reported
-`approx_loss` is also computed through the binding against the unreduced
-ground-truth state; with `--reference-mode off`, exact-run `approx_loss` is
-left unset even though MPC still uses finite-horizon reference loss internally.
-
-Earlier RTLola robot-arm MPC diagnostics showed that Scott-heavy `mpc_beam`
-behavior was not caused by Girard infeasibility after the transform-bound
-cleanup: Girard, Scott, interval hull, and PCA all ran under the transform
-bound. Those diagnostics used the previous short-horizon relevant-width
-objective. Re-run current binding-loss experiments before making claims about
-Scott dominance, objective quality, or trajectory dependence.
-
-Robot-arm animation writes per-run GIFs, first/middle/last PNG and PDF stills,
-storyboard PNG/PDF files, and metadata JSON under the requested output
-directory. The storyboard is the primary paper-facing artifact. The CLI
-requires an explicit `--method`; valid methods are any method registered by
-`default_methods`, plus `none` for unreduced visualization. Use `--trace
-benchmark --seed N` for sanity-checking quantitative benchmark seeds and
-`--trace paper` for explanatory paper motivation.
-
-The current robot-arm visualization remains a sanity/debug artifact, not the
-main paper visualization. Use `pzr.experiments.robotics_probe` for the next
-environment-selection pass. The probe is intentionally outside benchmark
-defaults and scores candidate drone/F1TENTH derived-stream traces for reducer
-differentiation, near-threshold behavior, reductions, and budget/soundness.
-Use `--trace-source proxy|live|auto` to select synthetic/proxy traces, require
-live simulator traces, or try live and fall back. Live drone traces are
-collected through `tools/collect_safe_control_drone_trace.py`; live F1TENTH
-traces are collected through `tools/collect_f1tenth_trace.py` in the isolated
-sidecar created by `tools/setup_f1tenth_sidecar.sh`. Use `--seeds N` for
-consecutive seed sweeps and `--warmup-steps N` to drop initial transient
-measurements before scoring. Current live sidecars are still mostly
-deterministic, so equal metrics across seeds should not be interpreted as
-statistical robustness.
-
-`pzr.experiments.robotics_replay` is the next-step replay evaluator and
-visualizer. It is also outside benchmark defaults. The `eval` command writes
-benchmark-style `timeseries.csv`, `summary.csv`, `aggregate.csv`, plus
-`policy_gain.csv`, `winner_by_step.csv`, `trace_summary.csv`,
-`scenario_summary.csv`, `intervention_summary.csv`, `trace_metadata.json`, raw
-payload JSONL files, and derived streams. Use `--scenario-family stress
---monitor physical` for the richer replay monitors. Drone tracks physical
-state over `x, y, z, vx, vy, vz` and projects triggers to obstacle, gate,
-corridor, altitude, and speed margins. F1TENTH tracks `x, y, theta, speed,
-yaw_rate` and projects triggers to boundary/heading/TTC/curvature/yaw margins.
-Both stress monitors use deterministic phase-dependent fresh uncertainty from
-local scenario context. Use `--scenario-family legacy` or `--monitor stream`
-only for older low-dimensional diagnostics. The `render` command defaults to focused `scott` vs `mpc_beam3`
-comparisons; `best_static,mpc_beam3` remains available for diagnostic
-best-static checks, but current best-static gains are modest and should not be
-oversold as the main visual story.
-
-For the current ICRA-oriented robotics question, prefer the `sweep` subcommand
-over ad hoc repeated eval calls. It supports `--candidate drone|f1tenth|all`,
-runs budgets incrementally, defaults to the paper-relevant `sweep` method set
-(`girard`, `combastel`, `methA`, `scott`, `box`, `mpc_beam3`), excludes exact
-`mpc_sequence3` because it is much slower without improving current replay
-results, and writes
-`budget_sweep_summary.csv`, `budget_policy_gain.csv`,
-`budget_reducer_counts.csv`, `budget_runtime.csv`,
-`budget_scenario_summary.csv`, `budget_intervention_summary.csv`,
-`budget_sweep_metadata.json`, and `figures/`. The selected visualization
-budget maximizes minimum seed gain of `mpc_beam3` against the best fixed static
-reducer, then mean gain, reducer switches, and runtime. Robotics replay MPC
-currently uses the benchmark top-3 candidate reducer set `girard`, `methA`,
-and `scott` for both drone and F1TENTH. Robotics replay method sets are
-separate from the main benchmark method sets: `focused` includes focused
-static reducers plus `mpc_rollout_scott`, `mpc_beam3`, and `mpc_sequence3`;
-`sweep` includes focused static reducers plus only `mpc_beam3`; `headline`
-adds exact `mpc_sequence3`; and `paper_core` omits that exact audit.
-
-Regret/ranking distillation trains a learned selector from per-candidate MPC
-cost tables rather than hard expert labels. The default oracle is `beam3` for
-speed; `sequence3` is useful as an exact top-3 audit, `pair_rollout3` is a
-middle ground, and `rollout_wide` / `sequence_wide` expose broader candidate
-teachers. Learned method rows are appended before benchmark CSVs and figures
-are written. Learning artifacts are saved under `learning/<scenario>/`.
-
-## Commit & Pull Request Guidelines
-
-This checkout has no usable Git history to infer project-specific commit
-conventions. Use concise, imperative commit messages, for example
-`Add calibration-aware reducer test`. Pull requests should describe the
-research or behavior change, list commands run, mention any changed benchmark
-outputs, and link related notes or issues. Include screenshots only for
-notebook or report-rendering changes.
-
-## Agent-Specific Instructions
-
-Do not hand-edit generated files in `results/`; change source, tests, or
-benchmark configuration and regenerate artifacts through the CLI.
-
-When changing reducer, MPC, monitor, or learned-policy behavior, keep the
-soundness boundary explicit and preserve required generator metadata through
-`ProtectedReducer`. Keep protected box as an emergency fallback for MPC rather
-than a first-action candidate unless the task explicitly changes the method
-definition.
-
-Do not change `WeightedZonotopeCost` or trigger straddling weights as part of
-top-3, beam, or rollout search work unless the task explicitly reopens cost
-ablations. Those ablations were intentionally deferred.
-
-Treat `AUDIT.md` as a list of claims to verify against code and tests, not as
-ground truth. Some findings may be research-metric choices rather than bugs.
-Use `science/EXPERIMENT_READINESS.md` for the current consolidated experiment
-readiness notes; older CoRL planning documents were intentionally removed.
+Use concise imperative commits. Report commands run, changed experiment
+semantics, binding revision changes, and generated-artifact impact.
