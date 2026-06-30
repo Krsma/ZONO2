@@ -88,9 +88,9 @@ class RtlolaBenchmarkConfig:
     regret_eval_seeds: int | None = None
     regret_loss: str = "pairwise"
     binding_revision: str = field(init=False, default=BINDING_REVISION)
-    mpc_candidate_names: tuple[str, ...] = field(
+    mpc_candidate_names: list[str] = field(
         init=False,
-        default=MPC_ACTION_NAMES,
+        default_factory=lambda: list(MPC_ACTION_NAMES),
     )
 
 
@@ -721,7 +721,7 @@ def save_benchmark_results(result: RtlolaBenchmarkResult, output_dir: Path) -> N
     result.aggregate.to_csv(scenario_dir / "aggregate.csv", index=False)
     _write_dashboard_artifacts(result, scenario_dir, output_dir)
     with open(output_dir / "config.yaml", "w") as f:
-        yaml.dump(asdict(result.config), f, sort_keys=False)
+        yaml.safe_dump(asdict(result.config), f, sort_keys=False)
 
 
 def _write_dashboard_artifacts(
