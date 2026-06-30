@@ -108,7 +108,12 @@ Focused predictive methods include:
 
 The top-3 focused MPC set is intentionally `girard`, `methA`, and `scott` in
 the main benchmark path. Robotics replay currently records its focused
-candidate set separately as `girard`, `combastel`, and `scott`.
+candidate set as the same `girard`, `methA`, and `scott` top-3 set.
+Robotics replay method sets are scoped separately from the main benchmark:
+`focused` includes focused static reducers plus `mpc_rollout_scott`,
+`mpc_beam3`, and `mpc_sequence3`; `sweep` is the budget-sweep default and
+uses only `mpc_beam3` as the predictive method; `headline` includes exact
+`mpc_sequence3`; and `paper_core` omits that exact audit for practical runs.
 
 `IdentityReducer` is a theory/test primitive and should not enter default
 benchmark, MPC, or learned candidate sets unless no-op experiments are
@@ -136,6 +141,21 @@ unsound certificates.
 
 Robotics replay is outside `default_scenarios()` and writes additional replay
 artifacts documented in `science/EXPERIMENT_READINESS.md`.
+
+Paper-table generation is implemented in `pzr.experiments.paper_tables` /
+`pzr-paper-tables`. It scans benchmark `aggregate.csv` files and robotics
+`budget_sweep_summary.csv` files, normalizes them into
+`combined_summary.csv`, and writes LaTeX fragments:
+
+- `main_k_sweep.tex`
+- `horizon_sweep.tex`
+- `full_methods_h4.tex`
+- `distillation.tex`
+- `overview.tex`
+
+The current ICRA matrix wrapper runs this table builder after the primary
+budget sweeps, horizon sweeps, optional exact-sequence audit, and optional
+regret/ranking stage.
 
 ## RTLola Integration
 
@@ -179,6 +199,12 @@ trajectory dependence.
 
 See `science/RTLOLA_INTEGRATION_NOTES.md` for setup and validation.
 
+For the RTLola robot-arm path, use `tools/setup_robot_arm_env.sh` and
+`tools/run_rtlola_robot_arm.sh`. This dedicated environment installs the
+RTLola binding and MuJoCO without `safety-gymnasium`, avoiding the older
+pygame/Gymnasium dependency conflicts that can downgrade the Python 3.11
+robot-arm stack.
+
 ## Learning
 
 Regret/ranking distillation trains a policy from per-candidate MPC cost tables
@@ -215,10 +241,14 @@ Implemented now:
 - Static, rollout, sequence, pair-rollout, and beam MPC selectors.
 - Regret/ranking learned selector paths.
 - Robotics probe/replay diagnostics.
+- Reproducible ICRA-style robotics/omni budget and horizon matrix wrappers.
+- Paper-table normalization from benchmark and robotics replay artifacts.
 - Optional RTLola-native benchmark path.
+- Dedicated RTLola/MuJoCO robot-arm environment wrapper.
 
 Not yet current active infrastructure:
 
 - Arbitrary native PZR reducer writeback into RTLola.
 - Old `pzr-run-corl` / `pzr.experiments.corl_*` commands.
-- A final paper-critical robotics experiment.
+- A final accepted paper-critical robotics result; current candidates should
+  still be judged through the ICRA matrix and readiness criteria.

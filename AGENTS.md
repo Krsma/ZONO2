@@ -57,6 +57,13 @@ saved benchmark artifacts.
 - `python -m pzr.experiments.robot_arm_animation --trace benchmark --seed 0 --length 50 --method scott --output /tmp/pzr-arm-viz`:
   smoke-test the robot-arm animation module without relying on the installed
   console script.
+- `tools/setup_robot_arm_env.sh`: create the dedicated RTLola/MuJoCO
+  robot-arm environment. This intentionally excludes `safety-gymnasium` to
+  avoid the old pygame/Gymnasium resolver conflicts in the Python 3.11
+  robot-arm stack.
+- `tools/run_rtlola_robot_arm.sh --length 40 --seeds 1 --method-set static --output /tmp/pzr-rtlola-arm-smoke`:
+  smoke-test the RTLola-native robot-arm path through the dedicated conda
+  environment and required OpenBLAS preload.
 - `python -m pzr.experiments.robotics_probe --candidate all --length 60 --budget 10 --output /tmp/pzr-robotics-probe`:
   audit candidate drone/F1TENTH robotics environments before promoting either
   into benchmark defaults.
@@ -89,6 +96,15 @@ saved benchmark artifacts.
   submodule.
 - `python -m pzr.rtlola.cli --profile smoke --scenario omni_robot --output /tmp/pzr-rtlola-smoke`:
   smoke-test the RTLola-native benchmark path after the binding is installed.
+- `pzr-paper-tables --input results/my-icra-run/robotics_k_sweep_h4 results/my-icra-run/omni_k_sweep_h4 results/my-icra-run/horizon_scan results/my-icra-run/regret_stage --output results/my-icra-run/tables`:
+  normalize benchmark aggregates and robotics budget sweeps into
+  `combined_summary.csv` plus LaTeX fragments (`main_k_sweep.tex`,
+  `horizon_sweep.tex`, `full_methods_h4.tex`, `distillation.tex`, and
+  `overview.tex`). The ICRA matrix wrapper runs this automatically.
+- `python tools/validate_cora_reducers.py --out results/cora-validation/report.json`:
+  optional CORA/Matlab-or-Octave reducer comparison against
+  `tests/fixtures/cora_reference.json`; use `--fail-on-mismatch` only when the
+  external runner is configured and mismatches should fail CI-like checks.
 - `tools/run_pzr_smoke_parallel.sh`: scripted parallel smoke run with bounded
   BLAS/OpenMP threads and log capture.
 - `tools/run_pzr_paper_static.sh`: static-baseline paper run, useful for fast
@@ -364,8 +380,12 @@ results, and writes
 `budget_sweep_metadata.json`, and `figures/`. The selected visualization
 budget maximizes minimum seed gain of `mpc_beam3` against the best fixed static
 reducer, then mean gain, reducer switches, and runtime. Robotics replay MPC
-currently records its focused candidate reducer set as `girard`, `combastel`,
-and `scott` in metadata.
+currently uses the benchmark top-3 candidate reducer set `girard`, `methA`,
+and `scott` for both drone and F1TENTH. Robotics replay method sets are
+separate from the main benchmark method sets: `focused` includes focused
+static reducers plus `mpc_rollout_scott`, `mpc_beam3`, and `mpc_sequence3`;
+`sweep` includes focused static reducers plus only `mpc_beam3`; `headline`
+adds exact `mpc_sequence3`; and `paper_core` omits that exact audit.
 
 Regret/ranking distillation trains a learned selector from per-candidate MPC
 cost tables rather than hard expert labels. The default oracle is `beam3` for
