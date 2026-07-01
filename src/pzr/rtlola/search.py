@@ -7,8 +7,33 @@ from typing import Callable, Sequence
 
 from pzr.rtlola.actions import RtlolaAction
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef, RtlolaStepResult
+from pzr.rtlola.scenarios import RtlolaTriggerValueSpec
+from pzr.rtlola.verdicts import interval_bounds
 
 CostFunction = Callable[[RtlolaEngine, RtlolaStepResult], float]
+
+
+def normalized_trigger_width_cost(
+    trigger_values: Sequence[RtlolaTriggerValueSpec],
+) -> CostFunction:
+    """Return terminal mean-squared normalized public trigger-stream width."""
+    specs = tuple(trigger_values)
+    if not specs:
+        raise ValueError("trigger-width cost requires at least one public stream")
+
+    def cost(_engine: RtlolaEngine, step: RtlolaStepResult) -> float:
+        terms: list[float] = []
+        for spec in specs:
+            if spec.stream not in step.verdict:
+                raise RuntimeError(
+                    f"RTLola verdict missing trigger-value stream: {spec.stream}"
+                )
+            lower, upper = interval_bounds(step.verdict[spec.stream])
+            normalized_width = (upper - lower) / spec.scale
+            terms.append(normalized_width * normalized_width)
+        return float(sum(terms) / len(terms))
+
+    return cost
 
 
 @dataclass(frozen=True)

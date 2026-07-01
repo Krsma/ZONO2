@@ -12,6 +12,10 @@ OMNI_EXPECTED_VERDICT_KEYS = (
     "position_x_above_geofence",
     "position_y_above_geofence",
 )
+OMNI_PUBLIC_STREAM_KEYS = (
+    "position_x",
+    "position_y",
+)
 
 OMNI_SPEC_PATH = Path(__file__).parent / "specs" / "omni_robot.lola"
 OMNI_SPEC = OMNI_SPEC_PATH.read_text()

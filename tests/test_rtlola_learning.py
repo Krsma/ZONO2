@@ -15,6 +15,7 @@ from pzr.rtlola.learning import (
     write_regret_artifacts,
 )
 from pzr.rtlola.omni import OMNI_EXPECTED_VERDICT_KEYS, OMNI_SPEC, generate_omni_events
+from pzr.rtlola.scenarios import scenario_by_name
 
 
 def _overflow_state():
@@ -38,6 +39,7 @@ def test_teacher_costs_force_each_root_then_use_shared_candidate_pool():
         state,
         events[12],
         events[13:15],
+        scenario_by_name("omni_robot"),
         catalog,
         RtlolaBenchmarkConfig(budget=10, horizon=2, beam_width=2),
     )

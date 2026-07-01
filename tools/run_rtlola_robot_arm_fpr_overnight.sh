@@ -3,7 +3,7 @@ set -u
 set -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-arm-fpr-overnight}"
+OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-arm-trigger-width}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
 LENGTH="${PZR_LENGTH:-2340}"
@@ -19,7 +19,7 @@ REGRET_EPOCHS="${PZR_REGRET_EPOCHS:-50}"
 REGRET_TRAIN_SEEDS="${PZR_REGRET_TRAIN_SEEDS:-1}"
 REGRET_EVAL_SEEDS="${PZR_REGRET_EVAL_SEEDS:-1}"
 MAX_SECONDS="${PZR_MAX_SECONDS:-27000}"
-SKIP_LEARNING="${PZR_SKIP_LEARNING:-0}"
+SKIP_LEARNING="${PZR_SKIP_LEARNING:-1}"
 START_SECONDS="$(date +%s)"
 
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"

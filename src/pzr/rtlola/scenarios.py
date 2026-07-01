@@ -3,10 +3,16 @@
 from __future__ import annotations
 
 from dataclasses import dataclass
+import math
 from typing import Callable
 
 from pzr.rtlola.engine import RtlolaEvent
-from pzr.rtlola.omni import OMNI_EXPECTED_VERDICT_KEYS, OMNI_SPEC, generate_omni_events
+from pzr.rtlola.omni import (
+    OMNI_EXPECTED_VERDICT_KEYS,
+    OMNI_PUBLIC_STREAM_KEYS,
+    OMNI_SPEC,
+    generate_omni_events,
+)
 from pzr.rtlola.robot_arm import (
     ARM_EXPECTED_VERDICT_KEYS,
     ARM_PUBLIC_STREAM_KEYS,
@@ -31,6 +37,20 @@ class RtlolaTrace:
 
 
 @dataclass(frozen=True)
+class RtlolaTriggerValueSpec:
+    """Public affine stream and physical scale used by MPC trigger cost."""
+
+    stream: str
+    scale: float
+
+    def __post_init__(self) -> None:
+        if not self.stream:
+            raise ValueError("trigger-value stream name must not be empty")
+        if not math.isfinite(self.scale) or self.scale <= 0.0:
+            raise ValueError("trigger-value scale must be finite and positive")
+
+
+@dataclass(frozen=True)
 class RtlolaScenario:
     """Registered RTLola specification and trace adapter."""
 
@@ -42,6 +62,7 @@ class RtlolaScenario:
     expected_verdict_keys: tuple[str, ...]
     public_stream_keys: tuple[str, ...]
     trigger_keys: tuple[str, ...]
+    trigger_values: tuple[RtlolaTriggerValueSpec, ...]
     trace_factory: TraceFactory
 
     def generate_trace(
@@ -89,8 +110,12 @@ def registered_scenarios() -> tuple[RtlolaScenario, ...]:
             trace_kinds=("default",),
             default_trace_kind="default",
             expected_verdict_keys=OMNI_EXPECTED_VERDICT_KEYS,
-            public_stream_keys=OMNI_EXPECTED_VERDICT_KEYS,
+            public_stream_keys=OMNI_PUBLIC_STREAM_KEYS,
             trigger_keys=OMNI_EXPECTED_VERDICT_KEYS,
+            trigger_values=(
+                RtlolaTriggerValueSpec("position_x", 4.0),
+                RtlolaTriggerValueSpec("position_y", 4.0),
+            ),
             trace_factory=_omni_trace_factory,
         ),
         RtlolaScenario(
@@ -102,6 +127,10 @@ def registered_scenarios() -> tuple[RtlolaScenario, ...]:
             expected_verdict_keys=ARM_EXPECTED_VERDICT_KEYS,
             public_stream_keys=ARM_PUBLIC_STREAM_KEYS,
             trigger_keys=ARM_EXPECTED_VERDICT_KEYS,
+            trigger_values=(
+                RtlolaTriggerValueSpec("dist_to_expected", 0.05),
+                RtlolaTriggerValueSpec("tpl", 1000.0),
+            ),
             trace_factory=_arm_trace_factory,
         ),
     )

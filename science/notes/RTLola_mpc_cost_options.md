@@ -1,5 +1,9 @@
 # RTLola MPC Cost Options
 
+> Historical note: the binding-loss objective described below was superseded
+> on 2026-07-01 by terminal normalized trigger-stream interval width. See
+> `science/SCIENCE.md` for the active objective contract.
+
 Status as of 2026-06-25.
 
 ## Current Implemented Objective
