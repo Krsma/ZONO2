@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
-BINDING_REVISION = "3b0443c1eb038b19bc3949ff3ba82d03617616aa"
+BINDING_REVISION = "eef70844cac3ad5928899db5e30427dcc54f50cf"
 
 
 class RtlolaBindingUnavailable(RuntimeError):

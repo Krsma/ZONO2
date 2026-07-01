@@ -36,7 +36,7 @@ pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
 tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
   --output /tmp/pzr-arm
 
-PZR_OUT_DIR=results/rtlola-arm-trigger-width \
+PZR_OUT_DIR=results/rtlola-arm-binding-loss \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 
 pzr-benchmark --profile smoke --scenario omni_robot --budget 10 \
@@ -79,11 +79,12 @@ and automatic under-bound action; `interval` is fallback-only.
 reserve or interpret post-event dense slots as a violation. Preserve the
 distinction between dynamic, active, zero, and constant generators.
 
-MPC and teacher costs use terminal normalized interval width over public
-affine streams consumed by triggers. The binding supplies numeric affine
-bounds; do not parse symbolic expressions or substitute whole-state width.
-Keep the terminal-only search structure unless an experiment explicitly
-changes the horizon objective.
+MPC and teacher costs use binding-native terminal approximation loss. Do not
+replace it with width, trigger-straddling, or a Python proxy during unrelated
+cleanup.
+
+Benchmark reference mode controls offline metrics and caching only. MPC and
+teacher searches construct their own unreduced horizon rollouts.
 
 Robot-arm trigger labels and public metrics come from
 `rtlola/specs/robot_arm.lola`. Constant encoder-calibration slack must remain

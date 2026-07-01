@@ -57,7 +57,7 @@ def test_binding_accepts_none_for_asynchronous_input():
     assert "held" not in verdict
 
 
-def test_binding_returns_numeric_bounds_for_affine_verdicts():
+def test_binding_returns_symbolic_verdicts_as_strings():
     monitor = rlola.RLolaMonitor("""
         input value: Float64
         output epsilon: Variable @true
@@ -65,15 +65,10 @@ def test_binding_returns_numeric_bounds_for_affine_verdicts():
         output uncertain := value + 0.5 * epsilon
     """)
 
-    verdict = monitor.accept_event([1.0], 0.0)
-    uncertain = verdict["uncertain"]
+    uncertain = monitor.accept_event([1.0], 0.0)["uncertain"]
 
-    assert isinstance(uncertain, rlola.AffineValue)
-    assert uncertain.center == pytest.approx(1.0)
-    assert uncertain.lower == pytest.approx(0.5)
-    assert uncertain.upper == pytest.approx(1.5)
-    assert uncertain.expression == str(uncertain)
-    assert "s" in str(uncertain)
+    assert isinstance(uncertain, str)
+    assert "s" in uncertain
 
 
 def test_repeated_branching_from_same_snapshot_is_deterministic():
@@ -201,11 +196,9 @@ def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
     assert "active_dynamic_generator_count" in result.timeseries
     assert "zero_dynamic_generator_count" in result.timeseries
     assert "budget_violation" not in result.timeseries
-    assert result.config.mpc_objective == "terminal_normalized_trigger_width"
+    assert result.config.mpc_objective == "terminal_binding_approx_loss"
     config_text = (tmp_path / "config.yaml").read_text()
-    assert "mpc_objective: terminal_normalized_trigger_width" in config_text
-    assert "dist_to_expected: 0.05" in config_text
-    assert "tpl: 1000.0" in config_text
+    assert "mpc_objective: terminal_binding_approx_loss" in config_text
 
 
 def test_verdict_reference_is_cached_and_raw_symbolic_values_are_not_saved(tmp_path):

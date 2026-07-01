@@ -62,7 +62,7 @@ pzr-benchmark --profile smoke --scenario robot_arm \
 Prepare or resume the full FPR-first robot-arm sweep:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-arm-trigger-width \
+PZR_OUT_DIR=results/rtlola-arm-binding-loss \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 ```
 
@@ -76,7 +76,7 @@ existing pooled ranker explicitly.
 Method sets are:
 
 - `core`: exact no-reduction baseline, Girard, Scott, interval hull, PCA, and
-  trigger-width beam MPC.
+  binding-loss beam MPC.
 - `static`: exact baseline plus every bounded native binding transform.
 - `mpc`: beam MPC only.
 - `all`: `static` plus beam MPC.
@@ -93,12 +93,10 @@ state is within the transform bound. `interval` is an emergency fallback.
   reported as `post_event_over_bound`.
 - Dense dynamic slots, active nonzero dynamic generators, zero dynamic slots,
   and total generators including constant slack are reported separately.
-- MPC and teacher costs use terminal mean-squared normalized interval width
-  over the public affine streams consumed by triggers. Robot-arm distance and
-  toolpath widths are normalized by their `0.05 m` and `1000 m` thresholds.
-- The binding returns symbolic public values as immutable `AffineValue`
-  objects with numeric `center`, `lower`, and `upper` properties. Trigger-cost
-  code does not parse symbolic strings.
+- MPC and teacher costs use binding-native terminal `approx_loss_state`
+  against an unreduced rollout over the same horizon.
+- The benchmark reference mode controls offline metrics and caching only;
+  binding-loss MPC always constructs its own unreduced horizon rollout.
 - Learned inference ranks native transforms and directly tries them through
   the binding. It never writes a Python-reduced matrix into RTLola.
 - `none` and fallback actions are excluded from learned targets.

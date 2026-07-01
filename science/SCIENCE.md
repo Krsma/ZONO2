@@ -3,8 +3,8 @@
 ## Research Question
 
 At a fixed RTLola transform bound, can predictive or learned selection among
-certified native zonotope transforms reduce trigger-relevant uncertainty and
-false-positive monitor verdicts relative to a fixed transform?
+certified native zonotope transforms reduce monitor approximation loss relative
+to a fixed transform?
 
 ## Execution Semantics
 
@@ -31,23 +31,19 @@ The unbounded interval transform is fallback-only.
 
 ## Objective
 
-Beam MPC scores candidate terminal states by mean-squared normalized interval
-width over public affine streams consumed by triggers:
+Beam MPC first rolls out an unreduced reference over the prediction horizon.
+Candidate terminal states are scored by the binding’s
+`approx_loss_state(reference, candidate)`. Widths, generator counts, public
+stream bounds, and trigger outcomes remain diagnostics.
 
-```text
-mean((public_stream_upper - public_stream_lower)^2 / trigger_scale^2)
-```
+The benchmark reference mode is independent of this search reference.
+`verdict` mode avoids retaining full offline state histories, but MPC still
+constructs an unreduced terminal reference for each horizon search.
 
-Robot-arm distance and toolpath streams use scales `0.05` and `1000.0`;
-Omni position streams use `4.0`. These values match the physical trigger
-threshold scales and make mixed-unit streams comparable. The objective is
-terminal-only; generator counts, whole-state widths, and binding-native
-approximation loss remain diagnostics.
-
-Regret/ranking distillation uses the same trigger-width objective. Each
-training row forces one candidate first action, then permits full beam
-continuation over the standard candidate pool. Direct learned inference ranks
-candidates once and tries binding actions in that order.
+Regret/ranking distillation uses the same objective. Each training row forces
+one candidate first action, then permits full beam continuation over the
+standard candidate pool. Direct learned inference ranks candidates once and
+tries binding actions in that order.
 
 ## Scenarios
 

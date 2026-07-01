@@ -30,11 +30,7 @@ from pzr.rtlola.binding import require_binding
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
 from pzr.rtlola.metrics import RtlolaMatrixMetrics
 from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
-from pzr.rtlola.search import (
-    RtlolaSearchResult,
-    beam_search,
-    normalized_trigger_width_cost,
-)
+from pzr.rtlola.search import RtlolaSearchResult, beam_search
 
 
 RTL_FEATURE_NAMES = (
@@ -463,7 +459,6 @@ def _collect_episode(
                 state,
                 event,
                 future,
-                scenario,
                 catalog,
                 config,
                 budget=budget,
@@ -553,7 +548,6 @@ def _evaluate_candidates(
     state: RtlolaStateRef,
     event: RtlolaEvent,
     future: Sequence[RtlolaEvent],
-    scenario: RtlolaScenario,
     catalog: RtlolaActionCatalog,
     config: RtlolaBenchmarkConfig,
     *,
@@ -574,7 +568,7 @@ def _evaluate_candidates(
                 config.beam_width,
                 fallback=catalog.fallback,
                 none_action=catalog.no_op,
-                cost_fn=normalized_trigger_width_cost(scenario.trigger_values),
+                use_reference_loss=True,
                 forced_first_action=first,
             )
         except ValueError:

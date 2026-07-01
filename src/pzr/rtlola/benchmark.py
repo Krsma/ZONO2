@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 from pathlib import Path
+import re
 import time
 from typing import Sequence
 
@@ -27,13 +28,7 @@ from pzr.rtlola.engine import (
     RtlolaStepResult,
 )
 from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
-from pzr.rtlola.search import (
-    RtlolaSearchResult,
-    beam_search,
-    choose_static_action,
-    normalized_trigger_width_cost,
-)
-from pzr.rtlola.verdicts import interval_bounds
+from pzr.rtlola.search import RtlolaSearchResult, beam_search, choose_static_action
 
 
 CORE_STATIC_METHODS = ("none", "girard", "scott", "interval_hull", "pca")
@@ -105,7 +100,7 @@ class RtlolaBenchmarkConfig:
     regret_eval_trace_kinds: list[str] | None = None
     mpc_objective: str = field(
         init=False,
-        default="terminal_normalized_trigger_width",
+        default="terminal_binding_approx_loss",
     )
     binding_revision: str = field(init=False, default=BINDING_REVISION)
     mpc_candidate_names: list[str] = field(
@@ -386,7 +381,7 @@ def _run_single(
                 config.beam_width,
                 fallback=fallback,
                 none_action=by_name["none"],
-                cost_fn=normalized_trigger_width_cost(scenario.trigger_values),
+                use_reference_loss=True,
             )
         else:
             decision = choose_static_action(
@@ -862,8 +857,46 @@ def _public_bounds(verdict: dict[str, object], keys: Sequence[str]) -> dict[str,
     for key in keys:
         if key not in verdict:
             continue
-        bounds[key] = interval_bounds(verdict[key])
+        parsed = _value_bounds(verdict[key])
+        if parsed is not None:
+            bounds[key] = parsed
     return bounds
+
+
+def _value_bounds(value: object) -> tuple[float, float] | None:
+    if isinstance(value, (bool, np.bool_)):
+        return None
+    if isinstance(value, (int, float, np.integer, np.floating)):
+        scalar = float(value)
+        return (scalar, scalar) if np.isfinite(scalar) else None
+    for left, right in (("lower", "upper"), ("lo", "hi"), ("lb", "ub")):
+        if hasattr(value, left) and hasattr(value, right):
+            lo_value = getattr(value, left)
+            hi_value = getattr(value, right)
+            if callable(lo_value) or callable(hi_value):
+                continue
+            lo = float(lo_value)
+            hi = float(hi_value)
+            return (lo, hi) if np.isfinite(lo) and np.isfinite(hi) else None
+    text = str(value)
+    affine_coeffs = [
+        float(v) for v in re.findall(
+            r"([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)\s*\*\s*s\d+",
+            text,
+        )
+    ]
+    nums = [float(v) for v in re.findall(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?", text)]
+    if affine_coeffs and nums:
+        center = nums[0]
+        radius = float(np.sum(np.abs(np.asarray(affine_coeffs, dtype=np.float64))))
+        return (center - radius, center + radius)
+    if len(nums) >= 2:
+        lo, hi = nums[0], nums[1]
+        return (lo, hi) if np.isfinite(lo) and np.isfinite(hi) else None
+    if len(nums) == 1:
+        scalar = nums[0]
+        return (scalar, scalar) if np.isfinite(scalar) else None
+    return None
 
 
 def save_benchmark_results(result: RtlolaBenchmarkResult, output_dir: Path) -> None:
@@ -873,16 +906,8 @@ def save_benchmark_results(result: RtlolaBenchmarkResult, output_dir: Path) -> N
     result.summary.to_csv(scenario_dir / "summary.csv", index=False)
     result.aggregate.to_csv(scenario_dir / "aggregate.csv", index=False)
     _write_dashboard_artifacts(result, scenario_dir, output_dir)
-    scenario = scenario_by_name(result.config.scenario)
-    config_payload = {
-        **asdict(result.config),
-        "trigger_value_scales": {
-            spec.stream: spec.scale
-            for spec in scenario.trigger_values
-        },
-    }
     with open(output_dir / "config.yaml", "w") as f:
-        yaml.safe_dump(config_payload, f, sort_keys=False)
+        yaml.safe_dump(asdict(result.config), f, sort_keys=False)
 
 
 def _write_dashboard_artifacts(

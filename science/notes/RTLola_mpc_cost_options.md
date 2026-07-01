@@ -1,9 +1,5 @@
 # RTLola MPC Cost Options
 
-> Historical note: the binding-loss objective described below was superseded
-> on 2026-07-01 by terminal normalized trigger-stream interval width. See
-> `science/SCIENCE.md` for the active objective contract.
-
 Status as of 2026-06-25.
 
 ## Current Implemented Objective
@@ -25,6 +21,22 @@ full unreduced ground-truth state. Width columns remain diagnostic outputs.
 
 The objective still does not include generator count, switching penalties, or
 method-specific preferences.
+
+## 2026-07-01 Rejected Trigger-Width Experiment
+
+An experimental Python objective minimized terminal normalized widths of the
+public streams consumed by robot-arm triggers. It also required a new binding
+verdict type exposing affine interval bounds.
+
+Across the full figure-eight and square violated traces at budgets `40`, `80`,
+`120`, and `180`, the objective changed MPC from predominantly Scott to
+predominantly Girard. It did not change FPR: figure-eight remained `3/2155`
+and square remained `2/1818` at every budget. It also removed the small
+whole-state-width improvement previously observed with binding loss.
+
+The experiment was therefore rejected. The binding API and active objective
+were restored to the binding-native terminal `approx_loss_state`. Generated
+artifacts remain under `results/rtlola-arm-trigger-width` for comparison.
 
 ## 2026-06-25 Robot-Arm Result
 

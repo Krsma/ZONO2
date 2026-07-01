@@ -4,7 +4,7 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA="${PZR_CONDA:-$ROOT_DIR/external/miniconda3/bin/conda}"
 ENV_NAME="${PZR_RTLOLA_ENV:-pzr-rtlola}"
-BINDING_REV="3b0443c1eb038b19bc3949ff3ba82d03617616aa"
+BINDING_REV="eef70844cac3ad5928899db5e30427dcc54f50cf"
 BINDING_DIR="$ROOT_DIR/rlolapythonbinding"
 
 if ! command -v cargo >/dev/null 2>&1; then

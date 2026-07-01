@@ -20,9 +20,8 @@ from pzr.rtlola.robot_arm import (
     validate_trace_tcp_against_fk,
 )
 from pzr.rtlola.scenarios import scenario_by_name
-from pzr.rtlola.search import beam_search, normalized_trigger_width_cost
+from pzr.rtlola.search import beam_search
 from pzr.rtlola.sweep_report import consolidate_sweep
-from pzr.rtlola.verdicts import interval_bounds
 
 
 def test_trigger_confusion_uses_reference_class_denominators():
@@ -114,37 +113,11 @@ def test_matrix_metrics_distinguish_dense_active_and_constant_generators():
     assert metrics.full_width_sum == pytest.approx(3.0)
 
 
-def test_normalized_trigger_width_cost_uses_only_public_trigger_streams():
-    scenario = scenario_by_name("robot_arm")
-    cost = normalized_trigger_width_cost(scenario.trigger_values)
-    step = SimpleNamespace(verdict={
-        "dist_to_expected": SimpleNamespace(lower=0.01, upper=0.03),
-        "tpl": SimpleNamespace(lower=100.0, upper=300.0),
-        "unrelated": SimpleNamespace(lower=-1e6, upper=1e6),
-    })
-
-    value = cost(None, step)
-
-    assert value == pytest.approx(((0.02 / 0.05) ** 2 + (200.0 / 1000.0) ** 2) / 2.0)
-
-
-def test_interval_bounds_requires_numeric_binding_values():
-    assert interval_bounds(3.0) == (3.0, 3.0)
-    assert interval_bounds(
-        SimpleNamespace(lower=-0.25, upper=0.75),
-    ) == (-0.25, 0.75)
-    with pytest.raises(TypeError, match="binding AffineValue"):
-        interval_bounds("1.0 + 0.5 * s0")
-
-
 def test_packaged_specs_and_registered_scenarios_are_authoritative():
     assert "constant delta: Variable" in OMNI_SPEC
     assert "constant a5H: Variable" in ARM_SPEC
     assert scenario_by_name("omni_robot").spec == OMNI_SPEC
     assert scenario_by_name("robot_arm").spec == ARM_SPEC
-    assert {
-        spec.stream for spec in scenario_by_name("robot_arm").trigger_values
-    } == {"dist_to_expected", "tpl"}
 
 
 def test_omni_trace_is_seeded_and_deterministic():
@@ -203,55 +176,57 @@ def test_beam_search_supports_forced_root_with_full_continuation_pool():
     assert result.predicted_cost == pytest.approx(1.0)
 
 
-def test_beam_search_can_optimize_trigger_width_instead_of_full_state_width():
-    state_narrow = RtlolaAction(
-        "state_narrow",
-        lambda _budget: object(),
-        explicit_budget=False,
-    )
-    trigger_narrow = RtlolaAction(
-        "trigger_narrow",
-        lambda _budget: object(),
-        explicit_budget=False,
-    )
+def test_beam_search_uses_binding_reference_loss_at_terminal_horizon():
+    none = RtlolaAction("none", lambda _budget: object(), explicit_budget=False)
+    first = RtlolaAction("first", lambda _budget: object(), explicit_budget=False)
+    second = RtlolaAction("second", lambda _budget: object(), explicit_budget=False)
 
     class FakeEngine:
+        loss_calls = []
+
         def metrics(self, state):
             return SimpleNamespace(dynamic_generator_count=99, dimension=1)
 
         def branch_step(self, state, event, action, config_budget):
-            del state, event, config_budget
-            trigger_width = 2.0 if action.name == "state_narrow" else 0.2
-            full_width = 1.0 if action.name == "state_narrow" else 100.0
+            del event, config_budget
+            next_state = SimpleNamespace(
+                depth=state.depth + 1,
+                path=(*state.path, action.name),
+            )
             return SimpleNamespace(
-                verdict={
-                    "alarm_value": SimpleNamespace(
-                        lower=0.0,
-                        upper=trigger_width,
-                    ),
-                },
-                state=SimpleNamespace(),
+                verdict={},
+                state=next_state,
                 action_name=action.name,
-                metrics=SimpleNamespace(full_width_sum=full_width),
+                metrics=SimpleNamespace(full_width_sum=1000.0),
             )
 
-    cost = normalized_trigger_width_cost((
-        SimpleNamespace(stream="alarm_value", scale=1.0),
-    ))
+        def approx_loss(self, reference, candidate):
+            self.loss_calls.append((reference.path, candidate.path))
+            if candidate.depth == 1:
+                return 0.0 if candidate.path[0] == "first" else 1.0
+            return 5.0 if candidate.path[0] == "first" else 2.0
+
+    engine = FakeEngine()
     result = beam_search(
-        FakeEngine(),
-        SimpleNamespace(),
+        engine,
+        SimpleNamespace(depth=0, path=()),
         object(),
-        (),
-        (state_narrow, trigger_narrow),
+        (object(),),
+        (first, second),
         budget=10,
         beam_width=2,
-        fallback=state_narrow,
-        cost_fn=cost,
+        fallback=first,
+        none_action=none,
+        cost_fn=lambda _engine, _step: pytest.fail("Python cost must not run"),
+        use_reference_loss=True,
     )
 
-    assert result.first_action.name == "trigger_narrow"
-    assert result.predicted_cost == pytest.approx(0.04)
+    assert result.first_action.name == "second"
+    assert result.predicted_cost == pytest.approx(2.0)
+    assert {reference for reference, _candidate in engine.loss_calls} == {
+        ("none",),
+        ("none", "none"),
+    }
 
 
 def test_engine_wraps_binding_panics_so_search_can_fallback():
