@@ -13,6 +13,10 @@ from pzr.rtlola.binding import require_binding
 from pzr.rtlola.metrics import RtlolaMatrixMetrics, matrix_metrics
 
 
+class RtlolaBindingError(RuntimeError):
+    """The native RTLola binding failed while evaluating a state."""
+
+
 @dataclass(frozen=True)
 class RtlolaEvent:
     """One event for an RTLola monitor."""
@@ -86,7 +90,7 @@ class RtlolaEngine:
         except BaseException as exc:  # PyO3 PanicException is not an Exception.
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            raise RuntimeError(
+            raise RtlolaBindingError(
                 "RTLola planner branch failed "
                 f"(step={state.step + 1}, time={event.time}, action={action.name})"
             ) from exc
@@ -115,7 +119,7 @@ class RtlolaEngine:
         except BaseException as exc:  # PyO3 PanicException is not an Exception.
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            raise RuntimeError(
+            raise RtlolaBindingError(
                 "RTLola live step failed "
                 f"(step={step}, time={event.time}, action={action.name})"
             ) from exc
@@ -133,7 +137,7 @@ class RtlolaEngine:
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            raise RuntimeError(
+            raise RtlolaBindingError(
                 f"failed to extract RTLola zonotope matrices at step {state.step}"
             ) from exc
         return dyn, total
@@ -153,14 +157,16 @@ class RtlolaEngine:
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
-            raise RuntimeError(
+            raise RtlolaBindingError(
                 "failed to compute RTLola binding approximation loss "
                 f"(reference_step={reference.step}, candidate_step={candidate.step})"
             ) from exc
         finally:
             self.planner.apply_state(previous)
         if not np.isfinite(loss):
-            raise RuntimeError("RTLola binding approximation loss was non-finite")
+            raise RtlolaBindingError(
+                "RTLola binding approximation loss was non-finite"
+            )
         return loss
 
     def _validate_state(self, state: RtlolaStateRef) -> None:
@@ -175,6 +181,7 @@ class RtlolaEngine:
         for value in event.values:
             if isinstance(value, float) and not np.isfinite(value):
                 raise ValueError("event contains non-finite float value")
+
     def _validate_budget_for_state(
         self,
         state: RtlolaStateRef,

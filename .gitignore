@@ -15,3 +15,12 @@ external/
 build/
 dist/
 *.egg-info/
+
+# LaTeX build intermediates
+*.aux
+*.bbl
+*.blg
+*.fdb_latexmk
+*.fls
+*.log
+*.out

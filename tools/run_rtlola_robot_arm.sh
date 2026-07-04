@@ -22,7 +22,7 @@ mkdir -p "${MPLCONFIGDIR:-/tmp/pzr-matplotlib-cache}"
 ARGS=(
   --profile "${PZR_RTLOLA_PROFILE:-smoke}"
   --scenario robot_arm
-  --trace-kind "${PZR_ROBOT_ARM_TRACE_KIND:-figure8_violated}"
+  --trace-kind "${PZR_ROBOT_ARM_TRACE_KIND:-figure8_drift}"
   --budget "${PZR_ROBOT_ARM_BUDGET:-80}"
   --length "${PZR_ROBOT_ARM_LENGTH:-200}"
   --seeds "${PZR_ROBOT_ARM_SEEDS:-3}"

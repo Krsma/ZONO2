@@ -1,16 +1,27 @@
 import math
 
 input time: Float
-input a1m: Float64
-input a2m: Float64
-input a3m: Float64
-input a4m: Float64
-input a5m: Float64
+input a1m: Fixed64_32
+input a2m: Fixed64_32
+input a3m: Fixed64_32
+input a4m: Fixed64_32
+input a5m: Fixed64_32
 
-constant Q: Float64 := 0.000767
-constant J: Float64 := 0.001309
-constant I: Float64 := 0.008727
-constant H: Float64 := 0.003491
+// input x: Fixed64_32
+// input y: Fixed64_32
+// input z: Fixed64_32
+
+// The robot arm uses the Dynamixel XL430-W250 and XL330-M288 servor motors, which are both equipped with an ams-osram AS5600 12bit contactless potentionmeter.
+// From the AS5600 Datasheet we derive the following error magnitudes
+
+// Quantization error stemming from 4096 steps per revolution
+constant Q: Fixed64_32 := 0.000767
+// Jitter caputed as the 5 signma bound (1 sigma = 0.015 degree)
+constant J: Fixed64_32 := 0.001309
+// Integral non-linearity from magnet displacement +- 0.5 degree
+constant I: Fixed64_32 := 0.008727
+// Homeing / Calibration error (assumed here as 0.2 degree. It depends on the physical build)
+constant H: Fixed64_32 := 0.003491
 
 output a1R: Variable @a1m
 constant a1H: Variable
@@ -44,27 +55,30 @@ output c3 := cos(a3)
 output c4 := cos(a4)
 output c5 := cos(a5)
 
-output w5y := 0.013097 + 0.0105 * c5 - 0.00045 * s5
-constant w5x: Float64 := -0.1118
-output w5z := 0.0105 * s5 + 0.00045 * c5
+output w5y :=  0.013097 + 0.0105 * c5 - 0.00045 * s5
+constant w5x: Fixed64_32 := -0.1118
+output w5z :=  0.0105 * s5 + 0.00045 * c5
 
 output w4x := -0.10048 + w5x * c4 + w5z * s4
-output w4y := 0.00005 + w5y
-output w4z := 0.0026999 - w5x * s4 + w5z * c4
+output w4y :=  0.00005 + w5y
+output w4z :=  0.0026999 - w5x * s4 + w5z * c4
 
 output w3x := -0.0148 + w4x * c3 - w4z * s3
-output w3y := 0.0065 + w4y
-output w3z := 0.1083 + w4x * s3 + w4z * c3
+output w3y :=  0.0065 + w4y
+output w3z :=  0.1083 + w4x * s3 + w4z * c3
 
-output w2x := w3x * c2 + w3z * s2
+output w2x :=  w3x * c2 + w3z * s2
 output w2y := -0.0209 + w3y
-output w2z := 0.0154 - w3x * s2 + w3z * c2
+output w2z :=  0.0154 - w3x * s2 + w3z * c2
 
-output px := 0.012 + w2x * c1 + w2y * s1
+output px :=  0.012 + w2x * c1 + w2y * s1
 output py := -w2x * s1 + w2y * c1
-output pz := 0.0409 + w2z
+output pz :=  0.0409 + w2z
 
-output count: Float64 @a1m := count.offset(by: -1).defaults(to: 0.0) + 1.0
+// ======================================================
+// ===== Calculate average position to detect drift =====
+// ======================================================
+output count: Fixed64_32 @a1m := count.offset(by: -1).defaults(to: 0.0) + 1.0
 output sum_x := sum_x.offset(by: -1).defaults(to: 0.0) + px
 output sum_y := sum_y.offset(by: -1).defaults(to: 0.0) + py
 output sum_z := sum_z.offset(by: -1).defaults(to: 0.0) + pz
@@ -73,30 +87,69 @@ output avg_x := sum_x / count
 output avg_y := sum_y / count
 output avg_z := sum_z / count
 
-constant expected_x: Float64 := -0.18
-constant expected_y: Float64 := 0.0
-constant expected_z: Float64 := 0.05
+// Expected avg position, read from the first tick of the trace
+input cx: Fixed64_32
+input cy: Fixed64_32
+input cz: Fixed64_32
+output ecx: Fixed64_32 @a1m := cx.hold(or: 0.0)
+output ecy: Fixed64_32 @a1m := cy.hold(or: 0.0)
+output ecz: Fixed64_32 @a1m := cz.hold(or: 0.0)
 
-output dx := avg_x - expected_x
-output dy := avg_y - expected_y
-output dz := avg_z - expected_z
+// Calculate distance between expected/ average
+output dx := avg_x - ecx
+output dy := avg_y - ecy
+output dz := avg_z - ecz
 #[public]
 output dist_to_expected := sqrt((dx * dx) + (dy * dy) + (dz * dz))
 
-constant max_dist: Float64 := 0.05
-constant threshold: Float64 := 0.0
-#[public]
-output dist_to_expected_exceeded := pAbove(dist_to_expected, max_dist) > threshold && time > 4.0
-trigger pAbove(dist_to_expected, max_dist) > threshold && time > 4.0 "Toolhead drift detected"
+constant max_dist: Fixed64_32 := 0.04
+constant threshold: Fixed64_32 := 0.0
+trigger pAbove(dist_to_expected, max_dist) > threshold && time > 90.0 "Toolhead drift detected"
 
-output dpx := px - px.offset(by: -1).defaults(to: expected_x)
-output dpy := py - py.offset(by: -1).defaults(to: expected_y)
-output dpz := pz - pz.offset(by: -1).defaults(to: expected_z)
-output step_len := sqrt((dpx * dpx) + (dpy * dpy) + (dpz * dpz))
-#[public]
-output tpl := tpl.offset(by: -1).defaults(to: 0.0) + step_len
+// ==========================================================
+// ===== Safe-stopping geofence (x and y)              ======
+// ==========================================================
+output DT :Fixed64_32 := cast<Float64,Fixed64_32>(time - time.offset(by: -1).defaults(to: 0.0))
+// alpha-beta observer gains. LOW gains keep the (pos,vel) transition near the
+// undamped shear [[1,dt],[0,1]] (eigenvalue magnitude = sqrt(1-alpha)): this is
+// what makes boxing compound. Raise them for tighter tracking at the cost of the
+// stressor (higher gain -> contraction -> boxing becomes adequate again).
+constant ALPHA: Fixed64_32 := 0.05
+constant BETA:  Fixed64_32 := 0.0025
+output   BOD:   Fixed64_32 := BETA / DT
 
-constant max_toolpath_length: Float64 := 1000.0
+// per-axis maximum deceleration [m/s^2] and the four geofence walls [m]
+constant A_MAX: Fixed64_32 := 2.0
+constant X_MIN: Fixed64_32 := -0.14
+constant X_MAX: Fixed64_32 :=  0.04
+constant Y_MIN: Fixed64_32 :=  0.12
+constant Y_MAX: Fixed64_32 :=  0.28
+
+// ---- x-axis alpha-beta observer: state (phat_x, vhat_x) ----
+output pxpred := phat_x.offset(by:-1).defaults(to: px) + vhat_x.offset(by:-1).defaults(to: 0.0) * DT
+output rx     := px - pxpred
+output vhat_x := vhat_x.offset(by:-1).defaults(to: 0.0) + BOD * rx
+output phat_x := pxpred + ALPHA * rx
+
+// ---- y-axis alpha-beta observer: state (phat_y, vhat_y) ----
+output pypred := phat_y.offset(by:-1).defaults(to: py)  + vhat_y.offset(by:-1).defaults(to: 0.0) * DT
+output ry     := py - pypred
+output vhat_y := vhat_y.offset(by:-1).defaults(to: 0.0) + BOD * ry
+output phat_y := pypred + ALPHA * ry
+
+// ---- braking distance at current speed (v^2 / 2a); sign-free, so it applies to both walls
 #[public]
-output tpl_exceeded := pAbove(tpl, max_toolpath_length) > threshold
-trigger pAbove(tpl, max_toolpath_length) > threshold "Toolhead travelled 1km: Service now!"
+output dxb := (vhat_x * vhat_x) / (2.0 * A_MAX)
+#[public]
+output dyb := (vhat_y * vhat_y) / (2.0 * A_MAX)
+
+// worst-case stopping point in each direction: reach phat +/- braking distance
+output stop_x_hi := phat_x + dxb
+output stop_x_lo := phat_x - dxb
+output stop_y_hi := phat_y + dyb
+output stop_y_lo := phat_y - dyb
+
+trigger pAbove(stop_x_hi, X_MAX) > threshold && time > 2.0 "Cannot stop before +X boundary"
+trigger pBelow(stop_x_lo, X_MIN) > threshold && time > 2.0 "Cannot stop before -X boundary"
+trigger pAbove(stop_y_hi, Y_MAX) > threshold && time > 2.0 "Cannot stop before +Y boundary"
+trigger pBelow(stop_y_lo, Y_MIN) > threshold && time > 2.0 "Cannot stop before -Y boundary"

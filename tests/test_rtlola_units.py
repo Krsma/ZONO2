@@ -1,3 +1,4 @@
+import hashlib
 from types import SimpleNamespace
 
 import numpy as np
@@ -5,18 +6,34 @@ import pandas as pd
 import pytest
 
 from pzr.rtlola.actions import RtlolaAction
-from pzr.rtlola.benchmark import trigger_confusion
+from pzr.rtlola.benchmark import RtlolaBenchmarkConfig, trigger_confusion
+from pzr.rtlola.cli import main as cli_main
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
 from pzr.rtlola.metrics import (
     active_generator_count,
     generator_count,
     matrix_metrics,
 )
-from pzr.rtlola.omni import OMNI_SPEC, generate_omni_events
+from pzr.rtlola.omni import (
+    OMNI_DEFAULT_TRACE_KIND,
+    OMNI_PUBLIC_STREAM_KEYS,
+    OMNI_SPEC,
+    OMNI_TRACE_KINDS,
+    generate_omni_events,
+)
 from pzr.rtlola.robot_arm import (
+    ARM_PUBLIC_STREAM_KEYS,
     ARM_SPEC,
+    ARM_TRIGGER_KEYS,
     DEFAULT_TRACE_KIND,
+    ROBOT_ARM_SPEC_SHA256,
+    ROBOT_ARM_TRACE_ROWS,
+    ROBOT_ARM_TRACE_SHA256,
+    RLOLAEVAL_REVISION,
+    TRACE_KINDS,
     generate_robot_arm_events,
+    load_robot_arm_trace,
+    trace_path,
     validate_trace_tcp_against_fk,
 )
 from pzr.rtlola.scenarios import scenario_by_name
@@ -45,16 +62,19 @@ def test_trigger_confusion_uses_reference_class_denominators():
 
 
 def test_sweep_report_compares_mpc_with_best_static(tmp_path):
-    scenario_dir = tmp_path / "runs" / "figure8_violated" / "budget_40" / "robot_arm"
+    scenario_dir = tmp_path / "runs" / "figure8_drift" / "budget_40" / "robot_arm"
     scenario_dir.mkdir(parents=True)
     pd.DataFrame([
         {
             "method": "girard",
             "seed": 0,
             "budget": 40,
-            "trace_kind": "figure8_violated",
+            "trace_kind": "figure8_drift",
             "false_positive_rate": 0.4,
             "false_negative_rate": 0.1,
+            "mean_approx_loss": 2.0,
+            "mean_state_zonotope_approx_error": 4.0,
+            "mean_state_zonotope_width": 8.0,
             "total_time_ms": 10.0,
             "fallback_count": 0,
             "reducer_failure_count": 0,
@@ -63,9 +83,12 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
             "method": "mpc_beam",
             "seed": 0,
             "budget": 40,
-            "trace_kind": "figure8_violated",
+            "trace_kind": "figure8_drift",
             "false_positive_rate": 0.3,
             "false_negative_rate": 0.2,
+            "mean_approx_loss": 1.0,
+            "mean_state_zonotope_approx_error": 3.0,
+            "mean_state_zonotope_width": 7.0,
             "total_time_ms": 30.0,
             "fallback_count": 1,
             "reducer_failure_count": 2,
@@ -75,16 +98,28 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
         {
             "method": "girard",
             "budget": 40,
-            "trace_kind": "figure8_violated",
+            "trace_kind": "figure8_drift",
             "reducer_used": "girard",
         },
         {
             "method": "mpc_beam",
             "budget": 40,
-            "trace_kind": "figure8_violated",
+            "trace_kind": "figure8_drift",
             "reducer_used": "scott",
         },
     ]).to_csv(scenario_dir / "timeseries.csv", index=False)
+    pd.DataFrame([{
+        "scenario": "robot_arm",
+        "trace_kind": "figure8_drift",
+        "method": "interval_hull",
+        "seed": 0,
+        "budget": 40,
+        "step": 100,
+        "time": 10.0,
+        "phase": "select",
+        "failure_type": "RtlolaNoFeasibleAction",
+        "message": "no sound action",
+    }]).to_csv(scenario_dir / "run_failures.csv", index=False)
 
     consolidate_sweep(tmp_path)
 
@@ -92,7 +127,18 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
     assert comparison.loc[0, "best_static_method"] == "girard"
     assert comparison.loc[0, "absolute_fpr_reduction"] == pytest.approx(0.1)
     assert comparison.loc[0, "relative_fpr_reduction"] == pytest.approx(0.25)
+    fidelity = pd.read_csv(tmp_path / "mpc_vs_static_fidelity.csv")
+    assert fidelity.loc[0, "best_static_method"] == "girard"
+    assert fidelity.loc[0, "relative_mean_approx_loss_change"] == pytest.approx(-0.5)
     assert (tmp_path / "combined_reducer_counts.csv").stat().st_size > 0
+    methods = pd.read_csv(tmp_path / "method_comparison.csv")
+    assert set(methods["method"]) == {"girard", "mpc_beam"}
+    composition = pd.read_csv(tmp_path / "mpc_action_composition.csv")
+    assert composition.loc[0, "reducer_used"] == "scott"
+    assert composition.loc[0, "step_share"] == pytest.approx(1.0)
+    assert composition.loc[0, "reduction_share"] == pytest.approx(1.0)
+    failures = pd.read_csv(tmp_path / "combined_run_failures.csv")
+    assert failures.loc[0, "method"] == "interval_hull"
 
 
 def test_matrix_metrics_distinguish_dense_active_and_constant_generators():
@@ -115,9 +161,29 @@ def test_matrix_metrics_distinguish_dense_active_and_constant_generators():
 
 def test_packaged_specs_and_registered_scenarios_are_authoritative():
     assert "constant delta: Variable" in OMNI_SPEC
+    assert "#[public]\noutput position_x :=" in OMNI_SPEC
     assert "constant a5H: Variable" in ARM_SPEC
-    assert scenario_by_name("omni_robot").spec == OMNI_SPEC
-    assert scenario_by_name("robot_arm").spec == ARM_SPEC
+    omni = scenario_by_name("omni_robot")
+    assert omni.spec == OMNI_SPEC
+    assert omni.trace_kinds == OMNI_TRACE_KINDS
+    assert omni.default_trace_kind == OMNI_DEFAULT_TRACE_KIND
+    assert omni.public_stream_keys == OMNI_PUBLIC_STREAM_KEYS
+    arm = scenario_by_name("robot_arm")
+    assert arm.spec == ARM_SPEC
+    assert arm.event_arity == 9
+    assert arm.trace_kinds == TRACE_KINDS
+    assert arm.default_trace_kind == "figure8_drift"
+    assert arm.public_stream_keys == ARM_PUBLIC_STREAM_KEYS
+    assert arm.trigger_keys == ARM_TRIGGER_KEYS
+    assert arm.source_revision == RLOLAEVAL_REVISION
+
+
+def test_mpc_objective_is_fixed_and_not_a_cli_option(capsys):
+    with pytest.raises(TypeError, match="mpc_objective"):
+        RtlolaBenchmarkConfig(mpc_objective="python_proxy")  # type: ignore[call-arg]
+    with pytest.raises(SystemExit):
+        cli_main(["--mpc-objective", "python_proxy"])
+    assert "unrecognized arguments: --mpc-objective" in capsys.readouterr().err
 
 
 def test_omni_trace_is_seeded_and_deterministic():
@@ -125,7 +191,29 @@ def test_omni_trace_is_seeded_and_deterministic():
     right = generate_omni_events(5, seed=42)
 
     assert left == right
+    np.testing.assert_allclose(
+        [event.values for event in left[:3]],
+        [
+            (0.0, 0.05484907435579764, -0.041599364249619825),
+            (1.0, 0.18993028960095995, 0.07338306819875957),
+            (2.0, -0.1612560443567306, 0.018008121341064366),
+        ],
+    )
     assert left[0].time == 0.0
+    assert all(a.time < b.time for a, b in zip(left, left[1:]))
+
+
+@pytest.mark.parametrize("trace_kind", OMNI_TRACE_KINDS)
+def test_all_omni_trace_kinds_are_seeded_and_resolve_in_scenario(trace_kind):
+    left = generate_omni_events(8, seed=7, trace_kind=trace_kind)
+    right = scenario_by_name("omni_robot").generate_trace(
+        8,
+        7,
+        trace_kind,
+    )
+
+    assert left == right.events
+    assert right.trace_kind == trace_kind
     assert all(a.time < b.time for a, b in zip(left, left[1:]))
 
 
@@ -133,11 +221,24 @@ def test_robot_arm_trace_matches_packaged_forward_kinematics():
     events = generate_robot_arm_events(4, trace_kind=DEFAULT_TRACE_KIND)
 
     assert len(events) == 4
-    assert len(events[0].values) == 6
+    assert len(events[0].values) == 9
+    assert all(value is not None for value in events[0].values[-3:])
+    assert events[1].values[-3:] == (None, None, None)
     assert validate_trace_tcp_against_fk(
         DEFAULT_TRACE_KIND,
         max_rows=4,
     ) < 3e-4
+
+
+def test_robot_arm_assets_match_rlolaeval_revision():
+    assert hashlib.sha256(ARM_SPEC.encode()).hexdigest() == ROBOT_ARM_SPEC_SHA256
+    assert set(TRACE_KINDS) == set(ROBOT_ARM_TRACE_SHA256)
+    for trace_kind in TRACE_KINDS:
+        assert hashlib.sha256(trace_path(trace_kind).read_bytes()).hexdigest() == (
+            ROBOT_ARM_TRACE_SHA256[trace_kind]
+        )
+        assert len(load_robot_arm_trace(trace_kind)) == ROBOT_ARM_TRACE_ROWS[trace_kind]
+        assert validate_trace_tcp_against_fk(trace_kind, max_rows=None) < 3e-4
 
 
 def test_beam_search_supports_forced_root_with_full_continuation_pool():

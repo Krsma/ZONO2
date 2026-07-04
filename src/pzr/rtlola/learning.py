@@ -19,18 +19,29 @@ from pzr.learning.ranking import (
 from pzr.rtlola.actions import RtlolaAction, RtlolaActionCatalog, default_action_catalog
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
+    RtlolaGroundTruthStep,
     RtlolaRunResult,
     RtlolaTriggerReferenceStep,
+    compute_ground_truth,
     load_or_compute_trigger_reference,
     make_step_record,
     results_to_dataframe,
     summarize_results,
 )
 from pzr.rtlola.binding import require_binding
-from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
+from pzr.rtlola.engine import (
+    RtlolaBindingError,
+    RtlolaEngine,
+    RtlolaEvent,
+    RtlolaStateRef,
+)
 from pzr.rtlola.metrics import RtlolaMatrixMetrics
 from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
-from pzr.rtlola.search import RtlolaSearchResult, beam_search
+from pzr.rtlola.search import (
+    RtlolaNoFeasibleAction,
+    RtlolaSearchResult,
+    beam_search,
+)
 
 
 RTL_FEATURE_NAMES = (
@@ -139,9 +150,12 @@ class RtlolaLearnedPolicy:
         failures = 0
         for name in self.policy.rank_reducers(features):
             action = self.catalog.by_name[name]
+            if action.explicit_budget and budget < pre_metrics.dimension:
+                failures += 1
+                continue
             try:
                 step = engine.branch_step(state, event, action, budget)
-            except (RuntimeError, ValueError):
+            except RtlolaBindingError:
                 failures += 1
                 continue
             return RtlolaSearchResult(
@@ -163,8 +177,10 @@ class RtlolaLearnedPolicy:
                 self.catalog.fallback,
                 budget,
             )
-        except (RuntimeError, ValueError) as exc:
-            raise ValueError("learned RTLola policy and fallback were infeasible") from exc
+        except RtlolaBindingError as exc:
+            raise RtlolaNoFeasibleAction(
+                "learned RTLola policy and fallback were infeasible"
+            ) from exc
         return RtlolaSearchResult(
             first_action=self.catalog.fallback,
             first_action_budget=budget,
@@ -202,14 +218,40 @@ def train_and_evaluate_regret(
     training_frames: list[pd.DataFrame] = []
     train_seed_count = config.regret_train_seeds or config.seeds
     eval_seed_count = config.regret_eval_seeds or max(1, config.seeds // 3)
+    if config.reference_mode not in {"exact", "verdict", "off"}:
+        raise ValueError("reference_mode must be one of: exact, verdict, off")
+    if config.regret_train_seed_start < 0 or config.regret_eval_seed_start < 0:
+        raise ValueError("regret seed starts must be non-negative")
+    train_seed_ids = {
+        config.regret_train_seed_start
+        + iteration * train_seed_count
+        + local_seed
+        for iteration in range(config.regret_iterations)
+        for local_seed in range(train_seed_count)
+    }
+    eval_seed_ids = {
+        config.regret_eval_seed_start + local_seed
+        for local_seed in range(eval_seed_count)
+    }
+    overlap = sorted(train_seed_ids & eval_seed_ids)
+    if overlap:
+        raise ValueError(
+            "regret training and evaluation seed ranges overlap: "
+            f"{overlap[:5]}"
+        )
 
     for iteration in range(config.regret_iterations):
         for trace_kind in train_trace_kinds:
             for budget in budgets:
-                for seed in range(train_seed_count):
+                for local_seed in range(train_seed_count):
+                    seed = (
+                        config.regret_train_seed_start
+                        + iteration * train_seed_count
+                        + local_seed
+                    )
                     trace = scenario.generate_trace(
                         config.length,
-                        seed + iteration * 1000,
+                        seed,
                         trace_kind,
                     )
                     learned = (
@@ -246,18 +288,36 @@ def train_and_evaluate_regret(
     learned_policy = RtlolaLearnedPolicy(policy, catalog)
     eval_results: list[RtlolaRunResult] = []
     for trace_kind in eval_trace_kinds:
-        for seed in range(eval_seed_count):
+        for local_seed in range(eval_seed_count):
+            seed = config.regret_eval_seed_start + local_seed
             trace = scenario.generate_trace(config.length, seed, trace_kind)
-            cache_path = (
-                reference_cache_dir / f"{trace.trace_kind}.seed_{seed}.json"
-                if reference_cache_dir is not None else None
+            ground_truth = (
+                compute_ground_truth(trace.events, scenario=scenario)
+                if config.reference_mode == "exact" else None
             )
-            trigger_reference = load_or_compute_trigger_reference(
-                trace.events,
-                scenario=scenario,
-                trace_kind=trace.trace_kind,
-                seed=seed,
-                cache_path=cache_path,
+            trigger_reference = (
+                tuple(
+                    RtlolaTriggerReferenceStep({
+                        key: bool(step.verdicts.get(key, False))
+                        for key in scenario.trigger_keys
+                    })
+                    for step in ground_truth
+                )
+                if ground_truth is not None
+                else (
+                    load_or_compute_trigger_reference(
+                        trace.events,
+                        scenario=scenario,
+                        trace_kind=trace.trace_kind,
+                        seed=seed,
+                        cache_path=(
+                            reference_cache_dir
+                            / f"{trace.trace_kind}.seed_{seed}.json"
+                            if reference_cache_dir is not None else None
+                        ),
+                    )
+                    if config.reference_mode == "verdict" else None
+                )
             )
             for budget in budgets:
                 eval_results.append(_evaluate_learned_episode(
@@ -265,6 +325,7 @@ def train_and_evaluate_regret(
                     trace=trace.events,
                     trace_kind=trace.trace_kind,
                     trigger_reference=trigger_reference,
+                    ground_truth=ground_truth,
                     budget=budget,
                     seed=seed,
                     config=config,
@@ -493,7 +554,8 @@ def _evaluate_learned_episode(
     scenario: RtlolaScenario,
     trace: Sequence[RtlolaEvent],
     trace_kind: str,
-    trigger_reference: Sequence[RtlolaTriggerReferenceStep],
+    trigger_reference: Sequence[RtlolaTriggerReferenceStep] | None,
+    ground_truth: Sequence[RtlolaGroundTruthStep] | None,
     budget: int,
     seed: int,
     config: RtlolaBenchmarkConfig,
@@ -531,8 +593,14 @@ def _evaluate_learned_episode(
             committed=committed,
             decision=decision,
             decision_time_ms=elapsed_ms,
-            ground_truth=None,
-            trigger_reference=trigger_reference[step],
+            ground_truth=(
+                ground_truth[step]
+                if ground_truth is not None else None
+            ),
+            trigger_reference=(
+                trigger_reference[step]
+                if trigger_reference is not None else None
+            ),
         ))
     return RtlolaRunResult(
         "learned_direct",
@@ -571,7 +639,7 @@ def _evaluate_candidates(
                 use_reference_loss=True,
                 forced_first_action=first,
             )
-        except ValueError:
+        except RtlolaNoFeasibleAction:
             continue
         if search.first_action.name != first.name:
             continue
@@ -678,8 +746,5 @@ def _engine_for_scenario(scenario: RtlolaScenario) -> RtlolaEngine:
     return RtlolaEngine(
         scenario.spec,
         event_arity=scenario.event_arity,
-        expected_verdict_keys=(
-            *scenario.expected_verdict_keys,
-            *scenario.public_stream_keys,
-        ),
+        expected_verdict_keys=scenario.expected_verdict_keys,
     )

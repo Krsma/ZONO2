@@ -49,9 +49,11 @@ tries binding actions in that order.
 
 - `omni_robot`: stochastic seeded acceleration/direction traces with one
   persistent constant calibration variable and fresh measurement uncertainty.
-- `robot_arm`: deterministic recorded 5-DOF traces evaluated by the packaged
-  RTLola forward-kinematics, drift, and toolpath specification. Five constant
-  calibration variables remain outside dynamic reduction.
+- `robot_arm`: six deterministic recorded 5-DOF RLolaEval traces evaluated by
+  the packaged RTLola forward kinematics, running-average drift detector,
+  alpha-beta observer, and safe-stopping geofence. Five constant calibration
+  variables remain outside dynamic reduction.
 
-Trigger decisions are the packaged RTLola specification’s public Boolean
-outputs. Python does not approximate trigger logic.
+Robot-arm trigger decisions are sparse `Trigger#0` through `Trigger#4`
+verdicts. Python treats absence as false and does not approximate trigger
+logic.

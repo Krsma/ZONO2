@@ -5,7 +5,7 @@ pytest.importorskip("rlola_python_binding")
 
 from pzr.learning.ranking import RegretRankingPolicy
 from pzr.rtlola.actions import default_action_catalog
-from pzr.rtlola.benchmark import RtlolaBenchmarkConfig
+from pzr.rtlola.benchmark import RtlolaBenchmarkConfig, summarize_results
 from pzr.rtlola.engine import RtlolaEngine
 from pzr.rtlola.learning import (
     RTL_FEATURE_NAMES,
@@ -94,10 +94,32 @@ def test_regret_training_smoke_is_scenario_generic_and_writes_artifacts(tmp_path
 
     assert result.traces
     assert result.eval_results
+    assert {trace.seed for trace in result.traces} == {10_000}
+    assert {run.seed for run in result.eval_results} == {0}
+    learned_summary = summarize_results(result.eval_results)
+    assert np.isfinite(learned_summary["mean_approx_loss"]).all()
     assert result.policy.candidate_names == default_action_catalog().mpc_candidate_names
     assert (tmp_path / "learned_direct_ranker.npz").stat().st_size > 0
     assert (tmp_path / "regret_candidate_costs.csv").stat().st_size > 0
     assert (tmp_path / "regret_metadata.json").stat().st_size > 0
+
+
+def test_regret_training_rejects_overlapping_seed_ranges():
+    with pytest.raises(ValueError, match="seed ranges overlap"):
+        train_and_evaluate_regret(RtlolaBenchmarkConfig(
+            scenario="omni_robot",
+            length=14,
+            seeds=1,
+            budget=10,
+            horizon=1,
+            beam_width=2,
+            regret_iterations=1,
+            regret_epochs=1,
+            regret_train_seeds=2,
+            regret_eval_seeds=2,
+            regret_train_seed_start=0,
+            regret_eval_seed_start=1,
+        ))
 
 
 def test_robot_arm_regret_training_uses_same_generic_pipeline():
@@ -115,7 +137,7 @@ def test_robot_arm_regret_training_uses_same_generic_pipeline():
         regret_eval_seeds=1,
         regret_budgets=[40, 80],
         regret_train_trace_kinds=["figure8", "square"],
-        regret_eval_trace_kinds=["figure8_violated", "square_violated"],
+        regret_eval_trace_kinds=["figure8_drift", "square_drift"],
     ))
 
     assert result.traces
@@ -123,10 +145,10 @@ def test_robot_arm_regret_training_uses_same_generic_pipeline():
         (run.budget, run.trace_kind)
         for run in result.eval_results
     } == {
-        (40, "figure8_violated"),
-        (80, "figure8_violated"),
-        (40, "square_violated"),
-        (80, "square_violated"),
+        (40, "figure8_drift"),
+        (80, "figure8_drift"),
+        (40, "square_drift"),
+        (80, "square_drift"),
     }
     assert all(run.method == "learned_direct" for run in result.eval_results)
     assert {trace.budget for trace in result.traces} == {40, 80}

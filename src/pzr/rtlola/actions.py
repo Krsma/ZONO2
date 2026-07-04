@@ -47,7 +47,14 @@ def action_by_name(actions: tuple[RtlolaAction, ...]) -> dict[str, RtlolaAction]
     return {action.name: action for action in actions}
 
 
-MPC_ACTION_NAMES = ("girard", "scott", "interval_hull", "pca")
+MPC_ACTION_NAMES = (
+    "girard",
+    "scott",
+    "interval_hull",
+    "pca",
+    "combastel",
+    "clustering",
+)
 BOUNDED_STATIC_ACTION_NAMES = (
     "girard",
     "scott",

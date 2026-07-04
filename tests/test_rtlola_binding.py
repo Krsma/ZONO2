@@ -2,25 +2,37 @@ from dataclasses import replace
 import json
 
 import numpy as np
+import pandas as pd
 import pytest
 
 rlola = pytest.importorskip("rlola_python_binding")
 
+import pzr.rtlola.benchmark as benchmark_module
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
     run_benchmark,
     save_benchmark_results,
 )
+from pzr.rtlola.binding import (
+    BINDING_BUILD_PROFILE,
+    INTERPRETER_REVISION,
+)
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent
-from pzr.rtlola.omni import OMNI_EXPECTED_VERDICT_KEYS, OMNI_SPEC, generate_omni_events
+from pzr.rtlola.omni import (
+    OMNI_EXPECTED_VERDICT_KEYS,
+    OMNI_PUBLIC_STREAM_KEYS,
+    OMNI_SPEC,
+    generate_omni_events,
+)
 from pzr.rtlola.robot_arm import (
-    ARM_EXPECTED_VERDICT_KEYS,
     ARM_PUBLIC_STREAM_KEYS,
     ARM_SPEC,
+    ARM_TRIGGER_KEYS,
     DEFAULT_TRACE_KIND,
     generate_robot_arm_events,
 )
+from pzr.rtlola.search import RtlolaNoFeasibleAction
 
 
 def _bounds(matrix):
@@ -29,15 +41,19 @@ def _bounds(matrix):
     return center - radius, center + radius
 
 
-def test_latest_binding_actions_are_exposed_but_not_mpc_candidates():
+def test_latest_binding_actions_and_mpc_candidates():
     catalog = default_action_catalog()
 
+    assert rlola.BUILD_PROFILE == BINDING_BUILD_PROFILE
+    assert rlola.INTERPRETER_REVISION == INTERPRETER_REVISION
     assert {"clustering", "combastel"} <= set(catalog.by_name)
     assert catalog.mpc_candidate_names == (
         "girard",
         "scott",
         "interval_hull",
         "pca",
+        "combastel",
+        "clustering",
     )
     assert "none" not in catalog.mpc_candidate_names
     assert "interval" not in catalog.mpc_candidate_names
@@ -134,8 +150,8 @@ def test_robot_arm_preserves_five_constant_calibration_generators():
     events = generate_robot_arm_events(7, trace_kind=DEFAULT_TRACE_KIND)
     engine = RtlolaEngine(
         ARM_SPEC,
-        event_arity=6,
-        expected_verdict_keys=(*ARM_EXPECTED_VERDICT_KEYS, *ARM_PUBLIC_STREAM_KEYS),
+        event_arity=9,
+        expected_verdict_keys=ARM_PUBLIC_STREAM_KEYS,
     )
     for step, event in enumerate(events[:5]):
         engine.live_step(event, catalog.no_op, budget=240, step=step + 1)
@@ -159,13 +175,55 @@ def test_robot_arm_preserves_five_constant_calibration_generators():
     )
 
 
+@pytest.mark.parametrize(
+    "action_name",
+    [
+        "girard",
+        "scott",
+        "interval_hull",
+        "pca",
+        "althoff_a",
+        "clustering",
+        "combastel",
+        "colinear_scale",
+    ],
+)
+def test_omni_preserves_constant_calibration_generator(action_name):
+    catalog = default_action_catalog()
+    events = generate_omni_events(14, seed=5)
+    engine = RtlolaEngine(
+        OMNI_SPEC,
+        event_arity=3,
+        expected_verdict_keys=(
+            *OMNI_EXPECTED_VERDICT_KEYS,
+            *OMNI_PUBLIC_STREAM_KEYS,
+        ),
+    )
+    for step, event in enumerate(events[:12]):
+        engine.live_step(event, catalog.no_op, budget=20, step=step + 1)
+    state = engine.snapshot(step=12, time=events[11].time)
+    exact = engine.branch_step(state, events[12], catalog.no_op, budget=10)
+    reduced = engine.branch_step(
+        state,
+        events[12],
+        catalog.by_name[action_name],
+        budget=10,
+    )
+
+    exact_dynamic, exact_total = engine.matrices(exact.state)
+    reduced_dynamic, reduced_total = engine.matrices(reduced.state)
+    assert exact_total.shape[1] - exact_dynamic.shape[1] == 1
+    assert reduced_total.shape[1] - reduced_dynamic.shape[1] == 1
+    np.testing.assert_allclose(exact_total[:, -1], reduced_total[:, -1], atol=1e-12)
+
+
 def test_transform_bound_is_not_a_post_event_dense_cap():
     catalog = default_action_catalog()
     events = generate_robot_arm_events(6, trace_kind=DEFAULT_TRACE_KIND)
     engine = RtlolaEngine(
         ARM_SPEC,
-        event_arity=6,
-        expected_verdict_keys=(*ARM_EXPECTED_VERDICT_KEYS, *ARM_PUBLIC_STREAM_KEYS),
+        event_arity=9,
+        expected_verdict_keys=ARM_PUBLIC_STREAM_KEYS,
     )
     for step, event in enumerate(events[:4]):
         engine.live_step(event, catalog.no_op, budget=200, step=step + 1)
@@ -175,6 +233,27 @@ def test_transform_bound_is_not_a_post_event_dense_cap():
     committed = engine.live_step(events[4], catalog.no_op, budget=160, step=5)
 
     assert committed.metrics.dynamic_generator_count > 160
+
+
+def test_omni_transform_bound_is_not_a_post_event_dense_cap():
+    catalog = default_action_catalog()
+    events = generate_omni_events(8, seed=2)
+    engine = RtlolaEngine(
+        OMNI_SPEC,
+        event_arity=3,
+        expected_verdict_keys=(
+            *OMNI_EXPECTED_VERDICT_KEYS,
+            *OMNI_PUBLIC_STREAM_KEYS,
+        ),
+    )
+    for step, event in enumerate(events[:5]):
+        engine.live_step(event, catalog.no_op, budget=8, step=step + 1)
+    state = engine.snapshot(step=5, time=events[4].time)
+    assert engine.metrics(state).dynamic_generator_count <= 5
+
+    committed = engine.live_step(events[5], catalog.no_op, budget=5, step=6)
+
+    assert committed.metrics.dynamic_generator_count > 5
 
 
 def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
@@ -192,6 +271,7 @@ def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
     assert (scenario_dir / "timeseries.csv").stat().st_size > 0
     assert (scenario_dir / "summary.csv").stat().st_size > 0
     assert (scenario_dir / "aggregate.csv").stat().st_size > 0
+    assert (scenario_dir / "run_failures.csv").stat().st_size > 0
     assert "post_event_over_bound" in result.timeseries
     assert "active_dynamic_generator_count" in result.timeseries
     assert "zero_dynamic_generator_count" in result.timeseries
@@ -199,13 +279,105 @@ def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
     assert result.config.mpc_objective == "terminal_binding_approx_loss"
     config_text = (tmp_path / "config.yaml").read_text()
     assert "mpc_objective: terminal_binding_approx_loss" in config_text
+    assert "source_revision: f587a0ecb783dbc88f2feb6621c5278a10cf781d" in config_text
+    assert "interpreter_revision: a143dd6a1500d54c1eabe9e83e5b54271734d6b2" in config_text
+    assert "binding_build_profile: release" in config_text
+
+
+def test_robot_arm_mpc_uses_binding_terminal_loss():
+    result = run_benchmark(RtlolaBenchmarkConfig(
+        scenario="robot_arm",
+        trace_kind=DEFAULT_TRACE_KIND,
+        length=8,
+        seeds=1,
+        budget=40,
+        horizon=2,
+        beam_width=2,
+        methods=["mpc_beam"],
+        reference_mode="exact",
+    ))
+
+    assert not result.timeseries.empty
+    assert np.isfinite(result.timeseries["predicted_cost"]).all()
+    assert np.isfinite(result.timeseries["approx_loss"]).all()
+    assert result.config.mpc_objective == "terminal_binding_approx_loss"
+    assert not any(column.endswith(("_lower", "_upper")) for column in result.timeseries)
+
+
+def test_robot_arm_sparse_trigger_outputs_are_normalized():
+    events = generate_robot_arm_events(3, trace_kind="random_violated")
+    monitor = rlola.RLolaMonitor(ARM_SPEC)
+    verdicts = [
+        monitor.accept_event(
+            list(event.values),
+            event.time,
+            rlola.ZonotopeConfig.none(),
+        )
+        for event in events
+    ]
+
+    assert not any(key in verdicts[0] for key in ARM_TRIGGER_KEYS)
+    assert not any(key in verdicts[1] for key in ARM_TRIGGER_KEYS)
+    assert verdicts[2]["Trigger#4"] == "Cannot stop before -Y boundary"
+
+    result = run_benchmark(RtlolaBenchmarkConfig(
+        scenario="robot_arm",
+        trace_kind="random_violated",
+        length=3,
+        seeds=1,
+        budget=80,
+        methods=["none"],
+        reference_mode="verdict",
+    ))
+    assert result.timeseries["Trigger#4"].tolist() == [False, False, True]
+    assert result.timeseries["exact_Trigger#4"].tolist() == [False, False, True]
+
+
+@pytest.mark.parametrize(
+    ("trace_kind", "expected_key"),
+    [
+        ("safe", None),
+        ("x_violated", "position_x_above_geofence"),
+        ("y_violated", "position_y_above_geofence"),
+    ],
+)
+def test_balanced_omni_trace_exact_trigger_calibration(trace_kind, expected_key):
+    for seed in range(10):
+        monitor = rlola.RLolaMonitor(OMNI_SPEC)
+        counts = {key: 0 for key in OMNI_EXPECTED_VERDICT_KEYS}
+        first_positive = None
+        for step, event in enumerate(
+            generate_omni_events(250, seed=seed, trace_kind=trace_kind)
+        ):
+            verdict = monitor.accept_event(
+                list(event.values),
+                event.time,
+                rlola.ZonotopeConfig.none(),
+            )
+            positive = False
+            for key in counts:
+                value = bool(verdict[key])
+                counts[key] += int(value)
+                positive = positive or value
+            if positive and first_positive is None:
+                first_positive = step
+
+        if expected_key is None:
+            assert counts == {key: 0 for key in OMNI_EXPECTED_VERDICT_KEYS}
+            assert first_positive is None
+        else:
+            other = next(key for key in counts if key != expected_key)
+            assert 90 <= counts[expected_key] <= 95
+            assert counts[other] == 0
+            assert first_positive is not None
+            assert 155 <= first_positive <= 160
 
 
 def test_verdict_reference_is_cached_and_raw_symbolic_values_are_not_saved(tmp_path):
     cache = tmp_path / "reference.json"
     config = RtlolaBenchmarkConfig(
         scenario="robot_arm",
-        trace_kind=DEFAULT_TRACE_KIND,
+        trace_kind="random_violated",
         length=4,
         seeds=1,
         budget=80,
@@ -220,6 +392,8 @@ def test_verdict_reference_is_cached_and_raw_symbolic_values_are_not_saved(tmp_p
     assert cache.stat().st_size > 0
     cached = json.loads(cache.read_text())
     assert cached["metadata"]["trace_sha256"]
+    assert cached["metadata"]["interpreter_revision"] == INTERPRETER_REVISION
+    assert cached["metadata"]["binding_build_profile"] == BINDING_BUILD_PROFILE
     assert all(
         isinstance(value, bool)
         for row in cached["steps"]
@@ -233,12 +407,59 @@ def test_verdict_reference_is_cached_and_raw_symbolic_values_are_not_saved(tmp_p
             first.summary.loc[0, "false_positive_count"] / negative_count,
         )
     assert "exact_trigger_positive" in first.timeseries
-    assert "exact_tpl_exceeded" in first.timeseries
-    assert "tpl" not in first.timeseries
-    assert "tpl_lower" in first.timeseries
+    assert "exact_Trigger#4" in first.timeseries
+    assert "dist_to_expected" not in first.timeseries
+    assert "dist_to_expected_lower" not in first.timeseries
     assert second.timeseries["exact_trigger_positive"].equals(
         first.timeseries["exact_trigger_positive"],
     )
 
     with pytest.raises(ValueError, match="metadata mismatch"):
         run_benchmark(replace(config, length=3))
+
+
+def test_failed_static_run_is_recorded_and_other_methods_continue(monkeypatch, tmp_path):
+    original = benchmark_module.choose_static_action
+
+    def fail_scott(engine, state, event, action, budget, **kwargs):
+        if action.name == "scott":
+            raise RtlolaNoFeasibleAction("synthetic reducer exhaustion")
+        return original(engine, state, event, action, budget, **kwargs)
+
+    monkeypatch.setattr(benchmark_module, "choose_static_action", fail_scott)
+    result = run_benchmark(RtlolaBenchmarkConfig(
+        scenario="robot_arm",
+        length=3,
+        seeds=1,
+        budget=40,
+        methods=["girard", "scott"],
+        reference_mode="off",
+    ))
+    save_benchmark_results(result, tmp_path)
+
+    assert set(result.timeseries["method"]) == {"girard"}
+    assert set(result.summary["method"]) == {"girard"}
+    assert len(result.failures) == 1
+    assert result.failures[0].method == "scott"
+    failures = (tmp_path / "robot_arm" / "run_failures.csv").read_text()
+    assert "synthetic reducer exhaustion" in failures
+
+    failed_only = run_benchmark(RtlolaBenchmarkConfig(
+        scenario="robot_arm",
+        length=3,
+        seeds=1,
+        budget=40,
+        methods=["scott"],
+        reference_mode="off",
+    ))
+    failed_dir = tmp_path / "failed_only"
+    save_benchmark_results(failed_only, failed_dir)
+    assert failed_only.timeseries.empty
+    assert failed_only.summary.empty
+    assert failed_only.aggregate.empty
+    assert list(pd.read_csv(failed_dir / "robot_arm" / "timeseries.csv")) == [
+        "seed",
+        "method",
+        "budget",
+        "trace_kind",
+    ]

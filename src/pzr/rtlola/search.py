@@ -6,9 +6,19 @@ from dataclasses import dataclass
 from typing import Callable, Sequence
 
 from pzr.rtlola.actions import RtlolaAction
-from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef, RtlolaStepResult
+from pzr.rtlola.engine import (
+    RtlolaBindingError,
+    RtlolaEngine,
+    RtlolaEvent,
+    RtlolaStateRef,
+    RtlolaStepResult,
+)
 
 CostFunction = Callable[[RtlolaEngine, RtlolaStepResult], float]
+
+
+class RtlolaNoFeasibleAction(RuntimeError):
+    """No binding transform could produce a sound successor state."""
 
 
 @dataclass(frozen=True)
@@ -76,7 +86,7 @@ def choose_static_action(
         selected_budget = budget
         fallback_used = result is not None
     if result is None:
-        raise ValueError(
+        raise RtlolaNoFeasibleAction(
             f"no static RTLola action ran with bound={budget}; "
             f"tried {action.name} and fallback {fallback.name}"
         )
@@ -155,7 +165,11 @@ def beam_search(
             first_step=step,
             rollout_state=step.state,
             predicted_cost=_score_step(
-                engine, step, cost, reference_states=reference_states, depth=0,
+                engine,
+                step,
+                cost,
+                reference_states=reference_states,
+                depth=0,
             ),
             predicted_sequence=(action.name,),
         ))
@@ -171,13 +185,19 @@ def beam_search(
                 first_step=step,
                 rollout_state=step.state,
                 predicted_cost=_score_step(
-                    engine, step, cost, reference_states=reference_states, depth=0,
+                    engine,
+                    step,
+                    cost,
+                    reference_states=reference_states,
+                    depth=0,
                 ),
                 predicted_sequence=(fallback.name,),
             ))
 
     if not beam:
-        raise ValueError(f"no RTLola first action ran with bound={budget}")
+        raise RtlolaNoFeasibleAction(
+            f"no RTLola first action ran with bound={budget}"
+        )
 
     beam.sort(key=_sort_key)
     pruned = max(0, len(beam) - beam_width)
@@ -238,18 +258,20 @@ def beam_search(
                         first_step=item.first_step,
                         rollout_state=step.state,
                         predicted_cost=_score_step(
-                            engine,
-                            step,
-                            cost,
-                            reference_states=reference_states,
-                            depth=depth,
+                        engine,
+                        step,
+                        cost,
+                        reference_states=reference_states,
+                        depth=depth,
                         ),
                         predicted_sequence=(*item.predicted_sequence, fallback.name),
                     ))
             expanded.extend(children)
 
         if not expanded:
-            raise ValueError(f"no RTLola branch ran with bound={budget}")
+            raise RtlolaNoFeasibleAction(
+                f"no RTLola branch ran with bound={budget}"
+            )
         expanded.sort(key=_sort_key)
         pruned += max(0, len(expanded) - beam_width)
         beam = expanded[:beam_width]
@@ -281,7 +303,7 @@ def _try_action(
     config_budget = action_budget if action.explicit_budget else max(0, action_budget)
     try:
         return engine.branch_step(state, event, action, config_budget)
-    except RuntimeError:
+    except RtlolaBindingError:
         return None
 
 

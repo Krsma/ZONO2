@@ -16,10 +16,15 @@
 - Binding-native terminal approximation-loss objective.
 - No no-op or fallback action in MPC/learning candidate catalogs.
 - Constant robot-arm calibration columns preserved across dynamic transforms.
-- RTLola public outputs are the trigger source of truth.
+- Sparse RTLola `Trigger#N` verdict entries are the trigger source of truth.
+- Robot-arm assets are pinned to RLolaEval commit `f587a0e`.
 
 ## Known External Risk
 
 The pinned binding’s clustering dependency currently needs
 `RUSTC_BOOTSTRAP=kmeans` under stable Rust. This is scoped in setup tooling and
 must be removed when upstream fixes the dependency.
+
+Some bounded transforms can fail on long robot-arm states. Candidate failures
+are infeasible choices; a run with no feasible transform is recorded in
+`run_failures.csv` and excluded from aggregate metrics.

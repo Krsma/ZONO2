@@ -3,23 +3,27 @@ set -u
 set -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-arm-big-a143dd6-f587a0e-release}"
+OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-omni-a143dd6-release}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
-LENGTH_OVERRIDE="${PZR_LENGTH:-}"
-BUDGETS="${PZR_BUDGETS:-40,80,120,180}"
-EVAL_TRACES="${PZR_EVAL_TRACES:-figure8,figure8_drift,random,random_violated,square,square_drift}"
-TRAIN_TRACES="${PZR_TRAIN_TRACES:-figure8,random,square}"
+LENGTH="${PZR_LENGTH:-250}"
+BUDGETS="${PZR_BUDGETS:-8,12,16,20}"
+TRACES="${PZR_TRACES:-canonical,safe,x_violated,y_violated}"
 METHODS="${PZR_METHODS:-girard,scott,interval_hull,pca,combastel,mpc_beam}"
 HORIZON="${PZR_HORIZON:-4}"
+HORIZON_SCAN="${PZR_HORIZON_SCAN:-1,2,4,8}"
+HORIZON_BUDGET="${PZR_HORIZON_BUDGET:-8}"
 BEAM_WIDTH="${PZR_BEAM_WIDTH:-4}"
-SEEDS="${PZR_SEEDS:-1}"
+SEEDS="${PZR_SEEDS:-10}"
 REGRET_ITERATIONS="${PZR_REGRET_ITERATIONS:-1}"
 REGRET_EPOCHS="${PZR_REGRET_EPOCHS:-50}"
-REGRET_TRAIN_SEEDS="${PZR_REGRET_TRAIN_SEEDS:-1}"
-REGRET_EVAL_SEEDS="${PZR_REGRET_EVAL_SEEDS:-1}"
-MAX_SECONDS="${PZR_MAX_SECONDS:-86400}"
-SKIP_LEARNING="${PZR_SKIP_LEARNING:-1}"
+REGRET_TRAIN_SEEDS="${PZR_REGRET_TRAIN_SEEDS:-10}"
+REGRET_EVAL_SEEDS="${PZR_REGRET_EVAL_SEEDS:-10}"
+REGRET_TRAIN_SEED_START="${PZR_REGRET_TRAIN_SEED_START:-10000}"
+REGRET_EVAL_SEED_START="${PZR_REGRET_EVAL_SEED_START:-0}"
+MAX_SECONDS="${PZR_MAX_SECONDS:-43200}"
+SKIP_HORIZON="${PZR_SKIP_HORIZON:-0}"
+SKIP_LEARNING="${PZR_SKIP_LEARNING:-0}"
 START_SECONDS="$(date +%s)"
 
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
@@ -32,7 +36,7 @@ if [[ -f "$ENV_PREFIX/lib/libopenblas.so" ]]; then
     export LD_PRELOAD="$ENV_PREFIX/lib/libopenblas.so${LD_PRELOAD:+:$LD_PRELOAD}"
 fi
 
-mkdir -p "$OUT_DIR/logs" "$OUT_DIR/references" "$OUT_DIR/runs"
+mkdir -p "$OUT_DIR/logs" "$OUT_DIR/runs"
 
 RUN_PROVENANCE="$(
     "$PYTHON" -c '
@@ -45,7 +49,7 @@ from pzr.rtlola.binding import (
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.scenarios import scenario_by_name
 
-scenario = scenario_by_name("robot_arm")
+scenario = scenario_by_name("omni_robot")
 mpc_candidates = ",".join(default_action_catalog().mpc_candidate_names)
 print(
     ";".join(
@@ -65,26 +69,11 @@ if [[ -z "$RUN_PROVENANCE" ]]; then
     echo "failed to determine RTLola run provenance" >&2
     exit 1
 fi
-REFERENCE_NAMESPACE="$(printf '%s' "$RUN_PROVENANCE" | sha256sum | cut -c1-16)"
 
 remaining_seconds() {
     local elapsed
     elapsed=$(( $(date +%s) - START_SECONDS ))
     echo $(( MAX_SECONDS - elapsed ))
-}
-
-trace_length_for() {
-    local trace_kind="$1"
-    if [[ -n "$LENGTH_OVERRIDE" ]]; then
-        printf '%s\n' "$LENGTH_OVERRIDE"
-        return
-    fi
-    "$PYTHON" -c '
-import sys
-from pzr.rtlola.robot_arm import ROBOT_ARM_TRACE_ROWS
-
-print(ROBOT_ARM_TRACE_ROWS[sys.argv[1]])
-' "$trace_kind"
 }
 
 run_stage() {
@@ -125,68 +114,84 @@ run_stage() {
 }
 
 IFS=',' read -r -a budget_values <<< "$BUDGETS"
-IFS=',' read -r -a eval_trace_values <<< "$EVAL_TRACES"
-declare -A trace_lengths
-for trace_kind in "${eval_trace_values[@]}"; do
-    if ! trace_length="$(trace_length_for "$trace_kind")"; then
-        echo "failed to resolve packaged length for trace: $trace_kind" >&2
-        exit 1
-    fi
-    if [[ ! "$trace_length" =~ ^[1-9][0-9]*$ ]]; then
-        echo "invalid length for trace $trace_kind: $trace_length" >&2
-        exit 1
-    fi
-    trace_lengths["$trace_kind"]="$trace_length"
-done
+IFS=',' read -r -a trace_values <<< "$TRACES"
+IFS=',' read -r -a horizon_values <<< "$HORIZON_SCAN"
 
-for trace_kind in "${eval_trace_values[@]}"; do
-    trace_length="${trace_lengths[$trace_kind]}"
+for trace_kind in "${trace_values[@]}"; do
     for budget in "${budget_values[@]}"; do
-        stage="${trace_kind}_budget_${budget}"
+        stage="primary_${trace_kind}_budget_${budget}"
         cell_dir="$OUT_DIR/runs/$trace_kind/budget_$budget"
         run_stage "$stage" "$PYTHON" -m pzr.rtlola.cli \
             --profile paper \
-            --scenario robot_arm \
+            --scenario omni_robot \
             --trace-kind "$trace_kind" \
-            --length "$trace_length" \
+            --length "$LENGTH" \
             --seeds "$SEEDS" \
             --budget "$budget" \
             --horizon "$HORIZON" \
             --beam-width "$BEAM_WIDTH" \
             --methods "$METHODS" \
-            --reference-mode verdict \
-            --reference-cache "$OUT_DIR/references/${trace_kind}.seed_0.${REFERENCE_NAMESPACE}.json" \
+            --reference-mode exact \
             --no-progress \
             --output "$cell_dir" || exit $?
     done
 done
 
+if [[ "$SKIP_HORIZON" != "1" ]]; then
+    for horizon in "${horizon_values[@]}"; do
+        horizon_root="$OUT_DIR/horizon_scan/h$horizon"
+        for trace_kind in "${trace_values[@]}"; do
+            stage="horizon_${horizon}_${trace_kind}_budget_${HORIZON_BUDGET}"
+            cell_dir="$horizon_root/runs/$trace_kind/budget_$HORIZON_BUDGET"
+            run_stage "$stage" "$PYTHON" -m pzr.rtlola.cli \
+                --profile paper \
+                --scenario omni_robot \
+                --trace-kind "$trace_kind" \
+                --length "$LENGTH" \
+                --seeds "$SEEDS" \
+                --budget "$HORIZON_BUDGET" \
+                --horizon "$horizon" \
+                --beam-width "$BEAM_WIDTH" \
+                --methods mpc_beam \
+                --reference-mode exact \
+                --no-progress \
+                --output "$cell_dir" || exit $?
+        done
+        "$PYTHON" -m pzr.rtlola.sweep_report \
+            --root "$horizon_root" \
+            --scenario omni_robot
+    done
+fi
+
 if [[ "$SKIP_LEARNING" != "1" ]]; then
     first_budget="${budget_values[0]}"
-    first_trace="${eval_trace_values[0]}"
-    run_stage "pooled_learning" "$PYTHON" -m pzr.rtlola.cli \
+    first_trace="${trace_values[0]}"
+    run_stage "native_pooled_learning" "$PYTHON" -m pzr.rtlola.cli \
         --profile paper \
-        --scenario robot_arm \
+        --scenario omni_robot \
         --trace-kind "$first_trace" \
-        --length "${trace_lengths[$first_trace]}" \
+        --length "$LENGTH" \
         --seeds 1 \
         --budget "$first_budget" \
         --horizon "$HORIZON" \
         --beam-width "$BEAM_WIDTH" \
         --methods girard \
-        --reference-mode verdict \
-        --reference-cache "$OUT_DIR/references/${first_trace}.seed_0.${REFERENCE_NAMESPACE}.json" \
+        --reference-mode exact \
         --learned-mode regret \
         --regret-iterations "$REGRET_ITERATIONS" \
         --regret-epochs "$REGRET_EPOCHS" \
         --regret-train-seeds "$REGRET_TRAIN_SEEDS" \
         --regret-eval-seeds "$REGRET_EVAL_SEEDS" \
+        --regret-train-seed-start "$REGRET_TRAIN_SEED_START" \
+        --regret-eval-seed-start "$REGRET_EVAL_SEED_START" \
         --regret-budgets "$BUDGETS" \
-        --regret-train-traces "$TRAIN_TRACES" \
-        --regret-eval-traces "$EVAL_TRACES" \
+        --regret-train-traces "$TRACES" \
+        --regret-eval-traces "$TRACES" \
         --no-progress \
         --output "$OUT_DIR/learning_stage" || exit $?
 fi
 
-"$PYTHON" -m pzr.rtlola.sweep_report --root "$OUT_DIR"
-echo "RTLola FPR overnight sweep complete: $OUT_DIR"
+"$PYTHON" -m pzr.rtlola.sweep_report \
+    --root "$OUT_DIR" \
+    --scenario omni_robot
+echo "RTLola Omni fidelity pilot complete: $OUT_DIR"

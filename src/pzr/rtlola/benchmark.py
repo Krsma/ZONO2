@@ -6,7 +6,6 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 import json
 from pathlib import Path
-import re
 import time
 from typing import Sequence
 
@@ -19,16 +18,26 @@ from pzr.rtlola.actions import (
     RtlolaAction,
     default_action_catalog,
 )
-from pzr.rtlola.binding import BINDING_REVISION
-from pzr.rtlola.binding import require_binding
+from pzr.rtlola.binding import (
+    BINDING_BUILD_PROFILE,
+    BINDING_REVISION,
+    INTERPRETER_REVISION,
+    require_binding,
+)
 from pzr.rtlola.engine import (
+    RtlolaBindingError,
     RtlolaEngine,
     RtlolaEvent,
     RtlolaStateRef,
     RtlolaStepResult,
 )
 from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
-from pzr.rtlola.search import RtlolaSearchResult, beam_search, choose_static_action
+from pzr.rtlola.search import (
+    RtlolaNoFeasibleAction,
+    RtlolaSearchResult,
+    beam_search,
+    choose_static_action,
+)
 
 
 CORE_STATIC_METHODS = ("none", "girard", "scott", "interval_hull", "pca")
@@ -46,6 +55,7 @@ STATIC_METHODS = (
 MPC_METHODS = ("mpc_beam",)
 ALL_METHODS = (*STATIC_METHODS, *MPC_METHODS)
 CORE_METHODS = (*CORE_STATIC_METHODS, *MPC_METHODS)
+TERMINAL_BINDING_APPROX_LOSS = "terminal_binding_approx_loss"
 RTLOLA_AGGREGATE_METRICS = [
     "mean_state_zonotope_width",
     "max_state_zonotope_width",
@@ -94,15 +104,19 @@ class RtlolaBenchmarkConfig:
     regret_epochs: int = 100
     regret_train_seeds: int | None = None
     regret_eval_seeds: int | None = None
+    regret_train_seed_start: int = 10_000
+    regret_eval_seed_start: int = 0
     regret_loss: str = "pairwise"
     regret_budgets: list[int] | None = None
     regret_train_trace_kinds: list[str] | None = None
     regret_eval_trace_kinds: list[str] | None = None
     mpc_objective: str = field(
         init=False,
-        default="terminal_binding_approx_loss",
+        default=TERMINAL_BINDING_APPROX_LOSS,
     )
     binding_revision: str = field(init=False, default=BINDING_REVISION)
+    interpreter_revision: str = field(init=False, default=INTERPRETER_REVISION)
+    binding_build_profile: str = field(init=False, default=BINDING_BUILD_PROFILE)
     mpc_candidate_names: list[str] = field(
         init=False,
         default_factory=lambda: list(MPC_ACTION_NAMES),
@@ -133,7 +147,6 @@ class RtlolaStepRecord:
     exact_trigger_positive: bool | float
     trigger_verdicts: dict[str, bool]
     exact_trigger_verdicts: dict[str, bool]
-    public_bounds: dict[str, tuple[float, float]]
     decision_time_ms: float
     binding_runtime_ns: float
     predicted_cost: float = 0.0
@@ -156,7 +169,6 @@ class RtlolaGroundTruthStep:
     state: RtlolaStateRef
     width_sum: float
     verdicts: dict[str, object]
-    public_bounds: dict[str, tuple[float, float]]
 
 
 @dataclass(frozen=True)
@@ -182,6 +194,21 @@ class RtlolaRunResult:
     def total_time_ms(self) -> float:
         return float(sum(step.decision_time_ms for step in self.steps))
 
+
+@dataclass(frozen=True)
+class RtlolaRunFailure:
+    scenario: str
+    trace_kind: str
+    method: str
+    seed: int
+    budget: int
+    step: int
+    time: float
+    phase: str
+    failure_type: str
+    message: str
+
+
 @dataclass
 class RtlolaBenchmarkResult:
     config: RtlolaBenchmarkConfig
@@ -189,6 +216,7 @@ class RtlolaBenchmarkResult:
     timeseries: pd.DataFrame
     summary: pd.DataFrame
     aggregate: pd.DataFrame
+    failures: tuple[RtlolaRunFailure, ...] = ()
 
 
 def methods_for_config(config: RtlolaBenchmarkConfig) -> tuple[str, ...]:
@@ -246,6 +274,8 @@ def aggregate_summary(
     metric_columns: Sequence[str] = RTLOLA_AGGREGATE_METRICS,
 ) -> pd.DataFrame:
     """Aggregate seed-level RTLola metrics by method and experiment cell."""
+    if summary.empty:
+        return pd.DataFrame()
     rows: list[dict[str, object]] = []
     group_columns = [
         column for column in ("method", "budget", "trace_kind")
@@ -284,8 +314,14 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
     fallback = catalog.fallback
     mpc_candidates = catalog.mpc_candidates
     raw: list[RtlolaRunResult] = []
+    failures: list[RtlolaRunFailure] = []
     for seed in range(config.seeds):
-        trace = scenario.generate_events(config.length, seed, trace_kind=config.trace_kind)
+        generated = scenario.generate_trace(
+            config.length,
+            seed,
+            trace_kind=config.trace_kind,
+        )
+        trace = generated.events
         ground_truth = (
             compute_ground_truth(trace, scenario=scenario)
             if config.reference_mode == "exact" else None
@@ -303,7 +339,7 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
                 load_or_compute_trigger_reference(
                     trace,
                     scenario=scenario,
-                    trace_kind=config.trace_kind,
+                    trace_kind=generated.trace_kind,
                     seed=seed,
                     cache_path=_reference_cache_path(config.reference_cache, seed, config.seeds),
                 )
@@ -311,7 +347,7 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
             )
         )
         for method in methods_for_config(config):
-            raw.append(_run_single(
+            outcome = _run_single(
                 config,
                 scenario,
                 trace,
@@ -320,18 +356,36 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
                 by_name,
                 fallback,
                 seed,
+                generated.trace_kind,
                 ground_truth,
                 trigger_reference,
-            ))
+            )
+            if isinstance(outcome, RtlolaRunFailure):
+                failures.append(outcome)
+            else:
+                raw.append(outcome)
     timeseries = results_to_dataframe(raw)
     summary = summarize_results(raw)
-    aggregate = aggregate_summary(summary, metric_columns=RTLOLA_AGGREGATE_METRICS)
+    aggregate = aggregate_summary(summary)
+    if timeseries.empty:
+        timeseries = pd.DataFrame(
+            columns=("seed", "method", "budget", "trace_kind"),
+        )
+    if summary.empty:
+        summary = pd.DataFrame(
+            columns=("method", "seed", "budget", "trace_kind"),
+        )
+    if aggregate.empty:
+        aggregate = pd.DataFrame(
+            columns=("method", "budget", "trace_kind"),
+        )
     return RtlolaBenchmarkResult(
         config=config,
         raw_results=tuple(raw),
         timeseries=timeseries,
         summary=summary,
         aggregate=aggregate,
+        failures=tuple(failures),
     )
 
 
@@ -344,86 +398,164 @@ def _run_single(
     by_name: dict[str, RtlolaAction],
     fallback: RtlolaAction,
     seed: int,
+    trace_kind: str,
     ground_truth: Sequence[RtlolaGroundTruthStep] | None,
     trigger_reference: Sequence[RtlolaTriggerReferenceStep] | None,
-) -> RtlolaRunResult:
+) -> RtlolaRunResult | RtlolaRunFailure:
     engine = RtlolaEngine(
         scenario.spec,
         event_arity=scenario.event_arity,
-        expected_verdict_keys=(*scenario.expected_verdict_keys, *scenario.public_stream_keys),
+        expected_verdict_keys=scenario.expected_verdict_keys,
     )
     steps: list[RtlolaStepRecord] = []
     for index, event in enumerate(trace):
         state = engine.snapshot(step=index, time=event.time)
-        pre_metrics = engine.metrics(state)
+        try:
+            pre_metrics = engine.metrics(state)
+        except RtlolaBindingError as exc:
+            return _run_failure(
+                config,
+                scenario,
+                trace_kind,
+                method,
+                seed,
+                index,
+                event,
+                "inspect",
+                exc,
+            )
         future = tuple(trace[index + 1:index + 1 + config.horizon])
         start = time.perf_counter()
-        if method == "none":
-            first = by_name["none"]
-            first_step = engine.branch_step(state, event, first, config.budget)
-            decision = RtlolaSearchResult(
-                first_action=first,
-                first_action_budget=config.budget,
-                first_step=first_step,
-                predicted_cost=first_step.metrics.cost(),
-                predicted_sequence=("none",),
-                evaluated_leaves=1,
-                pruned_branches=0,
-            )
-        elif method == "mpc_beam":
-            decision = beam_search(
-                engine,
-                state,
+        try:
+            if method == "none":
+                first = by_name["none"]
+                first_step = engine.branch_step(state, event, first, config.budget)
+                decision = RtlolaSearchResult(
+                    first_action=first,
+                    first_action_budget=config.budget,
+                    first_step=first_step,
+                    predicted_cost=first_step.metrics.cost(),
+                    predicted_sequence=("none",),
+                    evaluated_leaves=1,
+                    pruned_branches=0,
+                )
+            elif method == "mpc_beam":
+                decision = beam_search(
+                    engine,
+                    state,
+                    event,
+                    future,
+                    mpc_candidates,
+                    config.budget,
+                    config.beam_width,
+                    fallback=fallback,
+                    none_action=by_name["none"],
+                    use_reference_loss=True,
+                )
+            else:
+                decision = choose_static_action(
+                    engine,
+                    state,
+                    event,
+                    by_name[method],
+                    config.budget,
+                    fallback=fallback,
+                    none_action=by_name["none"],
+                )
+        except (RtlolaBindingError, RtlolaNoFeasibleAction) as exc:
+            return _run_failure(
+                config,
+                scenario,
+                trace_kind,
+                method,
+                seed,
+                index,
                 event,
-                future,
-                mpc_candidates,
-                config.budget,
-                config.beam_width,
-                fallback=fallback,
-                none_action=by_name["none"],
-                use_reference_loss=True,
-            )
-        else:
-            decision = choose_static_action(
-                engine,
-                state,
-                event,
-                by_name[method],
-                config.budget,
-                fallback=fallback,
-                none_action=by_name["none"],
+                "select",
+                exc,
             )
 
-        committed = engine.live_step(
-            event,
-            decision.first_action,
-            decision.first_action_budget,
-            step=index + 1,
-        )
+        try:
+            committed = engine.live_step(
+                event,
+                decision.first_action,
+                decision.first_action_budget,
+                step=index + 1,
+            )
+        except RtlolaBindingError as exc:
+            return _run_failure(
+                config,
+                scenario,
+                trace_kind,
+                method,
+                seed,
+                index,
+                event,
+                "commit",
+                exc,
+            )
         elapsed_ms = (time.perf_counter() - start) * 1000.0
-        steps.append(make_step_record(
-            engine=engine,
-            scenario=scenario,
-            seed=seed,
-            method=method,
-            step=index,
-            budget=config.budget,
-            pre_generator_count=pre_metrics.dynamic_generator_count,
-            committed=committed,
-            decision=decision,
-            decision_time_ms=elapsed_ms,
-            ground_truth=ground_truth[index] if ground_truth is not None else None,
-            trigger_reference=(
-                trigger_reference[index]
-                if trigger_reference is not None else None
-            ),
-        ))
+        try:
+            steps.append(make_step_record(
+                engine=engine,
+                scenario=scenario,
+                seed=seed,
+                method=method,
+                step=index,
+                budget=config.budget,
+                pre_generator_count=pre_metrics.dynamic_generator_count,
+                committed=committed,
+                decision=decision,
+                decision_time_ms=elapsed_ms,
+                ground_truth=ground_truth[index] if ground_truth is not None else None,
+                trigger_reference=(
+                    trigger_reference[index]
+                    if trigger_reference is not None else None
+                ),
+            ))
+        except RtlolaBindingError as exc:
+            return _run_failure(
+                config,
+                scenario,
+                trace_kind,
+                method,
+                seed,
+                index,
+                event,
+                "measure",
+                exc,
+            )
     return RtlolaRunResult(
         method=method,
         seed=seed,
         steps=tuple(steps),
         budget=config.budget,
-        trace_kind=config.trace_kind,
+        trace_kind=trace_kind,
+    )
+
+
+def _run_failure(
+    config: RtlolaBenchmarkConfig,
+    scenario: RtlolaScenario,
+    trace_kind: str,
+    method: str,
+    seed: int,
+    step: int,
+    event: RtlolaEvent,
+    phase: str,
+    error: Exception,
+) -> RtlolaRunFailure:
+    return RtlolaRunFailure(
+        scenario=scenario.name,
+        trace_kind=trace_kind,
+        method=method,
+        seed=seed,
+        budget=config.budget,
+        step=step,
+        time=event.time,
+        phase=phase,
+        failure_type=type(error).__name__,
+        message=str(error),
     )
 
 
@@ -502,7 +634,6 @@ def make_step_record(
         exact_trigger_positive=exact_positive,
         trigger_verdicts=predicted_triggers,
         exact_trigger_verdicts=exact_triggers,
-        public_bounds=_public_bounds(committed.verdict, scenario.public_stream_keys),
         decision_time_ms=decision_time_ms,
         binding_runtime_ns=_binding_runtime_ns(committed.verdict),
         predicted_cost=decision.predicted_cost,
@@ -516,44 +647,6 @@ def make_step_record(
     )
 
 
-def infer_fresh_generator_reserve(
-    scenario: RtlolaScenario,
-    trace: Sequence[RtlolaEvent],
-    by_name: dict[str, RtlolaAction],
-    *,
-    sample_steps: int = 5,
-) -> int | None:
-    """Infer fixed per-event generator growth for diagnostics.
-
-    RTLola applies the zonotope transform before accepting an event. The
-    benchmark budget is the RTLola transform bound, so this reserve is not used
-    to choose reducer targets. It remains useful for auditing per-cycle slack
-    growth.
-    """
-    if not trace:
-        return 0
-    engine = RtlolaEngine(
-        scenario.spec,
-        event_arity=scenario.event_arity,
-        expected_verdict_keys=(*scenario.expected_verdict_keys, *scenario.public_stream_keys),
-    )
-    none = by_name["none"]
-    deltas: list[int] = []
-    for index, event in enumerate(trace[:max(1, sample_steps)]):
-        state = engine.snapshot(step=index, time=event.time)
-        before = engine.metrics(state).dynamic_generator_count
-        committed = engine.live_step(event, none, budget=0, step=index + 1)
-        after = committed.metrics.dynamic_generator_count
-        delta = after - before
-        if delta < 0:
-            return None
-        deltas.append(delta)
-    first = deltas[0]
-    if all(delta == first for delta in deltas):
-        return first
-    return None
-
-
 def compute_ground_truth(
     trace: Sequence[RtlolaEvent],
     *,
@@ -565,13 +658,13 @@ def compute_ground_truth(
     engine = RtlolaEngine(
         scenario.spec,
         event_arity=scenario.event_arity,
-        expected_verdict_keys=(*scenario.expected_verdict_keys, *scenario.public_stream_keys),
+        expected_verdict_keys=scenario.expected_verdict_keys,
     )
     out: list[RtlolaGroundTruthStep] = []
     for step, event in enumerate(trace):
         committed = engine.live_step(event, actions["none"], budget=0, step=step + 1)
         verdict = committed.verdict
-        for key in (*scenario.expected_verdict_keys, *scenario.public_stream_keys):
+        for key in scenario.expected_verdict_keys:
             if key not in verdict:
                 raise RuntimeError(f"RTLola ground truth verdict missing key at step {step}: {key}")
         zono = engine.matrices(committed.state)[0]
@@ -583,7 +676,6 @@ def compute_ground_truth(
             state=committed.state,
             width_sum=float(np.sum(upper - lower)),
             verdicts=dict(verdict),
-            public_bounds=_public_bounds(verdict, scenario.public_stream_keys),
         ))
     return tuple(out)
 
@@ -609,6 +701,8 @@ def load_or_compute_trigger_reference(
         "trace_sha256": _trace_sha256(trace),
         "spec_sha256": hashlib.sha256(scenario.spec.encode("utf-8")).hexdigest(),
         "binding_revision": BINDING_REVISION,
+        "interpreter_revision": INTERPRETER_REVISION,
+        "binding_build_profile": BINDING_BUILD_PROFILE,
         "trigger_keys": list(scenario.trigger_keys),
     }
     if cache_path is not None and cache_path.exists():
@@ -650,16 +744,8 @@ def load_or_compute_trigger_reference(
             float(event.time),
             none,
         )
-        missing = [
-            key for key in scenario.trigger_keys
-            if key not in verdict
-        ]
-        if missing:
-            raise RuntimeError(
-                f"RTLola trigger reference missing keys at step {index}: {missing}"
-            )
         steps.append(RtlolaTriggerReferenceStep({
-            key: bool(verdict[key])
+            key: bool(verdict.get(key, False))
             for key in scenario.trigger_keys
         }))
     result = tuple(steps)
@@ -744,11 +830,18 @@ def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
                 f"exact_{key}": value
                 for key, value in step.exact_trigger_verdicts.items()
             })
-            for key, bounds in step.public_bounds.items():
-                row[f"{key}_lower"] = bounds[0]
-                row[f"{key}_upper"] = bounds[1]
             rows.append(row)
     return pd.DataFrame(rows)
+
+
+def failures_to_dataframe(
+    failures: Sequence[RtlolaRunFailure],
+) -> pd.DataFrame:
+    columns = tuple(RtlolaRunFailure.__dataclass_fields__)
+    return pd.DataFrame(
+        [asdict(failure) for failure in failures],
+        columns=columns,
+    )
 
 
 def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
@@ -852,62 +945,30 @@ def _state_interval_bounds(matrix: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
     return center - radius, center + radius
 
 
-def _public_bounds(verdict: dict[str, object], keys: Sequence[str]) -> dict[str, tuple[float, float]]:
-    bounds: dict[str, tuple[float, float]] = {}
-    for key in keys:
-        if key not in verdict:
-            continue
-        parsed = _value_bounds(verdict[key])
-        if parsed is not None:
-            bounds[key] = parsed
-    return bounds
-
-
-def _value_bounds(value: object) -> tuple[float, float] | None:
-    if isinstance(value, (bool, np.bool_)):
-        return None
-    if isinstance(value, (int, float, np.integer, np.floating)):
-        scalar = float(value)
-        return (scalar, scalar) if np.isfinite(scalar) else None
-    for left, right in (("lower", "upper"), ("lo", "hi"), ("lb", "ub")):
-        if hasattr(value, left) and hasattr(value, right):
-            lo_value = getattr(value, left)
-            hi_value = getattr(value, right)
-            if callable(lo_value) or callable(hi_value):
-                continue
-            lo = float(lo_value)
-            hi = float(hi_value)
-            return (lo, hi) if np.isfinite(lo) and np.isfinite(hi) else None
-    text = str(value)
-    affine_coeffs = [
-        float(v) for v in re.findall(
-            r"([-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?)\s*\*\s*s\d+",
-            text,
-        )
-    ]
-    nums = [float(v) for v in re.findall(r"[-+]?(?:\d+\.\d*|\.\d+|\d+)(?:[eE][-+]?\d+)?", text)]
-    if affine_coeffs and nums:
-        center = nums[0]
-        radius = float(np.sum(np.abs(np.asarray(affine_coeffs, dtype=np.float64))))
-        return (center - radius, center + radius)
-    if len(nums) >= 2:
-        lo, hi = nums[0], nums[1]
-        return (lo, hi) if np.isfinite(lo) and np.isfinite(hi) else None
-    if len(nums) == 1:
-        scalar = nums[0]
-        return (scalar, scalar) if np.isfinite(scalar) else None
-    return None
-
-
 def save_benchmark_results(result: RtlolaBenchmarkResult, output_dir: Path) -> None:
     scenario_dir = output_dir / result.config.scenario
     scenario_dir.mkdir(parents=True, exist_ok=True)
     result.timeseries.to_csv(scenario_dir / "timeseries.csv", index=False)
     result.summary.to_csv(scenario_dir / "summary.csv", index=False)
     result.aggregate.to_csv(scenario_dir / "aggregate.csv", index=False)
+    failures_to_dataframe(result.failures).to_csv(
+        scenario_dir / "run_failures.csv",
+        index=False,
+    )
     _write_dashboard_artifacts(result, scenario_dir, output_dir)
+    scenario = scenario_by_name(result.config.scenario)
+    config_payload = {
+        **asdict(result.config),
+        "spec_sha256": hashlib.sha256(
+            scenario.spec.encode("utf-8"),
+        ).hexdigest(),
+        "source_revision": scenario.source_revision,
+        "trigger_labels": dict(
+            zip(scenario.trigger_keys, scenario.trigger_labels)
+        ),
+    }
     with open(output_dir / "config.yaml", "w") as f:
-        yaml.safe_dump(asdict(result.config), f, sort_keys=False)
+        yaml.safe_dump(config_payload, f, sort_keys=False)
 
 
 def _write_dashboard_artifacts(
@@ -919,27 +980,42 @@ def _write_dashboard_artifacts(
     trigger_confusion(result.timeseries, scenario.trigger_keys).to_csv(
         scenario_dir / "trigger_confusion.csv", index=False,
     )
-    pareto = result.summary[[
+    pareto_columns = [
         "method",
         "seed",
         "total_time_ms",
         "mean_approx_loss",
         "max_approx_loss",
         "mean_state_zonotope_width",
-    ]].copy()
+    ]
+    pareto = (
+        result.summary[pareto_columns].copy()
+        if not result.summary.empty
+        else pd.DataFrame(columns=pareto_columns)
+    )
     pareto.to_csv(scenario_dir / "pareto_runtime_vs_loss.csv", index=False)
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     _plot_pareto(pareto, figures_dir / f"{result.config.scenario}_pareto_runtime_vs_loss")
-    for stream in scenario.public_stream_keys:
-        _plot_public_range(
-            result.timeseries,
-            stream,
-            figures_dir / f"{result.config.scenario}_{stream}_range",
-        )
 
 
 def trigger_confusion(timeseries: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
+    if timeseries.empty:
+        return pd.DataFrame(columns=(
+            "method",
+            "budget",
+            "trace_kind",
+            "trigger_key",
+            "false_positive_steps",
+            "false_negative_steps",
+            "reference_positive_steps",
+            "reference_negative_steps",
+            "trigger_positive_steps",
+            "steps",
+            "false_positive_rate",
+            "false_negative_rate",
+            "trigger_positive_rate",
+        ))
     rows = []
     group_columns = [
         column for column in ("method", "budget", "trace_kind")
@@ -1010,34 +1086,6 @@ def _plot_pareto(pareto: pd.DataFrame, stem: Path) -> None:
         "Mean state-zonotope width" if y_col == "mean_state_zonotope_width"
         else "Mean approximation loss"
     )
-    fig.tight_layout()
-    fig.savefig(stem.with_suffix(".pdf"))
-    fig.savefig(stem.with_suffix(".png"), dpi=160)
-    plt.close(fig)
-
-
-def _plot_public_range(timeseries: pd.DataFrame, stream: str, stem: Path) -> None:
-    lower_col = f"{stream}_lower"
-    upper_col = f"{stream}_upper"
-    if lower_col not in timeseries or upper_col not in timeseries:
-        return
-    import matplotlib.pyplot as plt
-
-    frame = timeseries[timeseries["seed"] == timeseries["seed"].min()]
-    if frame.empty:
-        return
-    fig, ax = plt.subplots(figsize=(8.0, 4.0))
-    for method, method_frame in frame.groupby("method"):
-        ordered = method_frame.sort_values("step")
-        x = ordered["step"].to_numpy(dtype=np.float64)
-        lo = ordered[lower_col].to_numpy(dtype=np.float64)
-        hi = ordered[upper_col].to_numpy(dtype=np.float64)
-        ax.plot(x, lo, linewidth=1.0, label=method)
-        ax.plot(x, hi, linewidth=1.0)
-        ax.fill_between(x, lo, hi, alpha=0.12)
-    ax.set_xlabel("Step")
-    ax.set_ylabel(stream)
-    ax.legend(loc="best", fontsize=8)
     fig.tight_layout()
     fig.savefig(stem.with_suffix(".pdf"))
     fig.savefig(stem.with_suffix(".png"), dpi=160)

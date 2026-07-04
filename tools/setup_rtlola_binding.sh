@@ -4,7 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA="${PZR_CONDA:-$ROOT_DIR/external/miniconda3/bin/conda}"
 ENV_NAME="${PZR_RTLOLA_ENV:-pzr-rtlola}"
-BINDING_REV="eef70844cac3ad5928899db5e30427dcc54f50cf"
+BINDING_REV="abe3dab33d0c4aa504db0af63901b66ecafb7f71"
+INTERPRETER_REV="a143dd6a1500d54c1eabe9e83e5b54271734d6b2"
 BINDING_DIR="$ROOT_DIR/rlolapythonbinding"
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -55,21 +56,48 @@ if [ "$ACTUAL_REV" != "$BINDING_REV" ]; then
   exit 1
 fi
 
+LOCKED_INTERPRETER_COUNT="$(
+  grep -c "rtlola-interpreter.git?branch=slack-vars#$INTERPRETER_REV" \
+    "$BINDING_DIR/Cargo.lock" || true
+)"
+if [ "$LOCKED_INTERPRETER_COUNT" -ne 2 ]; then
+  echo "Binding Cargo.lock does not pin both RTLola crates to $INTERPRETER_REV" >&2
+  exit 1
+fi
+
 ENV_PREFIX="$ROOT_DIR/external/miniconda3/envs/$ENV_NAME"
+WHEEL_DIR="$(mktemp -d "${TMPDIR:-/tmp}/pzr-rtlola-wheel.XXXXXX")"
+trap 'rm -rf "$WHEEL_DIR"' EXIT
 CARGO_NET_GIT_FETCH_WITH_CLI=true \
 RUSTC_BOOTSTRAP=kmeans \
 PKG_CONFIG_PATH="$ENV_PREFIX/lib/pkgconfig:$ENV_PREFIX/share/pkgconfig:${PKG_CONFIG_PATH:-}" \
 LD_PRELOAD="$ENV_PREFIX/lib/libopenblas.so${LD_PRELOAD:+ $LD_PRELOAD}" \
 LD_LIBRARY_PATH="$ENV_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
 CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" \
-  python -m maturin develop --release --manifest-path "$BINDING_DIR/Cargo.toml"
+  python -m maturin build \
+    --release \
+    --locked \
+    --interpreter "$ENV_PREFIX/bin/python" \
+    --manifest-path "$BINDING_DIR/Cargo.toml" \
+    --out "$WHEEL_DIR"
+
+mapfile -t WHEELS < <(find "$WHEEL_DIR" -maxdepth 1 -type f -name '*.whl' -print)
+if [ "${#WHEELS[@]}" -ne 1 ]; then
+  echo "Expected exactly one RTLola binding wheel, found ${#WHEELS[@]}" >&2
+  exit 1
+fi
+CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" \
+  python -m pip install --force-reinstall --no-deps "${WHEELS[0]}"
 
 LD_PRELOAD="$ENV_PREFIX/lib/libopenblas.so${LD_PRELOAD:+ $LD_PRELOAD}" \
 LD_LIBRARY_PATH="$ENV_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
-CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" python - <<'PY'
-from rlola_python_binding import RLolaMonitor, ZonotopeConfig
-print("rtlola binding ok")
-PY
+CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" python -c '
+from rlola_python_binding import BUILD_PROFILE, INTERPRETER_REVISION
+
+assert BUILD_PROFILE == "release", BUILD_PROFILE
+assert INTERPRETER_REVISION == "a143dd6a1500d54c1eabe9e83e5b54271734d6b2"
+print(f"rtlola binding ok ({BUILD_PROFILE}, interpreter {INTERPRETER_REVISION})")
+'
 
 cat <<EOF
 RTLola binding environment ready.

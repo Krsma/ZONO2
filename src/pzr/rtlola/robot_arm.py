@@ -12,8 +12,35 @@ from numpy.typing import NDArray
 from pzr.rtlola.engine import RtlolaEvent
 
 
-TRACE_KINDS = ("figure8_violated", "figure8", "square_violated", "square")
-DEFAULT_TRACE_KIND = "figure8_violated"
+TRACE_KINDS = (
+    "figure8",
+    "figure8_drift",
+    "random",
+    "random_violated",
+    "square",
+    "square_drift",
+)
+DEFAULT_TRACE_KIND = "figure8_drift"
+RLOLAEVAL_REVISION = "f587a0ecb783dbc88f2feb6621c5278a10cf781d"
+ROBOT_ARM_SPEC_SHA256 = (
+    "ec1cb912dfcf7ed79b5bdf8a994ecb560b52e19add4dfd05095fa53d20cef721"
+)
+ROBOT_ARM_TRACE_SHA256 = {
+    "figure8": "e9b8819a065af9e23f04b66da6558c3c0f91b4984fe488893549356dfaa52bd3",
+    "figure8_drift": "3acc3c1215b15e593446d2a55a95063ab54a99144042789100a80697ea556487",
+    "random": "62379cd35dca115e65fd42949a754333b860d5841915d7fbb25f2bb75a8314f0",
+    "random_violated": "8b1d137f1104771ed8bb25ee757dd2bc35b3038919c7e4268e4e619698c6c755",
+    "square": "d84eece264cb7b7a890b27f14f089665d3bbe4be4dd6837ee22f66eb588304ef",
+    "square_drift": "ba7d89fcc42e15315ce1656e183e8a2e10f69bf18bdbefa8217d4db254894062",
+}
+ROBOT_ARM_TRACE_ROWS = {
+    "figure8": 2340,
+    "figure8_drift": 2340,
+    "random": 4098,
+    "random_violated": 289,
+    "square": 1983,
+    "square_drift": 1983,
+}
 
 MODEL_DIR = Path(__file__).parents[1] / "envs" / "mujoco_models" / "low_cost_robot_arm"
 MODEL_PATH = MODEL_DIR / "low_cost_robot_arm.xml"
@@ -21,16 +48,19 @@ SCENE_PATH = MODEL_DIR / "scene.xml"
 TRACE_DIR = Path(__file__).parent / "traces" / "robot_arm"
 ARM_SPEC_PATH = Path(__file__).parent / "specs" / "robot_arm.lola"
 
-ARM_EXPECTED_VERDICT_KEYS = (
-    "dist_to_expected_exceeded",
-    "tpl_exceeded",
-)
 ARM_PUBLIC_STREAM_KEYS = (
     "dist_to_expected",
-    "tpl",
+    "dxb",
+    "dyb",
 )
-
-EXPECTED_CENTER = np.array([-0.18, 0.0, 0.05], dtype=np.float64)
+ARM_TRIGGER_KEYS = tuple(f"Trigger#{index}" for index in range(5))
+ARM_TRIGGER_LABELS = {
+    "Trigger#0": "Toolhead drift detected",
+    "Trigger#1": "Cannot stop before +X boundary",
+    "Trigger#2": "Cannot stop before -X boundary",
+    "Trigger#3": "Cannot stop before +Y boundary",
+    "Trigger#4": "Cannot stop before -Y boundary",
+}
 
 Q = 0.000767
 J = 0.001309
@@ -48,6 +78,7 @@ class RobotArmTraceRow:
     time: float
     angles: tuple[float, float, float, float, float]
     tcp: tuple[float, float, float]
+    expected_center: tuple[float | None, float | None, float | None]
 
 
 def forward_kinematics_5dof(angles: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -89,7 +120,7 @@ def trace_path(trace_kind: str) -> Path:
 
 def load_robot_arm_trace(trace_kind: str = DEFAULT_TRACE_KIND) -> tuple[RobotArmTraceRow, ...]:
     path = trace_path(trace_kind)
-    df = pd.read_csv(path)
+    df = pd.read_csv(path, na_values=["#"])
     rows = []
     for record in df.itertuples(index=False):
         rows.append(RobotArmTraceRow(
@@ -102,6 +133,11 @@ def load_robot_arm_trace(trace_kind: str = DEFAULT_TRACE_KIND) -> tuple[RobotArm
                 float(record.a5m),
             ),
             tcp=(float(record.x), float(record.y), float(record.z)),
+            expected_center=(
+                _optional_float(record.cx),
+                _optional_float(record.cy),
+                _optional_float(record.cz),
+            ),
         ))
     return tuple(rows)
 
@@ -118,9 +154,16 @@ def generate_robot_arm_events(
     if length > 0:
         rows = rows[:length]
     return tuple(
-        RtlolaEvent(time=row.time, values=(row.time, *row.angles))
+        RtlolaEvent(
+            time=row.time,
+            values=(row.time, *row.angles, *row.expected_center),
+        )
         for row in rows
     )
+
+
+def _optional_float(value: object) -> float | None:
+    return None if pd.isna(value) else float(value)
 
 
 def validate_trace_tcp_against_fk(

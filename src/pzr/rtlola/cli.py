@@ -8,7 +8,6 @@ from pathlib import Path
 
 import pandas as pd
 
-from pzr.rtlola.learning import train_and_evaluate_regret, write_regret_artifacts
 from pzr.rtlola.benchmark import (
     RTLOLA_AGGREGATE_METRICS,
     RtlolaBenchmarkConfig,
@@ -18,7 +17,12 @@ from pzr.rtlola.benchmark import (
     save_benchmark_results,
     summarize_results,
 )
-from pzr.rtlola.binding import BINDING_REVISION
+from pzr.rtlola.binding import (
+    BINDING_BUILD_PROFILE,
+    BINDING_REVISION,
+    INTERPRETER_REVISION,
+)
+from pzr.rtlola.learning import train_and_evaluate_regret, write_regret_artifacts
 from pzr.rtlola.scenarios import scenario_by_name
 
 
@@ -60,7 +64,10 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument(
         "--trace-kind",
         default="default",
-        help="RTLola trace kind; robot_arm supports figure8_violated, figure8, square_violated, square",
+        help=(
+            "RTLola trace kind; robot_arm supports figure8, figure8_drift, "
+            "random, random_violated, square, square_drift"
+        ),
     )
     parser.add_argument(
         "--method-set",
@@ -99,6 +106,8 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--regret-epochs", type=int, default=100)
     parser.add_argument("--regret-train-seeds", type=int, default=None)
     parser.add_argument("--regret-eval-seeds", type=int, default=None)
+    parser.add_argument("--regret-train-seed-start", type=int, default=10_000)
+    parser.add_argument("--regret-eval-seed-start", type=int, default=0)
     parser.add_argument("--regret-loss", choices=["pairwise", "mse"], default="pairwise")
     parser.add_argument(
         "--regret-budgets",
@@ -138,6 +147,8 @@ def main(argv: list[str] | None = None) -> None:
         "regret_epochs": args.regret_epochs,
         "regret_train_seeds": args.regret_train_seeds,
         "regret_eval_seeds": args.regret_eval_seeds,
+        "regret_train_seed_start": args.regret_train_seed_start,
+        "regret_eval_seed_start": args.regret_eval_seed_start,
         "regret_loss": args.regret_loss,
         "regret_budgets": args.regret_budgets,
         "regret_train_trace_kinds": args.regret_train_traces,
@@ -184,7 +195,12 @@ def main(argv: list[str] | None = None) -> None:
                 ),
                 "budgets": config.regret_budgets or [config.budget],
                 "horizon": config.horizon,
+                "mpc_objective": config.mpc_objective,
+                "train_seed_start": config.regret_train_seed_start,
+                "eval_seed_start": config.regret_eval_seed_start,
                 "binding_revision": BINDING_REVISION,
+                "interpreter_revision": INTERPRETER_REVISION,
+                "binding_build_profile": BINDING_BUILD_PROFILE,
                 "spec_sha256": hashlib.sha256(
                     scenario.spec.encode("utf-8"),
                 ).hexdigest(),
