@@ -33,6 +33,12 @@ from pzr.rtlola.engine import (
     RtlolaStateRef,
     RtlolaStepResult,
 )
+from pzr.rtlola.reference import (
+    REFERENCE_CACHE_SCHEMA,
+    RtlolaReferenceStep,
+    load_or_compute_reference,
+    reference_cache_path,
+)
 from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
 from pzr.rtlola.search import (
     MPC_VARIANTS,
@@ -43,12 +49,7 @@ from pzr.rtlola.search import (
     choose_static_action,
     search_mpc_variant,
 )
-from pzr.rtlola.reference import (
-    REFERENCE_CACHE_SCHEMA,
-    RtlolaReferenceStep,
-    load_or_compute_reference,
-    reference_cache_path,
-)
+from pzr.rtlola.tables import trigger_confusion
 
 
 METHOD_SET_CHOICES = ("core", "static", "mpc", "all")
@@ -1054,70 +1055,6 @@ def _write_dashboard_artifacts(
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     _plot_pareto(pareto, figures_dir / f"{result.config.scenario}_pareto_runtime_vs_loss")
-
-
-def trigger_confusion(timeseries: pd.DataFrame, keys: Sequence[str]) -> pd.DataFrame:
-    if timeseries.empty:
-        return pd.DataFrame(columns=(
-            "method",
-            "budget",
-            "trace_kind",
-            "trigger_key",
-            "false_positive_steps",
-            "false_negative_steps",
-            "reference_positive_steps",
-            "reference_negative_steps",
-            "trigger_positive_steps",
-            "steps",
-            "fpr",
-            "fnr",
-            "trigger_positive_rate",
-        ))
-    rows = []
-    group_columns = [
-        column for column in ("method", "budget", "trace_kind")
-        if column in timeseries
-    ]
-    for group_key, frame in timeseries.groupby(group_columns, dropna=False):
-        values = group_key if isinstance(group_key, tuple) else (group_key,)
-        group_values = dict(zip(group_columns, values))
-        for key in ("__any__", *keys):
-            predicted_column = "trigger_positive" if key == "__any__" else key
-            exact_column = (
-                "exact_trigger_positive"
-                if key == "__any__" else f"exact_{key}"
-            )
-            predicted = _boolean_series(frame, predicted_column)
-            exact = _boolean_series(frame, exact_column)
-            valid = exact.notna()
-            predicted_valid = predicted[valid].astype(bool)
-            exact_valid = exact[valid].astype(bool)
-            fp = int((predicted_valid & ~exact_valid).sum())
-            fn = int((~predicted_valid & exact_valid).sum())
-            positives = int(exact_valid.sum())
-            negatives = int((~exact_valid).sum())
-            rows.append({
-                **group_values,
-                "trigger_key": key,
-                "false_positive_steps": fp,
-                "false_negative_steps": fn,
-                "reference_positive_steps": positives,
-                "reference_negative_steps": negatives,
-                "trigger_positive_steps": int(predicted.fillna(False).sum()),
-                "steps": int(len(frame)),
-                "fpr": fp / negatives if negatives else float("nan"),
-                "fnr": fn / positives if positives else float("nan"),
-                "trigger_positive_rate": float(predicted.mean()),
-            })
-    return pd.DataFrame(rows)
-
-
-def _boolean_series(frame: pd.DataFrame, column: str) -> pd.Series:
-    if column not in frame:
-        return pd.Series(np.nan, index=frame.index, dtype=object)
-    return frame[column].map(
-        lambda value: np.nan if pd.isna(value) else bool(value),
-    )
 
 
 def _plot_pareto(pareto: pd.DataFrame, stem: Path) -> None:

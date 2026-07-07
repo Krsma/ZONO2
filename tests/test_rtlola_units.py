@@ -18,7 +18,6 @@ from pzr.rtlola.benchmark import (
     RtlolaExecutedStep,
     make_step_record,
     methods_for_config,
-    trigger_confusion,
 )
 from pzr.rtlola.cli import main as cli_main
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
@@ -28,6 +27,7 @@ from pzr.rtlola.metrics import (
     matrix_metrics,
 )
 from pzr.rtlola.reference import RtlolaReferenceStep, reference_cache_path
+from pzr.rtlola.tables import trigger_confusion
 from pzr.rtlola.omni import (
     OMNI_DEFAULT_TRACE_KIND,
     OMNI_PUBLIC_STREAM_KEYS,
