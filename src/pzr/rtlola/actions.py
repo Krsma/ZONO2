@@ -98,6 +98,26 @@ class RtlolaActionCatalog:
         return self.by_name[self.fallback_name]
 
 
-def default_action_catalog() -> RtlolaActionCatalog:
+def default_action_catalog(
+    mpc_candidate_names: tuple[str, ...] | None = None,
+) -> RtlolaActionCatalog:
     """Return the authoritative action roles for benchmarks and learning."""
-    return RtlolaActionCatalog(default_actions())
+    candidate_names = (
+        MPC_ACTION_NAMES
+        if mpc_candidate_names is None
+        else tuple(mpc_candidate_names)
+    )
+    if not candidate_names:
+        raise ValueError("MPC candidate names must not be empty")
+    if len(set(candidate_names)) != len(candidate_names):
+        raise ValueError("MPC candidate names must be unique")
+    unsupported = set(candidate_names) - set(MPC_ACTION_NAMES)
+    if unsupported:
+        raise ValueError(
+            "unsupported MPC candidates: "
+            + ", ".join(sorted(unsupported))
+        )
+    return RtlolaActionCatalog(
+        default_actions(),
+        mpc_candidate_names=candidate_names,
+    )

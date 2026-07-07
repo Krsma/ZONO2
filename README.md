@@ -68,19 +68,43 @@ pzr-benchmark --profile smoke --scenario robot_arm \
 Prepare or resume the full FPR-first robot-arm sweep:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-arm-big-a143dd6-f587a0e-release \
+PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-f587a0e-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 ```
 
 The overnight wrapper evaluates all six packaged RLolaEval traces at their full
 authoritative lengths and at budgets `40,80,120,180`, with Girard, Scott,
-interval hull, PCA, Combastel, and beam MPC. MPC and learning choose among
-those five reducers plus deterministic clustering. Set `PZR_LENGTH` only when
-an intentional common truncation is required. Cells have command- and
-revision-aware completion markers and logs, so identical configurations resume
-while stale binding, specification, method, or candidate configurations rerun.
+interval hull, PCA, Combastel, legacy beam MPC, root-tail MPC, endpoint-tail
+MPC, and integrated-tail MPC. Tail variants default to an eight-event Girard
+tail and one beam continuation per first-action root. MPC and learning choose
+among those five bounded reducers plus deterministic clustering. Set
+`PZR_LENGTH` only when an intentional common truncation is required. Every
+trace/budget/method has its own command- and source-aware completion marker and
+log, so interrupted runs resume without repeating other methods. Successful
+stages are validated for complete rows; native method failures are accepted
+only when recorded explicitly. Before those cells, one resumable reference
+stage per trace caches exact trigger verdicts and compact state-loss data.
 Learned selection is deferred and skipped by default; set
 `PZR_SKIP_LEARNING=0` to run the pooled ranker explicitly.
+
+The emitted MPC method identifiers are:
+
+- `mpc_terminal_beam`: multi-action beam search with terminal loss only;
+- `mpc_terminal_girard_tail`: beam search scored after a fixed Girard tail;
+- `mpc_cumulative_girard_tail`: cumulative explicit and Girard-tail loss;
+- `mpc_one_step_girard_rollout`: one optimized reducer followed by Girard rollout.
+
+Prepare or resume the short exact-reference MPC objective study:
+
+```bash
+PZR_OUT_DIR=results/rtlola-arm-mpc-variants \
+  tools/run_rtlola_mpc_variant_study.sh
+```
+
+This compares the legacy terminal-loss beam with extended-endpoint,
+integrated Girard-tail, and root-only Girard-tail variants. The default tail
+scan is `0,4,8,16`; `PZR_TAIL_HORIZONS`, `PZR_ROOT_BEAM_WIDTH`, and the usual
+trace, budget, and length variables can override it.
 
 Run the 10-seed state-fidelity Omni pilot:
 
@@ -99,8 +123,8 @@ Method sets are:
 - `core`: exact no-reduction baseline, Girard, Scott, interval hull, PCA, and
   binding-loss beam MPC.
 - `static`: exact baseline plus every bounded native binding transform.
-- `mpc`: beam MPC only.
-- `all`: `static` plus beam MPC.
+- `mpc`: the legacy beam and all three experimental tail variants.
+- `all`: `static` plus all MPC variants.
 
 The binding also exposes Althoff A, colinear scale, and three clustering
 reducers. Althoff A, colinear scale, and deterministic clustering remain
@@ -109,9 +133,10 @@ slow for the full sweep and deterministic clustering frequently falls back on
 rank-deficient states. Random and diverse clustering are not wired into the
 benchmark because both fail immediately on the robot-arm state.
 
-The MPC and learned candidate set remains `girard`, `scott`,
-`interval_hull`, and `pca`. `none` is automatic only while the pre-event
-state is within the transform bound. `interval` is an emergency fallback.
+The MPC and learned candidate set is `girard`, `scott`, `interval_hull`,
+`pca`, `combastel`, and deterministic `clustering`. `none` is automatic only
+while the pre-event state is within the transform bound. `interval` is an
+emergency fallback.
 
 ## Semantic Contract
 
@@ -121,8 +146,12 @@ state is within the transform bound. `interval` is an emergency fallback.
   reported as `post_event_over_bound`.
 - Dense dynamic slots, active nonzero dynamic generators, zero dynamic slots,
   and total generators including constant slack are reported separately.
-- MPC and teacher costs default to binding-native terminal
-  `approx_loss_state` against an unreduced rollout over the same horizon.
+- Legacy MPC and teacher costs use binding-native terminal
+  `approx_loss_state`. Experimental tail variants use either the extended
+  endpoint loss or the undiscounted sum of binding-native state losses.
+- Tail variants evaluate a static Girard auxiliary policy after the optimized
+  horizon; tail actions are diagnostics and are not reported as committed
+  predicted actions.
 - The benchmark reference mode controls offline metrics and caching only;
   binding-loss MPC always constructs its own unreduced horizon rollout.
 - Learned inference ranks native transforms and directly tries them through
@@ -134,13 +163,20 @@ state is within the transform bound. `interval` is an emergency fallback.
   `Trigger#4`; an absent key is false and an emitted message is true.
 - Numeric public streams remain part of the specification contract, but their
   symbolic affine strings are not parsed into Python-side bounds.
-- Use `--reference-mode verdict` for full-length FPR/FNR evaluation. It
-  streams the unreduced monitor and caches only exact trigger booleans;
-  `--reference-mode exact` additionally retains every unreduced matrix and is
-  intended only for short approximation-loss studies.
+- Use `--reference-mode exact` for full-length evaluation. It runs the
+  unreduced monitor once and caches exact trigger booleans plus each state
+  coordinate's center and interval radius. Reduced runs reconstruct a compact
+  interval matrix and call the binding's native `approx_loss`; opaque states
+  and full generator matrices are not persisted. `verdict` caches only trigger
+  booleans, and `off` disables reference metrics.
 - FPR is false positives divided by exact negative steps; FNR is false
-  negatives divided by exact positive steps. Saved timeseries contain trigger
-  booleans and numeric public bounds, not raw symbolic binding objects.
+  negatives divided by exact positive steps. `state_width` is the sum of
+  coordinate-wise interval widths over the dynamic state and excludes constant
+  slack. Saved timeseries use the compact metric names `approx_loss` and
+  `state_width`. Summaries report mean, final, maximum, and summed native
+  approximation loss plus mean and maximum state width. Final loss is the
+  binding result after the last event; summed loss is an unweighted per-event
+  sum and is therefore trace-length dependent.
 
 ## Artifacts
 
@@ -153,9 +189,11 @@ under `learning/<scenario>/`.
 The overnight wrapper additionally writes `combined_summary.csv`,
 `combined_trigger_confusion.csv`, `combined_reducer_counts.csv`,
 `combined_run_failures.csv`, `method_comparison.csv`,
-`mpc_action_composition.csv`, `mpc_vs_static_fpr.csv`, and
-`mpc_vs_static_fidelity.csv` at its output root. The composition table reports
-both all-step and reduction-only MPC action shares.
+`mpc_action_composition.csv`, `mpc_vs_static_metrics.csv`, and the compact
+`primary_metrics.csv` at its output root. The compact primary table is printed
+when consolidation finishes. The metric comparison selects the best static
+method independently for FPR, FNR, approximation loss, and state width. The
+composition table reports both all-step and reduction-only MPC action shares.
 
 The packaged robot-arm assets come from RLolaEval commit
 `f587a0ecb783dbc88f2feb6621c5278a10cf781d`. Supported traces are `figure8`,

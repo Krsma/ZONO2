@@ -36,15 +36,83 @@ pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
 tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
   --output /tmp/pzr-arm
 
-PZR_OUT_DIR=results/rtlola-arm-binding-loss \
+PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-f587a0e-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 
 pzr-benchmark --profile smoke --scenario omni_robot --budget 10 \
-  --methods girard,mpc_beam --learned-mode regret \
+  --methods girard,mpc_terminal_beam --learned-mode regret \
   --regret-iterations 1 --regret-epochs 2 \
   --regret-train-seeds 1 --regret-eval-seeds 1 \
   --output /tmp/pzr-learned
 ```
+
+## Current RTLola Experiment Configuration
+
+The packaged robot-arm specification is
+`src/pzr/rtlola/specs/robot_arm.lola`. It and the six trace CSVs were imported
+from RLolaEval revision `f587a0ecb783dbc88f2feb6621c5278a10cf781d`;
+the expected specification SHA-256 is
+`ec1cb912dfcf7ed79b5bdf8a994ecb560b52e19add4dfd05095fa53d20cef721`.
+Do not substitute an older local robot-arm specification.
+
+The required native stack is:
+
+- binding revision `abe3dab33d0c4aa504db0af63901b66ecafb7f71`;
+- interpreter revision `a143dd6a1500d54c1eabe9e83e5b54271734d6b2`;
+- a `maturin build --release`/release-profile binding.
+
+`src/pzr/rtlola/binding.py` rejects a mismatched interpreter or debug build.
+The current interpreter may compact all-zero dynamic generator rows. Negative
+coefficients are not zero and must remain represented. Python code must not
+depend on stable generator row positions or dense matrix shapes; use the
+binding-native transforms, counters, and approximation loss.
+
+The last recorded full release-binding validation after this integration was
+56 passing tests with no skips.
+
+The authoritative trace kinds and full lengths are:
+
+- `figure8` and `figure8_drift`: 2,340 events each;
+- `random`: 4,098 events;
+- `random_violated`: 289 events;
+- `square` and `square_drift`: 1,983 events each.
+
+`figure8` and `square` are nominal structured paths, their `_drift` variants
+add progressive tool-center drift, `random` explores the geofence broadly,
+and `random_violated` is a short deliberate violation trace. Do not pool them
+without preserving `trace_kind`.
+
+The emitted MPC methods are:
+
+- `mpc_terminal_beam`: multi-action beam search, terminal loss only;
+- `mpc_terminal_girard_tail`: beam search scored at the end of a fixed Girard
+  tail;
+- `mpc_cumulative_girard_tail`: cumulative explicit-horizon and Girard-tail
+  loss;
+- `mpc_one_step_girard_rollout`: optimize the current reducer, then score a
+  Girard rollout.
+
+The overnight defaults are horizon 4, beam width 4, Girard tail horizon 8,
+and one retained continuation per first-action root for stratified variants.
+The wrapper first prepares one exact reference cache per trace, then runs each
+trace/budget/method as a separately validated, source-aware resumable stage.
+Combined tables are built only after all stages finish.
+
+## Current Robot-Arm Results
+
+The previous robot-arm artifacts used the obsolete verdict-only reference and
+long metric-column schema and were removed on 2026-07-05. There is currently
+no active full-suite artifact. Do not quote the earlier partial sweep as a
+completed six-trace evaluation.
+
+The focused Girard-versus-MPC run started on 2026-07-06 was deliberately
+terminated before completing the square traces. Its partial artifact is not a
+completed evaluation. The next run must use a fresh output directory. Exact
+reference stages cache trigger verdicts and compact center/radius data once per
+trace. Method summaries report `fpr`, `fnr`, mean/final/max/summed native
+approximation loss, and mean/max `state_width`; `primary_metrics.csv` contains
+the compact completion table. `mpc_vs_static_metrics.csv` selects the best
+static method independently for each metric.
 
 ## Coding and Testing
 
@@ -70,31 +138,45 @@ Selectors may inspect states and choose actions, but only
 `rlola_python_binding.ZonotopeConfig` transforms may mutate monitor state.
 Do not add matrix writeback or Python-side reducers.
 
-The default MPC/learning candidates are `girard`, `scott`, `interval_hull`,
-and `pca`. Do not add `none`, `interval`, unbounded transforms, clustering, or
-Combastel without an explicit experiment change. `none` is the exact baseline
-and automatic under-bound action; `interval` is fallback-only.
+The current robot-arm experiment explicitly expands the MPC/learning
+candidates to `girard`, `scott`, `interval_hull`, `pca`, `combastel`, and
+deterministic `clustering`. Do not add `none`, `interval`, unbounded
+transforms, random/diverse clustering, Althoff A, or colinear scale without a
+new explicit experiment change. `none` is the exact baseline and automatic
+under-bound action; `interval` is fallback-only.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the
 distinction between dynamic, active, zero, and constant generators.
 
-MPC and teacher costs use binding-native terminal approximation loss. Do not
-replace it with width, trigger-straddling, or a Python proxy during unrelated
-cleanup.
+MPC and teacher costs use binding-native approximation loss. Terminal beam
+uses terminal loss; the experimental tail variants use either the extended
+endpoint loss or an undiscounted sum of binding-native state losses. Do not
+replace these with width, trigger-straddling, or a Python proxy during
+unrelated cleanup.
 
 Benchmark reference mode controls offline metrics and caching only. MPC and
 teacher searches construct their own unreduced horizon rollouts.
+
+Offline exact references remain specification-independent. Each cache row
+contains exact trigger booleans and total-state center/radius vectors. The
+engine reconstructs a compact interval matrix and invokes the existing native
+`approx_loss` while the candidate is applied only to the planner monitor. It
+must restore the planner in `finally` and must never mutate the live monitor.
+Do not edit the RTLola binding to implement these metrics.
 
 Robot-arm trigger labels and public metrics come from
 `rtlola/specs/robot_arm.lola`. Constant encoder-calibration slack must remain
 unchanged by dynamic reduction.
 
-For full-length classification metrics use `--reference-mode verdict`.
-Verdict reference caches contain only exact trigger booleans and are reusable
-across methods and budgets. FPR uses exact negative steps as its denominator;
-FNR uses exact positive steps. Keep `exact` mode for short matrix/loss studies
-because it retains the full unreduced state history.
+For full-length metrics use `--reference-mode exact`. Exact caches are reusable
+across methods and budgets and do not retain opaque states or full generator
+matrices. `verdict` remains available for trigger-only runs. FPR uses exact
+negative steps as its denominator; FNR uses exact positive steps. `state_width`
+is the existing dynamic-state interval-width sum and excludes constant slack.
+`final_approx_loss` is the last event's binding result and
+`sum_approx_loss` is the unweighted sum across events, so summed loss is only
+comparable between methods evaluated on the same trace.
 
 ## Repository Safety
 

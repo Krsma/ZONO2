@@ -19,11 +19,9 @@ from pzr.learning.ranking import (
 from pzr.rtlola.actions import RtlolaAction, RtlolaActionCatalog, default_action_catalog
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
-    RtlolaGroundTruthStep,
+    RtlolaReferenceStep,
     RtlolaRunResult,
-    RtlolaTriggerReferenceStep,
-    compute_ground_truth,
-    load_or_compute_trigger_reference,
+    load_or_compute_reference,
     make_step_record,
     results_to_dataframe,
     summarize_results,
@@ -49,7 +47,7 @@ RTL_FEATURE_NAMES = (
     "total_generator_count",
     "dimension",
     "budget_headroom",
-    "full_width_sum",
+    "state_width",
     "width_mean",
     "width_max",
     "center_l2",
@@ -202,7 +200,7 @@ def train_and_evaluate_regret(
     reference_cache_dir: Path | None = None,
 ) -> RtlolaRegretResult:
     scenario = scenario_by_name(config.scenario)
-    catalog = default_action_catalog()
+    catalog = default_action_catalog(tuple(config.mpc_candidate_names))
     candidate_names = tuple(catalog.mpc_candidate_names)
     budgets = tuple(config.regret_budgets or [config.budget])
     train_trace_kinds = tuple(
@@ -291,41 +289,27 @@ def train_and_evaluate_regret(
         for local_seed in range(eval_seed_count):
             seed = config.regret_eval_seed_start + local_seed
             trace = scenario.generate_trace(config.length, seed, trace_kind)
-            ground_truth = (
-                compute_ground_truth(trace.events, scenario=scenario)
-                if config.reference_mode == "exact" else None
-            )
-            trigger_reference = (
-                tuple(
-                    RtlolaTriggerReferenceStep({
-                        key: bool(step.verdicts.get(key, False))
-                        for key in scenario.trigger_keys
-                    })
-                    for step in ground_truth
+            reference = (
+                load_or_compute_reference(
+                    trace.events,
+                    scenario=scenario,
+                    trace_kind=trace.trace_kind,
+                    seed=seed,
+                    cache_path=(
+                        reference_cache_dir
+                        / f"{trace.trace_kind}.seed_{seed}.json"
+                        if reference_cache_dir is not None else None
+                    ),
+                    include_approximation=config.reference_mode == "exact",
                 )
-                if ground_truth is not None
-                else (
-                    load_or_compute_trigger_reference(
-                        trace.events,
-                        scenario=scenario,
-                        trace_kind=trace.trace_kind,
-                        seed=seed,
-                        cache_path=(
-                            reference_cache_dir
-                            / f"{trace.trace_kind}.seed_{seed}.json"
-                            if reference_cache_dir is not None else None
-                        ),
-                    )
-                    if config.reference_mode == "verdict" else None
-                )
+                if config.reference_mode != "off" else None
             )
             for budget in budgets:
                 eval_results.append(_evaluate_learned_episode(
                     scenario=scenario,
                     trace=trace.events,
                     trace_kind=trace.trace_kind,
-                    trigger_reference=trigger_reference,
-                    ground_truth=ground_truth,
+                    reference=reference,
                     budget=budget,
                     seed=seed,
                     config=config,
@@ -368,14 +352,14 @@ def extract_features(
             event.time,
         )
         future_metrics = engine.metrics(rollout_state)
-        widths.append(future_metrics.full_width_sum)
+        widths.append(future_metrics.state_width)
         counts.append(float(future_metrics.dynamic_generator_count))
         overflow += float(future_metrics.dynamic_generator_count > budget)
     future = np.asarray([
         np.mean(widths),
         np.max(widths),
         widths[-1],
-        widths[-1] - metrics.full_width_sum,
+        widths[-1] - metrics.state_width,
         overflow,
         np.mean(counts),
     ], dtype=np.float64)
@@ -554,8 +538,7 @@ def _evaluate_learned_episode(
     scenario: RtlolaScenario,
     trace: Sequence[RtlolaEvent],
     trace_kind: str,
-    trigger_reference: Sequence[RtlolaTriggerReferenceStep] | None,
-    ground_truth: Sequence[RtlolaGroundTruthStep] | None,
+    reference: Sequence[RtlolaReferenceStep] | None,
     budget: int,
     seed: int,
     config: RtlolaBenchmarkConfig,
@@ -593,14 +576,7 @@ def _evaluate_learned_episode(
             committed=committed,
             decision=decision,
             decision_time_ms=elapsed_ms,
-            ground_truth=(
-                ground_truth[step]
-                if ground_truth is not None else None
-            ),
-            trigger_reference=(
-                trigger_reference[step]
-                if trigger_reference is not None else None
-            ),
+            reference=reference[step] if reference is not None else None,
         ))
     return RtlolaRunResult(
         "learned_direct",
@@ -726,7 +702,7 @@ def _features_from_metrics(
         metrics.total_generator_count,
         metrics.dimension,
         budget - metrics.dynamic_generator_count,
-        metrics.full_width_sum,
+        metrics.state_width,
         metrics.width_mean,
         metrics.width_max,
         metrics.center_l2,

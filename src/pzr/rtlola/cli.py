@@ -12,6 +12,7 @@ from pzr.rtlola.benchmark import (
     RTLOLA_AGGREGATE_METRICS,
     RtlolaBenchmarkConfig,
     aggregate_summary,
+    prepare_reference_cache,
     results_to_dataframe,
     run_benchmark,
     save_benchmark_results,
@@ -85,20 +86,36 @@ def main(argv: list[str] | None = None) -> None:
         choices=["exact", "verdict", "off"],
         default="exact",
         help=(
-            "exact retains unreduced zonotopes for loss metrics; verdict streams "
-            "only exact triggers for long-run FPR/FNR evaluation"
+            "exact caches compact unreduced references for approximation loss "
+            "and FPR/FNR; verdict caches only exact trigger outcomes"
         ),
     )
     parser.add_argument(
         "--reference-cache",
         type=Path,
         default=None,
-        help="Optional JSON cache for verdict-only exact trigger outcomes",
+        help="Optional JSON cache for exact trigger and approximation references",
+    )
+    parser.add_argument(
+        "--reference-only",
+        action="store_true",
+        help="Generate or validate --reference-cache and exit without a benchmark run",
     )
     parser.add_argument("--budget", type=int, default=None)
     parser.add_argument("--length", type=int, default=None)
     parser.add_argument("--horizon", type=int, default=None)
     parser.add_argument("--beam-width", type=int, default=None)
+    parser.add_argument("--mpc-tail-horizon", type=int, default=8)
+    parser.add_argument("--mpc-root-beam-width", type=int, default=1)
+    parser.add_argument(
+        "--mpc-candidates",
+        type=_parse_csv,
+        default=None,
+        help=(
+            "Comma-separated subset of the default MPC transform catalog; "
+            "defaults to the full configured catalog"
+        ),
+    )
     parser.add_argument("--seeds", type=int, default=None)
     parser.add_argument("--output", type=Path, default=Path("results/rtlola"))
     parser.add_argument("--learned-mode", choices=["none", "regret"], default="none")
@@ -153,12 +170,20 @@ def main(argv: list[str] | None = None) -> None:
         "regret_budgets": args.regret_budgets,
         "regret_train_trace_kinds": args.regret_train_traces,
         "regret_eval_trace_kinds": args.regret_eval_traces,
+        "mpc_tail_horizon": args.mpc_tail_horizon,
+        "mpc_root_beam_width": args.mpc_root_beam_width,
     }
+    if args.mpc_candidates is not None:
+        params["mpc_candidate_names"] = args.mpc_candidates
     for name in ("budget", "length", "horizon", "beam_width", "seeds"):
         value = getattr(args, name)
         if value is not None:
             params[name] = value
     config = RtlolaBenchmarkConfig(**params)
+
+    if args.reference_only:
+        prepare_reference_cache(config)
+        return
 
     result = run_benchmark(config)
     if args.learned_mode == "regret":

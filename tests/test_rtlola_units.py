@@ -37,7 +37,7 @@ from pzr.rtlola.robot_arm import (
     validate_trace_tcp_against_fk,
 )
 from pzr.rtlola.scenarios import scenario_by_name
-from pzr.rtlola.search import beam_search
+from pzr.rtlola.search import MPC_VARIANTS, beam_search, search_mpc_variant
 from pzr.rtlola.sweep_report import consolidate_sweep
 
 
@@ -57,8 +57,8 @@ def test_trigger_confusion_uses_reference_class_denominators():
     assert (confusion["false_negative_steps"] == 1).all()
     assert (confusion["reference_negative_steps"] == 2).all()
     assert (confusion["reference_positive_steps"] == 2).all()
-    assert (confusion["false_positive_rate"] == 0.5).all()
-    assert (confusion["false_negative_rate"] == 0.5).all()
+    assert (confusion["fpr"] == 0.5).all()
+    assert (confusion["fnr"] == 0.5).all()
 
 
 def test_sweep_report_compares_mpc_with_best_static(tmp_path):
@@ -70,25 +70,60 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
             "seed": 0,
             "budget": 40,
             "trace_kind": "figure8_drift",
-            "false_positive_rate": 0.4,
-            "false_negative_rate": 0.1,
+            "false_positive_count": 4,
+            "false_negative_count": 1,
+            "reference_positive_count": 10,
+            "reference_negative_count": 10,
+            "fpr": 0.4,
+            "fnr": 0.1,
             "mean_approx_loss": 2.0,
-            "mean_state_zonotope_approx_error": 4.0,
-            "mean_state_zonotope_width": 8.0,
+            "final_approx_loss": 4.0,
+            "max_approx_loss": 4.0,
+            "sum_approx_loss": 8.0,
+            "mean_state_width": 8.0,
+            "max_state_width": 9.0,
             "total_time_ms": 10.0,
             "fallback_count": 0,
             "reducer_failure_count": 0,
         },
         {
-            "method": "mpc_beam",
+            "method": "scott",
             "seed": 0,
             "budget": 40,
             "trace_kind": "figure8_drift",
-            "false_positive_rate": 0.3,
-            "false_negative_rate": 0.2,
+            "false_positive_count": 5,
+            "false_negative_count": 0,
+            "reference_positive_count": 10,
+            "reference_negative_count": 10,
+            "fpr": 0.5,
+            "fnr": 0.0,
+            "mean_approx_loss": 3.0,
+            "final_approx_loss": 3.5,
+            "max_approx_loss": 3.5,
+            "sum_approx_loss": 12.0,
+            "mean_state_width": 6.0,
+            "max_state_width": 7.0,
+            "total_time_ms": 12.0,
+            "fallback_count": 0,
+            "reducer_failure_count": 0,
+        },
+        {
+            "method": "mpc_terminal_beam",
+            "seed": 0,
+            "budget": 40,
+            "trace_kind": "figure8_drift",
+            "false_positive_count": 3,
+            "false_negative_count": 2,
+            "reference_positive_count": 10,
+            "reference_negative_count": 10,
+            "fpr": 0.3,
+            "fnr": 0.2,
             "mean_approx_loss": 1.0,
-            "mean_state_zonotope_approx_error": 3.0,
-            "mean_state_zonotope_width": 7.0,
+            "final_approx_loss": 0.25,
+            "max_approx_loss": 0.75,
+            "sum_approx_loss": 1.0,
+            "mean_state_width": 7.0,
+            "max_state_width": 8.0,
             "total_time_ms": 30.0,
             "fallback_count": 1,
             "reducer_failure_count": 2,
@@ -97,15 +132,36 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
     pd.DataFrame([
         {
             "method": "girard",
+            "seed": 0,
             "budget": 40,
             "trace_kind": "figure8_drift",
+            "step": 0,
             "reducer_used": "girard",
+            "predicted_sequence": "girard",
+            "approx_loss": 2.0,
+            "state_width": 8.0,
         },
         {
-            "method": "mpc_beam",
+            "method": "mpc_terminal_beam",
+            "seed": 0,
             "budget": 40,
             "trace_kind": "figure8_drift",
+            "step": 0,
             "reducer_used": "scott",
+            "predicted_sequence": "scott,girard",
+            "approx_loss": 0.75,
+            "state_width": 8.0,
+        },
+        {
+            "method": "mpc_terminal_beam",
+            "seed": 0,
+            "budget": 40,
+            "trace_kind": "figure8_drift",
+            "step": 1,
+            "reducer_used": "scott",
+            "predicted_sequence": "scott,girard",
+            "approx_loss": 0.25,
+            "state_width": 6.0,
         },
     ]).to_csv(scenario_dir / "timeseries.csv", index=False)
     pd.DataFrame([{
@@ -123,20 +179,69 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
 
     consolidate_sweep(tmp_path)
 
-    comparison = pd.read_csv(tmp_path / "mpc_vs_static_fpr.csv")
-    assert comparison.loc[0, "best_static_method"] == "girard"
-    assert comparison.loc[0, "absolute_fpr_reduction"] == pytest.approx(0.1)
-    assert comparison.loc[0, "relative_fpr_reduction"] == pytest.approx(0.25)
-    fidelity = pd.read_csv(tmp_path / "mpc_vs_static_fidelity.csv")
-    assert fidelity.loc[0, "best_static_method"] == "girard"
-    assert fidelity.loc[0, "relative_mean_approx_loss_change"] == pytest.approx(-0.5)
+    comparison = pd.read_csv(tmp_path / "mpc_vs_static_metrics.csv")
+    fpr = comparison[comparison["metric"] == "fpr"].iloc[0]
+    assert fpr["best_static_method"] == "girard"
+    assert fpr["absolute_improvement"] == pytest.approx(0.1)
+    assert fpr["relative_improvement"] == pytest.approx(0.25)
+    fnr = comparison[comparison["metric"] == "fnr"].iloc[0]
+    assert fnr["best_static_method"] == "scott"
+    width = comparison[comparison["metric"] == "mean_state_width"].iloc[0]
+    assert width["best_static_method"] == "scott"
+    loss = comparison[comparison["metric"] == "mean_approx_loss"].iloc[0]
+    assert loss["best_static_method"] == "girard"
+    assert loss["relative_improvement"] == pytest.approx(0.5)
+    final_loss = comparison[
+        comparison["metric"] == "final_approx_loss"
+    ].iloc[0]
+    assert final_loss["best_static_method"] == "scott"
+    assert final_loss["best_static_value"] == pytest.approx(3.5)
+    assert final_loss["mpc_value"] == pytest.approx(0.25)
+    sum_loss = comparison[comparison["metric"] == "sum_approx_loss"].iloc[0]
+    assert sum_loss["best_static_method"] == "girard"
+    assert sum_loss["best_static_value"] == pytest.approx(8.0)
+    assert sum_loss["mpc_value"] == pytest.approx(1.0)
+    combined = pd.read_csv(tmp_path / "combined_summary.csv")
+    mpc_summary = combined[combined["method"] == "mpc_terminal_beam"].iloc[0]
+    assert mpc_summary["final_approx_loss"] == pytest.approx(0.25)
+    assert mpc_summary["sum_approx_loss"] == pytest.approx(1.0)
+    primary = pd.read_csv(tmp_path / "primary_metrics.csv")
+    assert list(primary.columns) == [
+        "trace_kind",
+        "budget",
+        "method",
+        "seed",
+        "false_positive_count",
+        "false_negative_count",
+        "reference_positive_count",
+        "reference_negative_count",
+        "fpr",
+        "fnr",
+        "mean_approx_loss",
+        "final_approx_loss",
+        "sum_approx_loss",
+        "mean_state_width",
+        "max_state_width",
+        "total_time_ms",
+    ]
+    primary_mpc = primary[primary["method"] == "mpc_terminal_beam"].iloc[0]
+    assert primary_mpc["final_approx_loss"] == pytest.approx(0.25)
+    assert primary_mpc["sum_approx_loss"] == pytest.approx(1.0)
     assert (tmp_path / "combined_reducer_counts.csv").stat().st_size > 0
     methods = pd.read_csv(tmp_path / "method_comparison.csv")
-    assert set(methods["method"]) == {"girard", "mpc_beam"}
+    assert set(methods["method"]) == {"girard", "scott", "mpc_terminal_beam"}
     composition = pd.read_csv(tmp_path / "mpc_action_composition.csv")
     assert composition.loc[0, "reducer_used"] == "scott"
     assert composition.loc[0, "step_share"] == pytest.approx(1.0)
     assert composition.loc[0, "reduction_share"] == pytest.approx(1.0)
+    followthrough = pd.read_csv(tmp_path / "mpc_plan_followthrough.csv")
+    terminal_girard = followthrough[
+        (followthrough["position"] == 1)
+        & (followthrough["predicted_action"] == "girard")
+    ].iloc[0]
+    assert terminal_girard["realization_rate"] == pytest.approx(0.0)
+    deferral = pd.read_csv(tmp_path / "mpc_girard_deferral.csv")
+    assert deferral.loc[0, "girard_deferral_rate"] == pytest.approx(1.0)
     failures = pd.read_csv(tmp_path / "combined_run_failures.csv")
     assert failures.loc[0, "method"] == "interval_hull"
 
@@ -156,7 +261,7 @@ def test_matrix_metrics_distinguish_dense_active_and_constant_generators():
     assert metrics.active_dynamic_generator_count == 2
     assert metrics.zero_dynamic_generator_count == 1
     assert metrics.total_generator_count == 4
-    assert metrics.full_width_sum == pytest.approx(3.0)
+    assert metrics.state_width == pytest.approx(3.0)
 
 
 def test_packaged_specs_and_registered_scenarios_are_authoritative():
@@ -184,6 +289,18 @@ def test_mpc_objective_is_fixed_and_not_a_cli_option(capsys):
     with pytest.raises(SystemExit):
         cli_main(["--mpc-objective", "python_proxy"])
     assert "unrecognized arguments: --mpc-objective" in capsys.readouterr().err
+
+
+def test_mpc_candidates_can_be_restricted_per_run():
+    config = RtlolaBenchmarkConfig(
+        mpc_candidate_names=["girard", "scott", "combastel", "pca"],
+    )
+    assert config.mpc_candidate_names == [
+        "girard",
+        "scott",
+        "combastel",
+        "pca",
+    ]
 
 
 def test_omni_trace_is_seeded_and_deterministic():
@@ -257,7 +374,7 @@ def test_beam_search_supports_forced_root_with_full_continuation_pool():
                 verdict={},
                 state=SimpleNamespace(depth=depth),
                 action_name=action.name,
-                metrics=SimpleNamespace(full_width_sum=cost),
+                metrics=SimpleNamespace(state_width=cost),
             )
 
     result = beam_search(
@@ -270,7 +387,7 @@ def test_beam_search_supports_forced_root_with_full_continuation_pool():
         beam_width=2,
         fallback=future,
         forced_first_action=first,
-        cost_fn=lambda _engine, step: step.metrics.full_width_sum,
+        cost_fn=lambda _engine, step: step.metrics.state_width,
     )
 
     assert result.predicted_sequence == ("first", "future")
@@ -298,7 +415,7 @@ def test_beam_search_uses_binding_reference_loss_at_terminal_horizon():
                 verdict={},
                 state=next_state,
                 action_name=action.name,
-                metrics=SimpleNamespace(full_width_sum=1000.0),
+                metrics=SimpleNamespace(state_width=1000.0),
             )
 
         def approx_loss(self, reference, candidate):
@@ -328,6 +445,133 @@ def test_beam_search_uses_binding_reference_loss_at_terminal_horizon():
         ("none",),
         ("none", "none"),
     }
+
+
+def test_tail_variants_preserve_roots_and_score_distinct_objectives():
+    none = RtlolaAction("none", lambda _budget: object(), explicit_budget=False)
+    girard = RtlolaAction("girard", lambda _budget: object(), explicit_budget=False)
+    fallback = RtlolaAction("interval", lambda _budget: object(), explicit_budget=False)
+    alpha = RtlolaAction("alpha", lambda _budget: object(), explicit_budget=False)
+    beta = RtlolaAction("beta", lambda _budget: object(), explicit_budget=False)
+
+    class FakeEngine:
+        def metrics(self, state):
+            return SimpleNamespace(dynamic_generator_count=99, dimension=1)
+
+        def branch_step(self, state, event, action, config_budget):
+            del event, config_budget
+            next_state = SimpleNamespace(
+                depth=state.depth + 1,
+                path=(*state.path, action.name),
+            )
+            return SimpleNamespace(
+                verdict={},
+                state=next_state,
+                action_name=action.name,
+                metrics=SimpleNamespace(state_width=0.0),
+            )
+
+        def approx_loss(self, reference, candidate):
+            del reference
+            root = candidate.path[0]
+            if root == "alpha":
+                return 10.0 if candidate.depth == 3 else 0.0
+            if root == "beta":
+                return 4.0
+            return 100.0
+
+    endpoint = search_mpc_variant(
+        FakeEngine(),
+        SimpleNamespace(depth=0, path=()),
+        object(),
+        (object(),),
+        (object(),),
+        (alpha, beta),
+        budget=10,
+        beam_width=1,
+        variant=MPC_VARIANTS["mpc_terminal_girard_tail"],
+        root_beam_width=1,
+        fallback=fallback,
+        none_action=none,
+        tail_action=girard,
+    )
+    integrated = search_mpc_variant(
+        FakeEngine(),
+        SimpleNamespace(depth=0, path=()),
+        object(),
+        (object(),),
+        (object(),),
+        (alpha, beta),
+        budget=10,
+        beam_width=1,
+        variant=MPC_VARIANTS["mpc_cumulative_girard_tail"],
+        root_beam_width=1,
+        fallback=fallback,
+        none_action=none,
+        tail_action=girard,
+    )
+
+    assert endpoint.first_action.name == "beta"
+    assert endpoint.predicted_cost == pytest.approx(4.0)
+    assert integrated.first_action.name == "alpha"
+    assert integrated.predicted_cost == pytest.approx(10.0)
+    assert {row.root_action for row in endpoint.root_evaluations} == {"alpha", "beta"}
+    assert all(row.feasible for row in endpoint.root_evaluations)
+    assert endpoint.realized_tail_steps == 1
+    assert len(endpoint.predicted_sequence) == 2
+    assert "girard" not in endpoint.predicted_sequence
+
+
+def test_root_tail_branches_only_at_current_event():
+    none = RtlolaAction("none", lambda _budget: object(), explicit_budget=False)
+    girard = RtlolaAction("girard", lambda _budget: object(), explicit_budget=False)
+    fallback = RtlolaAction("interval", lambda _budget: object(), explicit_budget=False)
+    alpha = RtlolaAction("alpha", lambda _budget: object(), explicit_budget=False)
+    beta = RtlolaAction("beta", lambda _budget: object(), explicit_budget=False)
+
+    class FakeEngine:
+        def metrics(self, state):
+            return SimpleNamespace(dynamic_generator_count=99, dimension=1)
+
+        def branch_step(self, state, event, action, config_budget):
+            del event, config_budget
+            next_state = SimpleNamespace(
+                depth=state.depth + 1,
+                path=(*state.path, action.name),
+            )
+            return SimpleNamespace(
+                verdict={},
+                state=next_state,
+                action_name=action.name,
+                metrics=SimpleNamespace(state_width=0.0),
+            )
+
+        def approx_loss(self, reference, candidate):
+            del reference
+            return 1.0 if candidate.path[0] == "alpha" else 2.0
+
+    result = search_mpc_variant(
+        FakeEngine(),
+        SimpleNamespace(depth=0, path=()),
+        object(),
+        (object(), object(), object()),
+        (object(), object()),
+        (alpha, beta),
+        budget=10,
+        beam_width=1,
+        variant=MPC_VARIANTS["mpc_one_step_girard_rollout"],
+        root_beam_width=1,
+        fallback=fallback,
+        none_action=none,
+        tail_action=girard,
+    )
+
+    assert result.first_action.name == "alpha"
+    assert result.predicted_sequence == ("alpha",)
+    assert result.optimized_horizon == 0
+    assert result.realized_tail_steps == 2
+    assert result.predicted_cost == pytest.approx(3.0)
+    assert len(result.root_evaluations) == 2
 
 
 def test_engine_wraps_binding_panics_so_search_can_fallback():

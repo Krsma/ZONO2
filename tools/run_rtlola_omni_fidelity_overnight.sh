@@ -9,7 +9,7 @@ ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
 LENGTH="${PZR_LENGTH:-250}"
 BUDGETS="${PZR_BUDGETS:-8,12,16,20}"
 TRACES="${PZR_TRACES:-canonical,safe,x_violated,y_violated}"
-METHODS="${PZR_METHODS:-girard,scott,interval_hull,pca,combastel,mpc_beam}"
+METHODS="${PZR_METHODS:-girard,scott,interval_hull,pca,combastel,mpc_terminal_beam}"
 HORIZON="${PZR_HORIZON:-4}"
 HORIZON_SCAN="${PZR_HORIZON_SCAN:-1,2,4,8}"
 HORIZON_BUDGET="${PZR_HORIZON_BUDGET:-8}"
@@ -152,7 +152,7 @@ if [[ "$SKIP_HORIZON" != "1" ]]; then
                 --budget "$HORIZON_BUDGET" \
                 --horizon "$horizon" \
                 --beam-width "$BEAM_WIDTH" \
-                --methods mpc_beam \
+                --methods mpc_terminal_beam \
                 --reference-mode exact \
                 --no-progress \
                 --output "$cell_dir" || exit $?

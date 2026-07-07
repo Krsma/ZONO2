@@ -36,6 +36,30 @@ class RtlolaStateRef:
 
 
 @dataclass(frozen=True)
+class RtlolaApproximationReference:
+    """Compact exact-state data sufficient for the binding-native loss."""
+
+    center: np.ndarray
+    radius: np.ndarray
+    spec_id: str
+    step: int
+
+    def __post_init__(self) -> None:
+        center = np.asarray(self.center, dtype=np.float64).copy()
+        radius = np.asarray(self.radius, dtype=np.float64).copy()
+        if center.ndim != 1 or radius.ndim != 1 or center.shape != radius.shape:
+            raise ValueError("approximation reference center/radius shapes differ")
+        if not np.all(np.isfinite(center)) or not np.all(np.isfinite(radius)):
+            raise ValueError("approximation reference contains non-finite values")
+        if np.any(radius < 0.0):
+            raise ValueError("approximation reference radius must be non-negative")
+        center.setflags(write=False)
+        radius.setflags(write=False)
+        object.__setattr__(self, "center", center)
+        object.__setattr__(self, "radius", radius)
+
+
+@dataclass(frozen=True)
 class RtlolaStepResult:
     verdict: dict[str, Any]
     state: RtlolaStateRef
@@ -166,6 +190,74 @@ class RtlolaEngine:
         if not np.isfinite(loss):
             raise RtlolaBindingError(
                 "RTLola binding approximation loss was non-finite"
+            )
+        return loss
+
+    def approx_loss_reference(
+        self,
+        reference: RtlolaApproximationReference,
+        candidate: RtlolaStateRef,
+    ) -> float:
+        """Evaluate native loss against a compact exact interval reference."""
+        self._validate_state(candidate)
+        if reference.spec_id != self.spec_id:
+            raise ValueError(
+                "RTLola approximation reference belongs to a different specification"
+            )
+        if reference.step != candidate.step:
+            raise ValueError(
+                "RTLola approximation reference and candidate steps differ "
+                f"(reference={reference.step}, candidate={candidate.step})"
+            )
+
+        try:
+            candidate_matrix = np.asarray(
+                self.planner.state_zonotope(candidate.state, True),
+                dtype=np.float64,
+            )
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise RtlolaBindingError(
+                f"failed to inspect candidate state at step {candidate.step}"
+            ) from exc
+        if candidate_matrix.ndim != 2 or candidate_matrix.shape[1] < 1:
+            raise RtlolaBindingError(
+                f"invalid candidate zonotope shape at step {candidate.step}: "
+                f"{candidate_matrix.shape}"
+            )
+        if candidate_matrix.shape[0] != reference.center.size:
+            raise RtlolaBindingError(
+                "RTLola exact-reference and candidate dimensions differ "
+                f"(step={candidate.step}, reference={reference.center.size}, "
+                f"candidate={candidate_matrix.shape[0]})"
+            )
+        if not np.array_equal(candidate_matrix[:, 0], reference.center):
+            raise RtlolaBindingError(
+                f"RTLola exact-reference and candidate centers differ at step {candidate.step}"
+            )
+
+        dimension = reference.center.size
+        exact_interval = np.zeros((dimension, dimension + 1), dtype=np.float64)
+        exact_interval[:, 0] = reference.center
+        exact_interval[np.arange(dimension), np.arange(dimension) + 1] = reference.radius
+
+        previous = self.planner.state()
+        try:
+            self.planner.apply_state(candidate.state)
+            loss = float(self.planner.approx_loss(exact_interval))
+        except BaseException as exc:
+            if isinstance(exc, (KeyboardInterrupt, SystemExit)):
+                raise
+            raise RtlolaBindingError(
+                "failed to compute cached RTLola binding approximation loss "
+                f"(step={candidate.step})"
+            ) from exc
+        finally:
+            self.planner.apply_state(previous)
+        if not np.isfinite(loss):
+            raise RtlolaBindingError(
+                "RTLola cached binding approximation loss was non-finite"
             )
         return loss
 

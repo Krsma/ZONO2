@@ -11,14 +11,20 @@ import pzr.rtlola.benchmark as benchmark_module
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
+    root_evaluations_to_dataframe,
     run_benchmark,
     save_benchmark_results,
 )
 from pzr.rtlola.binding import (
     BINDING_BUILD_PROFILE,
+    BINDING_REVISION,
     INTERPRETER_REVISION,
 )
-from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent
+from pzr.rtlola.engine import (
+    RtlolaApproximationReference,
+    RtlolaEngine,
+    RtlolaEvent,
+)
 from pzr.rtlola.omni import (
     OMNI_EXPECTED_VERDICT_KEYS,
     OMNI_PUBLIC_STREAM_KEYS,
@@ -272,6 +278,7 @@ def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
     assert (scenario_dir / "summary.csv").stat().st_size > 0
     assert (scenario_dir / "aggregate.csv").stat().st_size > 0
     assert (scenario_dir / "run_failures.csv").stat().st_size > 0
+    assert (scenario_dir / "mpc_root_evaluations.csv").stat().st_size > 0
     assert "post_event_over_bound" in result.timeseries
     assert "active_dynamic_generator_count" in result.timeseries
     assert "zero_dynamic_generator_count" in result.timeseries
@@ -293,7 +300,7 @@ def test_robot_arm_mpc_uses_binding_terminal_loss():
         budget=40,
         horizon=2,
         beam_width=2,
-        methods=["mpc_beam"],
+        methods=["mpc_terminal_beam"],
         reference_mode="exact",
     ))
 
@@ -302,6 +309,40 @@ def test_robot_arm_mpc_uses_binding_terminal_loss():
     assert np.isfinite(result.timeseries["approx_loss"]).all()
     assert result.config.mpc_objective == "terminal_binding_approx_loss"
     assert not any(column.endswith(("_lower", "_upper")) for column in result.timeseries)
+
+
+def test_robot_arm_tail_mpc_variants_emit_root_diagnostics():
+    methods = [
+        "mpc_terminal_girard_tail",
+        "mpc_cumulative_girard_tail",
+        "mpc_one_step_girard_rollout",
+    ]
+    result = run_benchmark(RtlolaBenchmarkConfig(
+        scenario="robot_arm",
+        trace_kind=DEFAULT_TRACE_KIND,
+        length=8,
+        seeds=1,
+        budget=40,
+        horizon=1,
+        beam_width=2,
+        mpc_tail_horizon=2,
+        mpc_root_beam_width=1,
+        methods=methods,
+        reference_mode="exact",
+    ))
+
+    assert not result.failures
+    assert set(result.timeseries["method"]) == set(methods)
+    reduced = result.timeseries[result.timeseries["reducer_used"] != "none"]
+    assert set(reduced["mpc_variant"]) == set(methods)
+    assert (reduced["configured_tail_horizon"] == 2).all()
+    assert np.isfinite(reduced["explicit_terminal_loss"]).all()
+    roots = root_evaluations_to_dataframe(result.raw_results)
+    assert not roots.empty
+    assert set(roots["method"]) == set(methods)
+    assert {"girard", "scott", "pca", "combastel", "clustering"} <= set(
+        roots["root_action"]
+    )
 
 
 def test_robot_arm_sparse_trigger_outputs_are_normalized():
@@ -392,20 +433,30 @@ def test_verdict_reference_is_cached_and_raw_symbolic_values_are_not_saved(tmp_p
     assert cache.stat().st_size > 0
     cached = json.loads(cache.read_text())
     assert cached["metadata"]["trace_sha256"]
+    assert cached["metadata"]["binding_revision"] == BINDING_REVISION
     assert cached["metadata"]["interpreter_revision"] == INTERPRETER_REVISION
     assert cached["metadata"]["binding_build_profile"] == BINDING_BUILD_PROFILE
+    assert cached["metadata"]["capabilities"] == ["trigger_verdicts"]
     assert all(
         isinstance(value, bool)
         for row in cached["steps"]
-        for value in row.values()
+        for value in row["verdicts"].values()
     )
     assert first.summary.loc[0, "reference_negative_count"] >= 0
     assert first.summary.loc[0, "reference_positive_count"] >= 0
     negative_count = int(first.summary.loc[0, "reference_negative_count"])
     if negative_count:
-        assert first.summary.loc[0, "false_positive_rate"] == pytest.approx(
+        assert first.summary.loc[0, "fpr"] == pytest.approx(
             first.summary.loc[0, "false_positive_count"] / negative_count,
         )
+    assert first.summary[
+        [
+            "mean_approx_loss",
+            "final_approx_loss",
+            "max_approx_loss",
+            "sum_approx_loss",
+        ]
+    ].isna().all().all()
     assert "exact_trigger_positive" in first.timeseries
     assert "exact_Trigger#4" in first.timeseries
     assert "dist_to_expected" not in first.timeseries
@@ -416,6 +467,95 @@ def test_verdict_reference_is_cached_and_raw_symbolic_values_are_not_saved(tmp_p
 
     with pytest.raises(ValueError, match="metadata mismatch"):
         run_benchmark(replace(config, length=3))
+
+    with pytest.raises(ValueError, match="lacks approximation data"):
+        run_benchmark(replace(config, reference_mode="exact"))
+
+
+def test_cached_exact_loss_matches_direct_binding_state_loss(tmp_path):
+    events = generate_robot_arm_events(8, trace_kind=DEFAULT_TRACE_KIND)
+    catalog = default_action_catalog().by_name
+    engine = RtlolaEngine(
+        ARM_SPEC,
+        event_arity=9,
+        expected_verdict_keys=ARM_PUBLIC_STREAM_KEYS,
+    )
+    exact_state = engine.snapshot(step=0, time=events[0].time)
+
+    for index, event in enumerate(events, start=1):
+        exact = engine.branch_step(exact_state, event, catalog["none"], budget=40)
+        candidate = engine.live_step(event, catalog["girard"], budget=40, step=index)
+        total = engine.matrices(exact.state)[1]
+        reference = RtlolaApproximationReference(
+            center=total[:, 0],
+            radius=np.abs(total[:, 1:]).sum(axis=1),
+            spec_id=engine.spec_id,
+            step=index,
+        )
+        planner_before = np.asarray(engine.planner.current_zonotope(True)).copy()
+        live_before = np.asarray(engine.live.current_zonotope(True)).copy()
+
+        cached_loss = engine.approx_loss_reference(reference, candidate.state)
+        direct_loss = engine.approx_loss(exact.state, candidate.state)
+
+        assert cached_loss == pytest.approx(direct_loss)
+        np.testing.assert_array_equal(
+            engine.planner.current_zonotope(True),
+            planner_before,
+        )
+        np.testing.assert_array_equal(
+            engine.live.current_zonotope(True),
+            live_before,
+        )
+        exact_state = exact.state
+
+    cache = tmp_path / "exact.json"
+    result = run_benchmark(RtlolaBenchmarkConfig(
+        scenario="robot_arm",
+        trace_kind=DEFAULT_TRACE_KIND,
+        length=8,
+        seeds=1,
+        budget=40,
+        methods=["girard"],
+        reference_mode="exact",
+        reference_cache=str(cache),
+    ))
+    payload = json.loads(cache.read_text())
+    assert payload["metadata"]["capabilities"] == [
+        "trigger_verdicts",
+        "approx_loss",
+    ]
+    assert all({"verdicts", "center", "radius"} == set(row) for row in payload["steps"])
+    assert np.isfinite(result.timeseries["approx_loss"]).all()
+    assert {"state_width", "approx_loss"} <= set(result.timeseries)
+    assert {
+        "state_zonotope_width_sum",
+        "exact_state_zonotope_width_sum",
+        "state_zonotope_approx_error_sum",
+    }.isdisjoint(result.timeseries)
+    assert {
+        "fpr",
+        "fnr",
+        "mean_state_width",
+        "max_state_width",
+        "mean_approx_loss",
+        "final_approx_loss",
+        "max_approx_loss",
+        "sum_approx_loss",
+    } <= set(result.summary)
+    losses = result.timeseries["approx_loss"]
+    widths = result.timeseries["state_width"]
+    summary = result.summary.iloc[0]
+    assert summary["mean_approx_loss"] == pytest.approx(losses.mean())
+    assert summary["final_approx_loss"] == pytest.approx(losses.iloc[-1])
+    assert summary["max_approx_loss"] == pytest.approx(losses.max())
+    assert summary["sum_approx_loss"] == pytest.approx(losses.sum())
+    assert summary["mean_state_width"] == pytest.approx(widths.mean())
+    assert summary["max_state_width"] == pytest.approx(widths.max())
+    assert {
+        "final_approx_loss_mean",
+        "sum_approx_loss_mean",
+    } <= set(result.aggregate)
 
 
 def test_failed_static_run_is_recorded_and_other_methods_continue(monkeypatch, tmp_path):

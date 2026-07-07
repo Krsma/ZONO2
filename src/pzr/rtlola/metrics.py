@@ -17,7 +17,7 @@ class RtlolaMatrixMetrics:
     active_total_generator_count: int
     zero_dynamic_generator_count: int
     zero_total_generator_count: int
-    full_width_sum: float
+    state_width: float
     width_mean: float
     width_max: float
     dimension: int
@@ -31,7 +31,7 @@ class RtlolaMatrixMetrics:
     gen_pca_explained: float
 
     def cost(self) -> float:
-        return float(self.full_width_sum)
+        return float(self.state_width)
 
 
 def generator_count(matrix: NDArray[np.float64]) -> int:
@@ -105,7 +105,7 @@ def matrix_metrics(
         active_total_generator_count=active_total_count,
         zero_dynamic_generator_count=max(0, dynamic_count - active_dynamic_count),
         zero_total_generator_count=max(0, total_count - active_total_count),
-        full_width_sum=_safe(float(np.sum(widths))),
+        state_width=_safe(float(np.sum(widths))),
         width_mean=_safe(float(np.mean(widths))) if widths.size else 0.0,
         width_max=_safe(float(np.max(widths))) if widths.size else 0.0,
         dimension=int(z.shape[0]),
