@@ -14,8 +14,12 @@ import pandas as pd
 import yaml
 
 from pzr.rtlola.actions import (
+    CORE_STATIC_ACTION_NAMES,
+    EXACT_BASELINE_ACTION_NAME,
+    EXPLICIT_ACTION_METHOD_NAMES,
     MPC_ACTION_NAMES,
     RtlolaAction,
+    STATIC_ACTION_METHOD_NAMES,
     default_action_catalog,
 )
 from pzr.rtlola.binding import (
@@ -43,18 +47,9 @@ from pzr.rtlola.search import (
 )
 
 
-CORE_STATIC_METHODS = ("none", "girard", "scott", "interval_hull", "pca")
-STATIC_METHODS = (
-    "none",
-    "girard",
-    "scott",
-    "interval_hull",
-    "pca",
-    "althoff_a",
-    "clustering",
-    "combastel",
-    "colinear_scale",
-)
+METHOD_SET_CHOICES = ("core", "static", "mpc", "all")
+CORE_STATIC_METHODS = CORE_STATIC_ACTION_NAMES
+STATIC_METHODS = STATIC_ACTION_METHOD_NAMES
 BASELINE_MPC_METHODS = ("mpc_terminal_beam",)
 MPC_METHODS = tuple(MPC_VARIANTS)
 ALL_METHODS = (*STATIC_METHODS, *MPC_METHODS)
@@ -228,11 +223,7 @@ class RtlolaBenchmarkResult:
 
 def methods_for_config(config: RtlolaBenchmarkConfig) -> tuple[str, ...]:
     if config.methods is not None:
-        available = {
-            *ALL_METHODS,
-            "colinear",
-            "interval",
-        }
+        available = {*EXPLICIT_ACTION_METHOD_NAMES, *MPC_METHODS}
         unknown = [method for method in config.methods if method not in available]
         if unknown:
             valid = ", ".join(sorted(available))
@@ -247,7 +238,8 @@ def methods_for_config(config: RtlolaBenchmarkConfig) -> tuple[str, ...]:
         return MPC_METHODS
     if config.method_set == "all":
         return (*STATIC_METHODS, *MPC_METHODS)
-    raise ValueError("method_set must be one of: core, static, mpc, all")
+    valid_sets = ", ".join(METHOD_SET_CHOICES)
+    raise ValueError(f"method_set must be one of: {valid_sets}")
 
 
 def bootstrap_ci(
@@ -427,15 +419,15 @@ def _run_single(
         future = tuple(trace[index + 1:index + 1 + config.horizon])
         start = time.perf_counter()
         try:
-            if method == "none":
-                first = by_name["none"]
+            if method == EXACT_BASELINE_ACTION_NAME:
+                first = by_name[EXACT_BASELINE_ACTION_NAME]
                 first_step = engine.branch_step(state, event, first, config.budget)
                 decision = RtlolaSearchResult(
                     first_action=first,
                     first_action_budget=config.budget,
                     first_step=first_step,
                     predicted_cost=first_step.metrics.cost(),
-                    predicted_sequence=("none",),
+                    predicted_sequence=(EXACT_BASELINE_ACTION_NAME,),
                     evaluated_leaves=1,
                     pruned_branches=0,
                 )
@@ -449,7 +441,7 @@ def _run_single(
                     config.budget,
                     config.beam_width,
                     fallback=fallback,
-                    none_action=by_name["none"],
+                    none_action=by_name[EXACT_BASELINE_ACTION_NAME],
                     use_reference_loss=True,
                     configured_horizon=config.horizon,
                 )
@@ -477,7 +469,7 @@ def _run_single(
                     variant=variant,
                     root_beam_width=config.mpc_root_beam_width,
                     fallback=fallback,
-                    none_action=by_name["none"],
+                    none_action=by_name[EXACT_BASELINE_ACTION_NAME],
                     tail_action=by_name["girard"],
                     configured_horizon=config.horizon,
                     configured_tail_horizon=config.mpc_tail_horizon,
@@ -490,7 +482,7 @@ def _run_single(
                     by_name[method],
                     config.budget,
                     fallback=fallback,
-                    none_action=by_name["none"],
+                    none_action=by_name[EXACT_BASELINE_ACTION_NAME],
                 )
         except (RtlolaBindingError, RtlolaNoFeasibleAction) as exc:
             return _run_failure(

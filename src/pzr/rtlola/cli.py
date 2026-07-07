@@ -9,6 +9,7 @@ from pathlib import Path
 import pandas as pd
 
 from pzr.rtlola.benchmark import (
+    METHOD_SET_CHOICES,
     RTLOLA_AGGREGATE_METRICS,
     RtlolaBenchmarkConfig,
     aggregate_summary,
@@ -72,7 +73,7 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument(
         "--method-set",
-        choices=["core", "static", "mpc", "all"],
+        choices=METHOD_SET_CHOICES,
         default="core",
     )
     parser.add_argument(

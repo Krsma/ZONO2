@@ -5,8 +5,19 @@ import numpy as np
 import pandas as pd
 import pytest
 
-from pzr.rtlola.actions import RtlolaAction
-from pzr.rtlola.benchmark import RtlolaBenchmarkConfig, trigger_confusion
+from pzr.rtlola.actions import (
+    EXPLICIT_ACTION_METHOD_NAMES,
+    RtlolaAction,
+    STATIC_ACTION_METHOD_NAMES,
+)
+from pzr.rtlola.benchmark import (
+    CORE_METHODS,
+    METHOD_SET_CHOICES,
+    MPC_METHODS,
+    RtlolaBenchmarkConfig,
+    methods_for_config,
+    trigger_confusion,
+)
 from pzr.rtlola.cli import main as cli_main
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
 from pzr.rtlola.metrics import (
@@ -301,6 +312,55 @@ def test_mpc_candidates_can_be_restricted_per_run():
         "combastel",
         "pca",
     ]
+
+
+def test_method_set_expansion_preserves_public_contract():
+    assert METHOD_SET_CHOICES == ("core", "static", "mpc", "all")
+    assert CORE_METHODS == (
+        "none",
+        "girard",
+        "scott",
+        "interval_hull",
+        "pca",
+        "mpc_terminal_beam",
+    )
+    assert methods_for_config(RtlolaBenchmarkConfig(method_set="core")) == CORE_METHODS
+    assert methods_for_config(RtlolaBenchmarkConfig(method_set="static")) == (
+        "none",
+        "girard",
+        "scott",
+        "interval_hull",
+        "pca",
+        "althoff_a",
+        "clustering",
+        "combastel",
+        "colinear_scale",
+    )
+    assert methods_for_config(RtlolaBenchmarkConfig(method_set="mpc")) == MPC_METHODS
+    assert methods_for_config(RtlolaBenchmarkConfig(method_set="all")) == (
+        *STATIC_ACTION_METHOD_NAMES,
+        *MPC_METHODS,
+    )
+
+
+def test_explicit_method_override_accepts_static_mpc_and_fallback_names():
+    methods = ["colinear", "interval", "mpc_terminal_beam", "girard"]
+
+    assert methods_for_config(RtlolaBenchmarkConfig(methods=methods)) == tuple(methods)
+    assert set(EXPLICIT_ACTION_METHOD_NAMES) >= {
+        "none",
+        "girard",
+        "colinear",
+        "interval",
+    }
+
+
+def test_method_config_rejects_unknown_method_names():
+    with pytest.raises(ValueError, match="unknown RTLola method"):
+        methods_for_config(RtlolaBenchmarkConfig(methods=["girard", "not_real"]))
+
+    with pytest.raises(ValueError, match="method_set must be one of"):
+        methods_for_config(RtlolaBenchmarkConfig(method_set="not_real"))
 
 
 def test_omni_trace_is_seeded_and_deterministic():

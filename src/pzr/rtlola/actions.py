@@ -47,6 +47,9 @@ def action_by_name(actions: tuple[RtlolaAction, ...]) -> dict[str, RtlolaAction]
     return {action.name: action for action in actions}
 
 
+EXACT_BASELINE_ACTION_NAME = "none"
+FALLBACK_ACTION_NAME = "interval"
+COLINEAR_ACTION_NAME = "colinear"
 MPC_ACTION_NAMES = (
     "girard",
     "scott",
@@ -54,6 +57,13 @@ MPC_ACTION_NAMES = (
     "pca",
     "combastel",
     "clustering",
+)
+CORE_STATIC_ACTION_NAMES = (
+    EXACT_BASELINE_ACTION_NAME,
+    "girard",
+    "scott",
+    "interval_hull",
+    "pca",
 )
 BOUNDED_STATIC_ACTION_NAMES = (
     "girard",
@@ -65,6 +75,15 @@ BOUNDED_STATIC_ACTION_NAMES = (
     "combastel",
     "colinear_scale",
 )
+STATIC_ACTION_METHOD_NAMES = (
+    EXACT_BASELINE_ACTION_NAME,
+    *BOUNDED_STATIC_ACTION_NAMES,
+)
+EXPLICIT_ACTION_METHOD_NAMES = (
+    *STATIC_ACTION_METHOD_NAMES,
+    COLINEAR_ACTION_NAME,
+    FALLBACK_ACTION_NAME,
+)
 
 
 @dataclass(frozen=True)
@@ -74,8 +93,8 @@ class RtlolaActionCatalog:
     actions: tuple[RtlolaAction, ...]
     bounded_static_names: tuple[str, ...] = BOUNDED_STATIC_ACTION_NAMES
     mpc_candidate_names: tuple[str, ...] = MPC_ACTION_NAMES
-    no_op_name: str = "none"
-    fallback_name: str = "interval"
+    no_op_name: str = EXACT_BASELINE_ACTION_NAME
+    fallback_name: str = FALLBACK_ACTION_NAME
 
     @property
     def by_name(self) -> dict[str, RtlolaAction]:
