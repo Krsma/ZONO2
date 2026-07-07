@@ -19,6 +19,7 @@ from pzr.learning.ranking import (
 from pzr.rtlola.actions import RtlolaAction, RtlolaActionCatalog, default_action_catalog
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
+    RtlolaExecutedStep,
     RtlolaReferenceStep,
     RtlolaRunResult,
     load_or_compute_reference,
@@ -565,6 +566,12 @@ def _evaluate_learned_episode(
             step=step + 1,
         )
         elapsed_ms = (time.perf_counter() - start) * 1000.0
+        executed = RtlolaExecutedStep(
+            pre_generator_count=pre_count,
+            committed=committed,
+            decision=decision,
+            decision_time_ms=elapsed_ms,
+        )
         records.append(make_step_record(
             engine=engine,
             scenario=scenario,
@@ -572,10 +579,7 @@ def _evaluate_learned_episode(
             method="learned_direct",
             step=step,
             budget=budget,
-            pre_generator_count=pre_count,
-            committed=committed,
-            decision=decision,
-            decision_time_ms=elapsed_ms,
+            executed=executed,
             reference=reference[step] if reference is not None else None,
         ))
     return RtlolaRunResult(

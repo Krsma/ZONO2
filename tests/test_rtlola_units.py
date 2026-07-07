@@ -15,6 +15,9 @@ from pzr.rtlola.benchmark import (
     METHOD_SET_CHOICES,
     MPC_METHODS,
     RtlolaBenchmarkConfig,
+    RtlolaExecutedStep,
+    RtlolaReferenceStep,
+    make_step_record,
     methods_for_config,
     trigger_confusion,
 )
@@ -48,7 +51,12 @@ from pzr.rtlola.robot_arm import (
     validate_trace_tcp_against_fk,
 )
 from pzr.rtlola.scenarios import scenario_by_name
-from pzr.rtlola.search import MPC_VARIANTS, beam_search, search_mpc_variant
+from pzr.rtlola.search import (
+    MPC_VARIANTS,
+    RtlolaSearchResult,
+    beam_search,
+    search_mpc_variant,
+)
 from pzr.rtlola.sweep_report import consolidate_sweep
 
 
@@ -361,6 +369,70 @@ def test_method_config_rejects_unknown_method_names():
 
     with pytest.raises(ValueError, match="method_set must be one of"):
         methods_for_config(RtlolaBenchmarkConfig(method_set="not_real"))
+
+
+def test_make_step_record_uses_executed_step_boundary():
+    metrics = SimpleNamespace(
+        dynamic_generator_count=12,
+        total_generator_count=13,
+        active_dynamic_generator_count=10,
+        active_total_generator_count=11,
+        zero_dynamic_generator_count=2,
+        zero_total_generator_count=2,
+        state_width=4.5,
+    )
+    committed = SimpleNamespace(
+        state=object(),
+        verdict={"alarm": True, "runtime_ns": 123},
+        metrics=metrics,
+    )
+    action = RtlolaAction("girard", lambda _budget: object())
+    decision = RtlolaSearchResult(
+        first_action=action,
+        first_action_budget=7,
+        first_step=committed,
+        predicted_cost=1.25,
+        predicted_sequence=("girard", "scott"),
+        evaluated_leaves=3,
+        pruned_branches=1,
+        fallback_used=True,
+        reducer_failure_count=2,
+        infeasible_candidate_count=2,
+    )
+    executed = RtlolaExecutedStep(
+        pre_generator_count=9,
+        committed=committed,
+        decision=decision,
+        decision_time_ms=0.5,
+    )
+    engine = SimpleNamespace(
+        approx_loss_reference=lambda approximation, state: 8.0,
+    )
+    scenario = SimpleNamespace(trigger_keys=("alarm",))
+
+    record = make_step_record(
+        engine=engine,
+        scenario=scenario,
+        seed=4,
+        method="girard",
+        step=2,
+        budget=7,
+        executed=executed,
+        reference=RtlolaReferenceStep(
+            verdicts={"alarm": False},
+            approximation=object(),  # type: ignore[arg-type]
+        ),
+    )
+
+    assert record.pre_generator_count == 9
+    assert record.reducer_used == "girard"
+    assert record.reduced is True
+    assert record.approx_loss == pytest.approx(8.0)
+    assert record.false_positive is True
+    assert record.post_event_over_bound is True
+    assert record.fallback_used is True
+    assert record.infeasible_candidate_count == 2
+    assert record.predicted_sequence == ("girard", "scott")
 
 
 def test_omni_trace_is_seeded_and_deterministic():

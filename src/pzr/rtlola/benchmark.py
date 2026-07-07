@@ -33,6 +33,7 @@ from pzr.rtlola.engine import (
     RtlolaBindingError,
     RtlolaEngine,
     RtlolaEvent,
+    RtlolaStateRef,
     RtlolaStepResult,
 )
 from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
@@ -170,6 +171,16 @@ class RtlolaStepRecord:
     tail_terminal_loss: float = float("nan")
     tail_fallback_count: int = 0
     root_evaluations: tuple[MpcRootEvaluation, ...] = ()
+
+
+@dataclass(frozen=True)
+class RtlolaExecutedStep:
+    """Selected action and committed native result before metric row creation."""
+
+    pre_generator_count: int
+    committed: RtlolaStepResult
+    decision: RtlolaSearchResult
+    decision_time_ms: float
 
 
 @dataclass(frozen=True)
@@ -419,71 +430,19 @@ def _run_single(
         future = tuple(trace[index + 1:index + 1 + config.horizon])
         start = time.perf_counter()
         try:
-            if method == EXACT_BASELINE_ACTION_NAME:
-                first = by_name[EXACT_BASELINE_ACTION_NAME]
-                first_step = engine.branch_step(state, event, first, config.budget)
-                decision = RtlolaSearchResult(
-                    first_action=first,
-                    first_action_budget=config.budget,
-                    first_step=first_step,
-                    predicted_cost=first_step.metrics.cost(),
-                    predicted_sequence=(EXACT_BASELINE_ACTION_NAME,),
-                    evaluated_leaves=1,
-                    pruned_branches=0,
-                )
-            elif method == "mpc_terminal_beam":
-                decision = beam_search(
-                    engine,
-                    state,
-                    event,
-                    future,
-                    mpc_candidates,
-                    config.budget,
-                    config.beam_width,
-                    fallback=fallback,
-                    none_action=by_name[EXACT_BASELINE_ACTION_NAME],
-                    use_reference_loss=True,
-                    configured_horizon=config.horizon,
-                )
-            elif method in MPC_VARIANTS:
-                variant = MPC_VARIANTS[method]
-                optimized_future_count = (
-                    config.horizon if variant.uses_configured_horizon else 0
-                )
-                optimized_future = tuple(
-                    trace[index + 1:index + 1 + optimized_future_count]
-                )
-                tail_start = index + 1 + optimized_future_count
-                tail = tuple(
-                    trace[tail_start:tail_start + config.mpc_tail_horizon]
-                )
-                decision = search_mpc_variant(
-                    engine,
-                    state,
-                    event,
-                    optimized_future,
-                    tail,
-                    mpc_candidates,
-                    config.budget,
-                    config.beam_width,
-                    variant=variant,
-                    root_beam_width=config.mpc_root_beam_width,
-                    fallback=fallback,
-                    none_action=by_name[EXACT_BASELINE_ACTION_NAME],
-                    tail_action=by_name["girard"],
-                    configured_horizon=config.horizon,
-                    configured_tail_horizon=config.mpc_tail_horizon,
-                )
-            else:
-                decision = choose_static_action(
-                    engine,
-                    state,
-                    event,
-                    by_name[method],
-                    config.budget,
-                    fallback=fallback,
-                    none_action=by_name[EXACT_BASELINE_ACTION_NAME],
-                )
+            decision = _select_method_decision(
+                config=config,
+                engine=engine,
+                trace=trace,
+                state=state,
+                event=event,
+                step=index,
+                method=method,
+                future=future,
+                mpc_candidates=mpc_candidates,
+                by_name=by_name,
+                fallback=fallback,
+            )
         except (RtlolaBindingError, RtlolaNoFeasibleAction) as exc:
             return _run_failure(
                 config,
@@ -498,10 +457,10 @@ def _run_single(
             )
 
         try:
-            committed = engine.live_step(
+            committed = _commit_decision(
+                engine,
                 event,
-                decision.first_action,
-                decision.first_action_budget,
+                decision,
                 step=index + 1,
             )
         except RtlolaBindingError as exc:
@@ -517,6 +476,12 @@ def _run_single(
                 exc,
             )
         elapsed_ms = (time.perf_counter() - start) * 1000.0
+        executed = RtlolaExecutedStep(
+            pre_generator_count=pre_metrics.dynamic_generator_count,
+            committed=committed,
+            decision=decision,
+            decision_time_ms=elapsed_ms,
+        )
         try:
             steps.append(make_step_record(
                 engine=engine,
@@ -525,10 +490,7 @@ def _run_single(
                 method=method,
                 step=index,
                 budget=config.budget,
-                pre_generator_count=pre_metrics.dynamic_generator_count,
-                committed=committed,
-                decision=decision,
-                decision_time_ms=elapsed_ms,
+                executed=executed,
                 reference=reference[index] if reference is not None else None,
             ))
         except RtlolaBindingError as exc:
@@ -549,6 +511,101 @@ def _run_single(
         steps=tuple(steps),
         budget=config.budget,
         trace_kind=trace_kind,
+    )
+
+
+def _select_method_decision(
+    *,
+    config: RtlolaBenchmarkConfig,
+    engine: RtlolaEngine,
+    trace: Sequence[RtlolaEvent],
+    state: RtlolaStateRef,
+    event: RtlolaEvent,
+    step: int,
+    method: str,
+    future: Sequence[RtlolaEvent],
+    mpc_candidates: tuple[RtlolaAction, ...],
+    by_name: dict[str, RtlolaAction],
+    fallback: RtlolaAction,
+) -> RtlolaSearchResult:
+    """Select a native action for one benchmark event without committing it."""
+    if method == EXACT_BASELINE_ACTION_NAME:
+        first = by_name[EXACT_BASELINE_ACTION_NAME]
+        first_step = engine.branch_step(state, event, first, config.budget)
+        return RtlolaSearchResult(
+            first_action=first,
+            first_action_budget=config.budget,
+            first_step=first_step,
+            predicted_cost=first_step.metrics.cost(),
+            predicted_sequence=(EXACT_BASELINE_ACTION_NAME,),
+            evaluated_leaves=1,
+            pruned_branches=0,
+        )
+    if method == "mpc_terminal_beam":
+        return beam_search(
+            engine,
+            state,
+            event,
+            future,
+            mpc_candidates,
+            config.budget,
+            config.beam_width,
+            fallback=fallback,
+            none_action=by_name[EXACT_BASELINE_ACTION_NAME],
+            use_reference_loss=True,
+            configured_horizon=config.horizon,
+        )
+    if method in MPC_VARIANTS:
+        variant = MPC_VARIANTS[method]
+        optimized_future_count = (
+            config.horizon if variant.uses_configured_horizon else 0
+        )
+        optimized_future = tuple(
+            trace[step + 1:step + 1 + optimized_future_count]
+        )
+        tail_start = step + 1 + optimized_future_count
+        tail = tuple(trace[tail_start:tail_start + config.mpc_tail_horizon])
+        return search_mpc_variant(
+            engine,
+            state,
+            event,
+            optimized_future,
+            tail,
+            mpc_candidates,
+            config.budget,
+            config.beam_width,
+            variant=variant,
+            root_beam_width=config.mpc_root_beam_width,
+            fallback=fallback,
+            none_action=by_name[EXACT_BASELINE_ACTION_NAME],
+            tail_action=by_name["girard"],
+            configured_horizon=config.horizon,
+            configured_tail_horizon=config.mpc_tail_horizon,
+        )
+    return choose_static_action(
+        engine,
+        state,
+        event,
+        by_name[method],
+        config.budget,
+        fallback=fallback,
+        none_action=by_name[EXACT_BASELINE_ACTION_NAME],
+    )
+
+
+def _commit_decision(
+    engine: RtlolaEngine,
+    event: RtlolaEvent,
+    decision: RtlolaSearchResult,
+    *,
+    step: int,
+) -> RtlolaStepResult:
+    """Apply the selected binding-native transform to the live monitor."""
+    return engine.live_step(
+        event,
+        decision.first_action,
+        decision.first_action_budget,
+        step=step,
     )
 
 
@@ -585,13 +642,12 @@ def make_step_record(
     method: str,
     step: int,
     budget: int,
-    pre_generator_count: int,
-    committed: RtlolaStepResult,
-    decision: RtlolaSearchResult,
-    decision_time_ms: float,
+    executed: RtlolaExecutedStep,
     reference: RtlolaReferenceStep | None,
 ) -> RtlolaStepRecord:
     """Create one benchmark row for any static, predictive, or learned policy."""
+    committed = executed.committed
+    decision = executed.decision
     approx_loss = (
         engine.approx_loss_reference(reference.approximation, committed.state)
         if reference is not None and reference.approximation is not None
@@ -618,14 +674,14 @@ def make_step_record(
         seed=seed,
         method=method,
         step=step,
-        pre_generator_count=pre_generator_count,
+        pre_generator_count=executed.pre_generator_count,
         generator_count=committed.metrics.dynamic_generator_count,
         total_generator_count=committed.metrics.total_generator_count,
         active_dynamic_generator_count=committed.metrics.active_dynamic_generator_count,
         active_total_generator_count=committed.metrics.active_total_generator_count,
         zero_dynamic_generator_count=committed.metrics.zero_dynamic_generator_count,
         zero_total_generator_count=committed.metrics.zero_total_generator_count,
-        reduced=decision.first_action.name != "none",
+        reduced=decision.first_action.name != EXACT_BASELINE_ACTION_NAME,
         reducer_used=decision.first_action.name,
         state_width=committed.metrics.state_width,
         approx_loss=approx_loss,
@@ -635,7 +691,7 @@ def make_step_record(
         exact_trigger_positive=exact_positive,
         trigger_verdicts=predicted_triggers,
         exact_trigger_verdicts=exact_triggers,
-        decision_time_ms=decision_time_ms,
+        decision_time_ms=executed.decision_time_ms,
         binding_runtime_ns=_binding_runtime_ns(committed.verdict),
         predicted_cost=decision.predicted_cost,
         predicted_sequence=decision.predicted_sequence,
