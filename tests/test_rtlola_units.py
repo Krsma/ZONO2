@@ -16,7 +16,6 @@ from pzr.rtlola.benchmark import (
     MPC_METHODS,
     RtlolaBenchmarkConfig,
     RtlolaExecutedStep,
-    RtlolaReferenceStep,
     make_step_record,
     methods_for_config,
     trigger_confusion,
@@ -28,6 +27,7 @@ from pzr.rtlola.metrics import (
     generator_count,
     matrix_metrics,
 )
+from pzr.rtlola.reference import RtlolaReferenceStep, reference_cache_path
 from pzr.rtlola.omni import (
     OMNI_DEFAULT_TRACE_KIND,
     OMNI_PUBLIC_STREAM_KEYS,
@@ -369,6 +369,16 @@ def test_method_config_rejects_unknown_method_names():
 
     with pytest.raises(ValueError, match="method_set must be one of"):
         methods_for_config(RtlolaBenchmarkConfig(method_set="not_real"))
+
+
+def test_reference_cache_path_preserves_single_and_multi_seed_naming():
+    assert reference_cache_path(None, seed=0, seed_count=1) is None
+    assert str(reference_cache_path("reference.json", seed=0, seed_count=1)) == (
+        "reference.json"
+    )
+    assert str(reference_cache_path("reference.json", seed=2, seed_count=3)) == (
+        "reference.seed_2.json"
+    )
 
 
 def test_make_step_record_uses_executed_step_boundary():

@@ -20,9 +20,7 @@ from pzr.rtlola.actions import RtlolaAction, RtlolaActionCatalog, default_action
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
     RtlolaExecutedStep,
-    RtlolaReferenceStep,
     RtlolaRunResult,
-    load_or_compute_reference,
     make_step_record,
     results_to_dataframe,
     summarize_results,
@@ -35,6 +33,7 @@ from pzr.rtlola.engine import (
     RtlolaStateRef,
 )
 from pzr.rtlola.metrics import RtlolaMatrixMetrics
+from pzr.rtlola.reference import RtlolaReferenceStep, load_or_compute_reference
 from pzr.rtlola.scenarios import RtlolaScenario, scenario_by_name
 from pzr.rtlola.search import (
     RtlolaNoFeasibleAction,

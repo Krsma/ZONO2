@@ -4,7 +4,6 @@ from __future__ import annotations
 
 from dataclasses import asdict, dataclass, field
 import hashlib
-import json
 from pathlib import Path
 import time
 from typing import Sequence
@@ -26,10 +25,8 @@ from pzr.rtlola.binding import (
     BINDING_BUILD_PROFILE,
     BINDING_REVISION,
     INTERPRETER_REVISION,
-    require_binding,
 )
 from pzr.rtlola.engine import (
-    RtlolaApproximationReference,
     RtlolaBindingError,
     RtlolaEngine,
     RtlolaEvent,
@@ -46,6 +43,12 @@ from pzr.rtlola.search import (
     choose_static_action,
     search_mpc_variant,
 )
+from pzr.rtlola.reference import (
+    REFERENCE_CACHE_SCHEMA,
+    RtlolaReferenceStep,
+    load_or_compute_reference,
+    reference_cache_path,
+)
 
 
 METHOD_SET_CHOICES = ("core", "static", "mpc", "all")
@@ -56,7 +59,6 @@ MPC_METHODS = tuple(MPC_VARIANTS)
 ALL_METHODS = (*STATIC_METHODS, *MPC_METHODS)
 CORE_METHODS = (*CORE_STATIC_METHODS, *BASELINE_MPC_METHODS)
 TERMINAL_BINDING_APPROX_LOSS = "terminal_binding_approx_loss"
-REFERENCE_CACHE_SCHEMA = 2
 RTLOLA_AGGREGATE_METRICS = [
     "mean_state_width",
     "max_state_width",
@@ -181,14 +183,6 @@ class RtlolaExecutedStep:
     committed: RtlolaStepResult
     decision: RtlolaSearchResult
     decision_time_ms: float
-
-
-@dataclass(frozen=True)
-class RtlolaReferenceStep:
-    """Exact verdicts and optional compact native-loss reference."""
-
-    verdicts: dict[str, bool]
-    approximation: RtlolaApproximationReference | None = None
 
 
 @dataclass(frozen=True)
@@ -342,7 +336,7 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
                 scenario=scenario,
                 trace_kind=generated.trace_kind,
                 seed=seed,
-                cache_path=_reference_cache_path(
+                cache_path=reference_cache_path(
                     config.reference_cache,
                     seed,
                     config.seeds,
@@ -718,160 +712,6 @@ def make_step_record(
     )
 
 
-def load_or_compute_reference(
-    trace: Sequence[RtlolaEvent],
-    *,
-    scenario: RtlolaScenario,
-    trace_kind: str,
-    seed: int,
-    cache_path: Path | None,
-    include_approximation: bool,
-) -> tuple[RtlolaReferenceStep, ...]:
-    """Load or compute exact trigger and compact approximation references."""
-    selected_trace = (
-        scenario.default_trace_kind
-        if trace_kind == "default" else trace_kind
-    )
-    base_metadata = {
-        "schema": REFERENCE_CACHE_SCHEMA,
-        "scenario": scenario.name,
-        "trace_kind": selected_trace,
-        "seed": int(seed),
-        "length": len(trace),
-        "trace_sha256": _trace_sha256(trace),
-        "spec_sha256": hashlib.sha256(scenario.spec.encode("utf-8")).hexdigest(),
-        "binding_revision": BINDING_REVISION,
-        "interpreter_revision": INTERPRETER_REVISION,
-        "binding_build_profile": BINDING_BUILD_PROFILE,
-        "trigger_keys": list(scenario.trigger_keys),
-    }
-    if cache_path is not None and cache_path.exists():
-        try:
-            payload = json.loads(cache_path.read_text())
-        except (OSError, json.JSONDecodeError) as exc:
-            raise ValueError(
-                f"invalid RTLola reference cache: {cache_path}"
-            ) from exc
-        metadata = payload.get("metadata")
-        capabilities = (
-            metadata.get("capabilities")
-            if isinstance(metadata, dict) else None
-        )
-        actual_base = (
-            {key: value for key, value in metadata.items() if key != "capabilities"}
-            if isinstance(metadata, dict) else None
-        )
-        if actual_base != base_metadata:
-            raise ValueError(
-                f"RTLola reference metadata mismatch: {cache_path}"
-            )
-        if (
-            not isinstance(capabilities, list)
-            or "trigger_verdicts" not in capabilities
-        ):
-            raise ValueError(
-                f"RTLola reference capabilities are invalid: {cache_path}"
-            )
-        if include_approximation and "approx_loss" not in capabilities:
-            raise ValueError(
-                f"RTLola reference cache lacks approximation data: {cache_path}"
-            )
-        rows = payload.get("steps")
-        if not isinstance(rows, list) or len(rows) != len(trace):
-            raise ValueError(
-                f"RTLola reference step count mismatch: {cache_path}"
-            )
-        try:
-            parsed: list[RtlolaReferenceStep] = []
-            for index, row in enumerate(rows):
-                verdict_row = row["verdicts"]
-                if not isinstance(verdict_row, dict):
-                    raise TypeError("verdict row is not a mapping")
-                verdicts = {
-                    key: verdict_row[key]
-                    for key in scenario.trigger_keys
-                }
-                if not all(isinstance(value, bool) for value in verdicts.values()):
-                    raise TypeError("trigger verdict is not boolean")
-                approximation = None
-                if include_approximation:
-                    approximation = RtlolaApproximationReference(
-                        center=np.asarray(row["center"], dtype=np.float64),
-                        radius=np.asarray(row["radius"], dtype=np.float64),
-                        spec_id=base_metadata["spec_sha256"],
-                        step=index + 1,
-                    )
-                parsed.append(RtlolaReferenceStep(
-                    verdicts=verdicts,
-                    approximation=approximation,
-                ))
-            return tuple(parsed)
-        except (KeyError, TypeError, ValueError) as exc:
-            raise ValueError(
-                f"invalid RTLola reference rows: {cache_path}"
-            ) from exc
-
-    _, RLolaMonitor, ZonotopeConfig = require_binding()
-    monitor = RLolaMonitor(scenario.spec)
-    none = ZonotopeConfig.none()
-    steps: list[RtlolaReferenceStep] = []
-    for index, event in enumerate(trace):
-        verdict = monitor.accept_event(
-            list(event.values),
-            float(event.time),
-            none,
-        )
-        approximation = None
-        if include_approximation:
-            matrix = np.asarray(monitor.current_zonotope(True), dtype=np.float64)
-            if matrix.ndim != 2 or matrix.shape[1] < 1:
-                raise RuntimeError(
-                    f"invalid exact RTLola zonotope shape at step {index}: {matrix.shape}"
-                )
-            approximation = RtlolaApproximationReference(
-                center=matrix[:, 0],
-                radius=np.abs(matrix[:, 1:]).sum(axis=1),
-                spec_id=base_metadata["spec_sha256"],
-                step=index + 1,
-            )
-        steps.append(RtlolaReferenceStep(
-            verdicts={
-                key: bool(verdict.get(key, False))
-                for key in scenario.trigger_keys
-            },
-            approximation=approximation,
-        ))
-    result = tuple(steps)
-    if cache_path is not None:
-        cache_path.parent.mkdir(parents=True, exist_ok=True)
-        payload = json.dumps({
-            "metadata": {
-                **base_metadata,
-                "capabilities": [
-                    "trigger_verdicts",
-                    *(["approx_loss"] if include_approximation else []),
-                ],
-            },
-            "steps": [
-                {
-                    "verdicts": step.verdicts,
-                    **(
-                        {
-                            "center": step.approximation.center.tolist(),
-                            "radius": step.approximation.radius.tolist(),
-                        }
-                        if step.approximation is not None else {}
-                    ),
-                }
-                for step in result
-            ],
-        }, indent=2, sort_keys=True)
-        temporary = cache_path.with_name(f".{cache_path.name}.tmp")
-        temporary.write_text(payload)
-        temporary.replace(cache_path)
-    return result
-
-
 def prepare_reference_cache(config: RtlolaBenchmarkConfig) -> tuple[Path, ...]:
     """Generate or validate configured exact-reference caches without a run."""
     if config.reference_mode == "off":
@@ -886,7 +726,7 @@ def prepare_reference_cache(config: RtlolaBenchmarkConfig) -> tuple[Path, ...]:
             seed,
             trace_kind=config.trace_kind,
         )
-        path = _reference_cache_path(config.reference_cache, seed, config.seeds)
+        path = reference_cache_path(config.reference_cache, seed, config.seeds)
         assert path is not None
         load_or_compute_reference(
             generated.events,
@@ -898,32 +738,6 @@ def prepare_reference_cache(config: RtlolaBenchmarkConfig) -> tuple[Path, ...]:
         )
         paths.append(path)
     return tuple(paths)
-
-
-def _trace_sha256(trace: Sequence[RtlolaEvent]) -> str:
-    payload = [
-        [float(event.time), [
-            None if value is None else float(value)
-            for value in event.values
-        ]]
-        for event in trace
-    ]
-    return hashlib.sha256(
-        json.dumps(payload, separators=(",", ":")).encode("utf-8"),
-    ).hexdigest()
-
-
-def _reference_cache_path(
-    value: str | None,
-    seed: int,
-    seed_count: int,
-) -> Path | None:
-    if value is None:
-        return None
-    path = Path(value)
-    if seed_count == 1:
-        return path
-    return path.with_name(f"{path.stem}.seed_{seed}{path.suffix}")
 
 
 def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
