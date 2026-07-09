@@ -7,15 +7,21 @@ from pathlib import Path
 
 import pandas as pd
 
+from pzr.rtlola.plots import write_sweep_figures
 from pzr.rtlola.scenarios import scenario_by_name
 from pzr.rtlola.tables import (
+    budget_sensitivity,
     learned_comparison,
     method_comparison,
+    mpc_static_improvement_by_budget,
     mpc_action_composition,
     mpc_girard_deferral,
     mpc_metric_comparison,
     mpc_plan_followthrough,
     primary_metrics,
+    reference_balance_by_trace,
+    runtime_summary,
+    timeseries_metric_summary,
     trigger_confusion,
 )
 
@@ -130,14 +136,35 @@ def consolidate_sweep(root: Path, scenario: str = "robot_arm") -> None:
         root / "mpc_girard_deferral.csv",
         index=False,
     )
-    mpc_metric_comparison(combined).to_csv(
-        root / "mpc_vs_static_metrics.csv",
-        index=False,
-    )
+    mpc_comparison = mpc_metric_comparison(combined)
+    mpc_comparison.to_csv(root / "mpc_vs_static_metrics.csv", index=False)
     learned_comparison(combined).to_csv(
         root / "learned_vs_mpc_metrics.csv",
         index=False,
     )
+    budget_table = budget_sensitivity(combined)
+    budget_table.to_csv(root / "budget_sensitivity.csv", index=False)
+    runtime_table = runtime_summary(combined, timeseries)
+    runtime_table.to_csv(root / "runtime_summary.csv", index=False)
+    reference_balance_by_trace(combined).to_csv(
+        root / "reference_balance_by_trace.csv",
+        index=False,
+    )
+    timeseries_table = timeseries_metric_summary(timeseries)
+    timeseries_table.to_csv(root / "timeseries_metric_summary.csv", index=False)
+    mpc_static_improvement_by_budget(mpc_comparison).to_csv(
+        root / "mpc_static_improvement_by_budget.csv",
+        index=False,
+    )
+    written = write_sweep_figures(
+        root,
+        budget_table,
+        timeseries_table,
+        combined_confusion,
+        runtime_table,
+    )
+    if written:
+        print(f"Figures: {root / 'figures'} ({len(written)} files)")
 
 
 def _read_tables(root: Path, filename: str) -> list[pd.DataFrame]:

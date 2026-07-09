@@ -159,6 +159,8 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
             "predicted_sequence": "girard",
             "approx_loss": 2.0,
             "state_width": 8.0,
+            "decision_time_ms": 1.0,
+            "binding_runtime_ns": 2_000_000,
         },
         {
             "method": "mpc_terminal_beam",
@@ -170,6 +172,8 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
             "predicted_sequence": "scott,girard",
             "approx_loss": 0.75,
             "state_width": 8.0,
+            "decision_time_ms": 3.0,
+            "binding_runtime_ns": 5_000_000,
         },
         {
             "method": "mpc_terminal_beam",
@@ -181,6 +185,8 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
             "predicted_sequence": "scott,girard",
             "approx_loss": 0.25,
             "state_width": 6.0,
+            "decision_time_ms": 5.0,
+            "binding_runtime_ns": 7_000_000,
         },
     ]).to_csv(scenario_dir / "timeseries.csv", index=False)
     pd.DataFrame([{
@@ -263,6 +269,43 @@ def test_sweep_report_compares_mpc_with_best_static(tmp_path):
     assert deferral.loc[0, "girard_deferral_rate"] == pytest.approx(1.0)
     failures = pd.read_csv(tmp_path / "combined_run_failures.csv")
     assert failures.loc[0, "method"] == "interval_hull"
+    budget = pd.read_csv(tmp_path / "budget_sensitivity.csv")
+    girard_fpr = budget[
+        (budget["method"] == "girard")
+        & (budget["metric"] == "fpr")
+    ].iloc[0]
+    assert girard_fpr["mean"] == pytest.approx(0.4)
+    mpc_sum_loss = budget[
+        (budget["method"] == "mpc_terminal_beam")
+        & (budget["metric"] == "sum_approx_loss")
+    ].iloc[0]
+    assert mpc_sum_loss["mean"] == pytest.approx(1.0)
+    runtime = pd.read_csv(tmp_path / "runtime_summary.csv")
+    mpc_runtime = runtime[runtime["method"] == "mpc_terminal_beam"].iloc[0]
+    assert mpc_runtime["total_time_mean_ms"] == pytest.approx(30.0)
+    assert mpc_runtime["decision_time_mean_ms"] == pytest.approx(4.0)
+    assert mpc_runtime["binding_runtime_mean_ms"] == pytest.approx(6.0)
+    balance = pd.read_csv(tmp_path / "reference_balance_by_trace.csv")
+    assert balance.loc[0, "trace_kind"] == "figure8_drift"
+    assert balance.loc[0, "reference_positive_mean"] == pytest.approx(10.0)
+    assert balance.loc[0, "reference_negative_mean"] == pytest.approx(10.0)
+    timeseries_summary = pd.read_csv(tmp_path / "timeseries_metric_summary.csv")
+    mpc_step_loss = timeseries_summary[
+        (timeseries_summary["method"] == "mpc_terminal_beam")
+        & (timeseries_summary["step"] == 0)
+        & (timeseries_summary["metric"] == "approx_loss")
+    ].iloc[0]
+    assert mpc_step_loss["mean"] == pytest.approx(0.75)
+    improvements = pd.read_csv(tmp_path / "mpc_static_improvement_by_budget.csv")
+    improvement_fpr = improvements[improvements["metric"] == "fpr"].iloc[0]
+    assert improvement_fpr["relative_improvement_percent"] == pytest.approx(25.0)
+    assert improvement_fpr["mpc_is_better"]
+    figures = tmp_path / "figures"
+    assert (figures / "budget_sensitivity_fpr.png").stat().st_size > 0
+    assert (
+        figures / "timeseries_approx_loss_figure8_drift_budget_40.png"
+    ).stat().st_size > 0
+    assert (figures / "runtime_vs_loss_by_trace.png").stat().st_size > 0
 
 
 def test_matrix_metrics_distinguish_dense_active_and_constant_generators():
