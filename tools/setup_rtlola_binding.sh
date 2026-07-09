@@ -4,8 +4,9 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA="${PZR_CONDA:-$ROOT_DIR/external/miniconda3/bin/conda}"
 ENV_NAME="${PZR_RTLOLA_ENV:-pzr-rtlola}"
-BINDING_REV="abe3dab33d0c4aa504db0af63901b66ecafb7f71"
+BINDING_REV="dbef0fb52b66f38da763f694f857dfa6f1e40975"
 INTERPRETER_REV="a143dd6a1500d54c1eabe9e83e5b54271734d6b2"
+BINDING_PROFILE="release"
 BINDING_DIR="$ROOT_DIR/rlolapythonbinding"
 
 if ! command -v cargo >/dev/null 2>&1; then
@@ -89,14 +90,42 @@ fi
 CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" \
   python -m pip install --force-reinstall --no-deps "${WHEELS[0]}"
 
+CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" \
+  python -c '
+import pathlib
+import sys
+import sysconfig
+
+binding_revision, interpreter_revision, build_profile = sys.argv[1:]
+site_packages = pathlib.Path(sysconfig.get_paths()["purelib"])
+marker = site_packages / "rlola_python_binding_pzr_provenance.py"
+marker.write_text(
+    "\n".join((
+        f"BINDING_REVISION = {binding_revision!r}",
+        f"INTERPRETER_REVISION = {interpreter_revision!r}",
+        f"BINDING_BUILD_PROFILE = {build_profile!r}",
+        "",
+    )),
+)
+print(f"wrote RTLola binding provenance marker: {marker}")
+' "$BINDING_REV" "$INTERPRETER_REV" "$BINDING_PROFILE"
+
 LD_PRELOAD="$ENV_PREFIX/lib/libopenblas.so${LD_PRELOAD:+ $LD_PRELOAD}" \
 LD_LIBRARY_PATH="$ENV_PREFIX/lib:${LD_LIBRARY_PATH:-}" \
+PYTHONPATH="$ROOT_DIR/src${PYTHONPATH:+:$PYTHONPATH}" \
 CONDA_NO_PLUGINS=true "$CONDA" run -n "$ENV_NAME" python -c '
-from rlola_python_binding import BUILD_PROFILE, INTERPRETER_REVISION
+from pzr.rtlola.binding import (
+    BINDING_BUILD_PROFILE,
+    BINDING_REVISION,
+    INTERPRETER_REVISION,
+    require_binding,
+)
 
-assert BUILD_PROFILE == "release", BUILD_PROFILE
-assert INTERPRETER_REVISION == "a143dd6a1500d54c1eabe9e83e5b54271734d6b2"
-print(f"rtlola binding ok ({BUILD_PROFILE}, interpreter {INTERPRETER_REVISION})")
+require_binding()
+print(
+    f"rtlola binding ok ({BINDING_BUILD_PROFILE}, "
+    f"binding {BINDING_REVISION}, interpreter {INTERPRETER_REVISION})"
+)
 '
 
 cat <<EOF

@@ -36,7 +36,7 @@ pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
 tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
   --output /tmp/pzr-arm
 
-PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-f587a0e-exact-metrics \
+PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-e6ecd0b-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 
 pzr-benchmark --profile smoke --scenario omni_robot --budget 10 \
@@ -50,14 +50,14 @@ pzr-benchmark --profile smoke --scenario omni_robot --budget 10 \
 
 The packaged robot-arm specification is
 `src/pzr/rtlola/specs/robot_arm.lola`. It and the six trace CSVs were imported
-from RLolaEval revision `f587a0ecb783dbc88f2feb6621c5278a10cf781d`;
+from RLolaEval revision `e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5`;
 the expected specification SHA-256 is
-`ec1cb912dfcf7ed79b5bdf8a994ecb560b52e19add4dfd05095fa53d20cef721`.
+`aab5b768d872bc4f5b6dc11b96805c2d451cc5c91eb573225f6b0e246cee6acc`.
 Do not substitute an older local robot-arm specification.
 
 The required native stack is:
 
-- binding revision `abe3dab33d0c4aa504db0af63901b66ecafb7f71`;
+- binding revision `dbef0fb52b66f38da763f694f857dfa6f1e40975`;
 - interpreter revision `a143dd6a1500d54c1eabe9e83e5b54271734d6b2`;
 - a `maturin build --release`/release-profile binding.
 
@@ -73,14 +73,14 @@ The last recorded full release-binding validation after this integration was
 The authoritative trace kinds and full lengths are:
 
 - `figure8` and `figure8_drift`: 2,340 events each;
-- `random`: 4,098 events;
-- `random_violated`: 289 events;
+- `random`: 1,495 events;
+- `random_drift`: 1,433 events;
 - `square` and `square_drift`: 1,983 events each.
 
 `figure8` and `square` are nominal structured paths, their `_drift` variants
-add progressive tool-center drift, `random` explores the geofence broadly,
-and `random_violated` is a short deliberate violation trace. Do not pool them
-without preserving `trace_kind`.
+add progressive tool-center drift, `random` explores the geofence broadly, and
+`random_drift` combines random exploration with progressive drift. Do not pool
+them without preserving `trace_kind`.
 
 The emitted MPC methods are:
 

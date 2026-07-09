@@ -294,7 +294,7 @@ def test_packaged_specs_and_registered_scenarios_are_authoritative():
     assert omni.public_stream_keys == OMNI_PUBLIC_STREAM_KEYS
     arm = scenario_by_name("robot_arm")
     assert arm.spec == ARM_SPEC
-    assert arm.event_arity == 9
+    assert arm.event_arity == 13
     assert arm.trace_kinds == TRACE_KINDS
     assert arm.default_trace_kind == "figure8_drift"
     assert arm.public_stream_keys == ARM_PUBLIC_STREAM_KEYS
@@ -480,7 +480,7 @@ def test_robot_arm_trace_matches_packaged_forward_kinematics():
     events = generate_robot_arm_events(4, trace_kind=DEFAULT_TRACE_KIND)
 
     assert len(events) == 4
-    assert len(events[0].values) == 9
+    assert len(events[0].values) == 13
     assert all(value is not None for value in events[0].values[-3:])
     assert events[1].values[-3:] == (None, None, None)
     assert validate_trace_tcp_against_fk(

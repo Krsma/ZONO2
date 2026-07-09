@@ -68,7 +68,7 @@ pzr-benchmark --profile smoke --scenario robot_arm \
 Prepare or resume the full FPR-first robot-arm sweep:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-f587a0e-exact-metrics \
+PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-e6ecd0b-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 ```
 
@@ -160,7 +160,7 @@ emergency fallback.
 - Robot-arm and Omni constant calibration generators are kept outside dynamic
   reduction and protected by binding-backed regression tests.
 - Robot-arm trigger labels are the sparse binding keys `Trigger#0` through
-  `Trigger#4`; an absent key is false and an emitted message is true.
+  `Trigger#3`; an absent key is false and an emitted message is true.
 - Numeric public streams remain part of the specification contract, but their
   symbolic affine strings are not parsed into Python-side bounds.
 - Use `--reference-mode exact` for full-length evaluation. It runs the
@@ -196,8 +196,8 @@ method independently for FPR, FNR, approximation loss, and state width. The
 composition table reports both all-step and reduction-only MPC action shares.
 
 The packaged robot-arm assets come from RLolaEval commit
-`f587a0ecb783dbc88f2feb6621c5278a10cf781d`. Supported traces are `figure8`,
-`figure8_drift`, `random`, `random_violated`, `square`, and `square_drift`;
+`e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5`. Supported traces are `figure8`,
+`figure8_drift`, `random`, `random_drift`, `square`, and `square_drift`;
 `figure8_drift` is the default.
 
 Generated files under `results/` must be regenerated through the CLI rather

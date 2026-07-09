@@ -50,8 +50,9 @@ def _bounds(matrix):
 def test_latest_binding_actions_and_mpc_candidates():
     catalog = default_action_catalog()
 
-    assert rlola.BUILD_PROFILE == BINDING_BUILD_PROFILE
-    assert rlola.INTERPRETER_REVISION == INTERPRETER_REVISION
+    from pzr.rtlola.binding import require_binding
+
+    require_binding()
     assert {"clustering", "combastel"} <= set(catalog.by_name)
     assert catalog.mpc_candidate_names == (
         "girard",
@@ -156,7 +157,7 @@ def test_robot_arm_preserves_five_constant_calibration_generators():
     events = generate_robot_arm_events(7, trace_kind=DEFAULT_TRACE_KIND)
     engine = RtlolaEngine(
         ARM_SPEC,
-        event_arity=9,
+        event_arity=13,
         expected_verdict_keys=ARM_PUBLIC_STREAM_KEYS,
     )
     for step, event in enumerate(events[:5]):
@@ -228,7 +229,7 @@ def test_transform_bound_is_not_a_post_event_dense_cap():
     events = generate_robot_arm_events(6, trace_kind=DEFAULT_TRACE_KIND)
     engine = RtlolaEngine(
         ARM_SPEC,
-        event_arity=9,
+        event_arity=13,
         expected_verdict_keys=ARM_PUBLIC_STREAM_KEYS,
     )
     for step, event in enumerate(events[:4]):
@@ -286,7 +287,7 @@ def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
     assert result.config.mpc_objective == "terminal_binding_approx_loss"
     config_text = (tmp_path / "config.yaml").read_text()
     assert "mpc_objective: terminal_binding_approx_loss" in config_text
-    assert "source_revision: f587a0ecb783dbc88f2feb6621c5278a10cf781d" in config_text
+    assert "source_revision: e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5" in config_text
     assert "interpreter_revision: a143dd6a1500d54c1eabe9e83e5b54271734d6b2" in config_text
     assert "binding_build_profile: release" in config_text
 
@@ -346,7 +347,7 @@ def test_robot_arm_tail_mpc_variants_emit_root_diagnostics():
 
 
 def test_robot_arm_sparse_trigger_outputs_are_normalized():
-    events = generate_robot_arm_events(3, trace_kind="random_violated")
+    events = generate_robot_arm_events(80, trace_kind="random_drift")
     monitor = rlola.RLolaMonitor(ARM_SPEC)
     verdicts = [
         monitor.accept_event(
@@ -357,21 +358,25 @@ def test_robot_arm_sparse_trigger_outputs_are_normalized():
         for event in events
     ]
 
-    assert not any(key in verdicts[0] for key in ARM_TRIGGER_KEYS)
-    assert not any(key in verdicts[1] for key in ARM_TRIGGER_KEYS)
-    assert verdicts[2]["Trigger#4"] == "Cannot stop before -Y boundary"
+    assert not any(
+        key in verdicts[index]
+        for key in ARM_TRIGGER_KEYS
+        for index in range(58)
+    )
+    assert verdicts[58]["Trigger#3"] == "Cannot stop before +Y boundary"
 
     result = run_benchmark(RtlolaBenchmarkConfig(
         scenario="robot_arm",
-        trace_kind="random_violated",
-        length=3,
+        trace_kind="random_drift",
+        length=80,
         seeds=1,
         budget=80,
         methods=["none"],
         reference_mode="verdict",
     ))
-    assert result.timeseries["Trigger#4"].tolist() == [False, False, True]
-    assert result.timeseries["exact_Trigger#4"].tolist() == [False, False, True]
+    assert result.timeseries["Trigger#3"].sum() == 21
+    assert result.timeseries["exact_Trigger#3"].sum() == 21
+    assert result.timeseries.loc[58, "Trigger#3"]
 
 
 @pytest.mark.parametrize(
@@ -418,7 +423,7 @@ def test_verdict_reference_is_cached_and_raw_symbolic_values_are_not_saved(tmp_p
     cache = tmp_path / "reference.json"
     config = RtlolaBenchmarkConfig(
         scenario="robot_arm",
-        trace_kind="random_violated",
+        trace_kind="random_drift",
         length=4,
         seeds=1,
         budget=80,
@@ -477,7 +482,7 @@ def test_cached_exact_loss_matches_direct_binding_state_loss(tmp_path):
     catalog = default_action_catalog().by_name
     engine = RtlolaEngine(
         ARM_SPEC,
-        event_arity=9,
+        event_arity=13,
         expected_verdict_keys=ARM_PUBLIC_STREAM_KEYS,
     )
     exact_state = engine.snapshot(step=0, time=events[0].time)

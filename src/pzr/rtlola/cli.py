@@ -68,7 +68,7 @@ def main(argv: list[str] | None = None) -> None:
         default="default",
         help=(
             "RTLola trace kind; robot_arm supports figure8, figure8_drift, "
-            "random, random_violated, square, square_drift"
+            "random, random_drift, square, square_drift"
         ),
     )
     parser.add_argument(

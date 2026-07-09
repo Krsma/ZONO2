@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
+from importlib import import_module
 from typing import Any
 
-BINDING_REVISION = "abe3dab33d0c4aa504db0af63901b66ecafb7f71"
+BINDING_REVISION = "dbef0fb52b66f38da763f694f857dfa6f1e40975"
 INTERPRETER_REVISION = "a143dd6a1500d54c1eabe9e83e5b54271734d6b2"
 BINDING_BUILD_PROFILE = "release"
+PROVENANCE_MODULE = "rlola_python_binding_pzr_provenance"
 
 
 class RtlolaBindingUnavailable(RuntimeError):
@@ -28,14 +30,43 @@ def require_binding() -> tuple[type[Any], type[Any], type[Any]]:
             "`rlolapythonbinding` submodule with "
             "maturin in the active Python environment."
         ) from exc
-    actual_interpreter = getattr(binding, "INTERPRETER_REVISION", None)
-    actual_profile = getattr(binding, "BUILD_PROFILE", None)
-    if actual_interpreter != INTERPRETER_REVISION or actual_profile != BINDING_BUILD_PROFILE:
+    actual_binding, actual_interpreter, actual_profile = _binding_metadata(binding)
+    if (
+        actual_binding != BINDING_REVISION
+        or actual_interpreter != INTERPRETER_REVISION
+        or actual_profile != BINDING_BUILD_PROFILE
+    ):
         raise RtlolaBindingMismatch(
             "installed rlola_python_binding does not match the required release "
-            f"build (interpreter={actual_interpreter!r}, profile={actual_profile!r}; "
-            f"expected interpreter={INTERPRETER_REVISION!r}, "
+            f"build (binding={actual_binding!r}, interpreter={actual_interpreter!r}, "
+            f"profile={actual_profile!r}; expected binding={BINDING_REVISION!r}, "
+            f"interpreter={INTERPRETER_REVISION!r}, "
             f"profile={BINDING_BUILD_PROFILE!r}). "
             "Run `tools/setup_rtlola_binding.sh`."
         )
     return binding.EvaluatorState, binding.RLolaMonitor, binding.ZonotopeConfig
+
+
+def _binding_metadata(binding: Any) -> tuple[str | None, str | None, str | None]:
+    actual_interpreter = getattr(binding, "INTERPRETER_REVISION", None)
+    actual_profile = getattr(binding, "BUILD_PROFILE", None)
+    actual_binding = None
+    try:
+        provenance = import_module(PROVENANCE_MODULE)
+    except ImportError:
+        provenance = None
+    if provenance is not None:
+        actual_binding = getattr(provenance, "BINDING_REVISION", None)
+        actual_interpreter = (
+            actual_interpreter
+            or getattr(provenance, "INTERPRETER_REVISION", None)
+        )
+        actual_profile = (
+            actual_profile
+            or getattr(provenance, "BINDING_BUILD_PROFILE", None)
+        )
+    return (
+        actual_binding,
+        actual_interpreter,
+        actual_profile,
+    )

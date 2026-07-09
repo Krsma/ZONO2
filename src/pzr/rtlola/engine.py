@@ -177,7 +177,7 @@ class RtlolaEngine:
         previous = self.planner.state()
         try:
             self.planner.apply_state(reference.state)
-            loss = float(self.planner.approx_loss_state(candidate.state))
+            loss = float(self.planner.approx_loss_state(candidate.state, True))
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
@@ -245,7 +245,7 @@ class RtlolaEngine:
         previous = self.planner.state()
         try:
             self.planner.apply_state(candidate.state)
-            loss = float(self.planner.approx_loss(exact_interval))
+            loss = float(self.planner.approx_loss(exact_interval, True))
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise

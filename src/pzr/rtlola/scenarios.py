@@ -115,7 +115,7 @@ def registered_scenarios() -> tuple[RtlolaScenario, ...]:
         RtlolaScenario(
             name="robot_arm",
             spec=ARM_SPEC,
-            event_arity=9,
+            event_arity=13,
             trace_kinds=TRACE_KINDS,
             default_trace_kind=DEFAULT_TRACE_KIND,
             expected_verdict_keys=ARM_PUBLIC_STREAM_KEYS,

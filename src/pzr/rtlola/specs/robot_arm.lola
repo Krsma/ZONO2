@@ -104,7 +104,7 @@ output dist_to_expected := sqrt((dx * dx) + (dy * dy) + (dz * dz))
 
 constant max_dist: Fixed64_32 := 0.04
 constant threshold: Fixed64_32 := 0.0
-trigger pAbove(dist_to_expected, max_dist) > threshold && time > 90.0 "Toolhead drift detected"
+trigger pAbove(dist_to_expected, max_dist) > threshold && time > 30.0 "Toolhead drift detected"
 
 // ==========================================================
 // ===== Safe-stopping geofence (x and y)              ======
@@ -118,12 +118,19 @@ constant ALPHA: Fixed64_32 := 0.05
 constant BETA:  Fixed64_32 := 0.0025
 output   BOD:   Fixed64_32 := BETA / DT
 
-// per-axis maximum deceleration [m/s^2] and the four geofence walls [m]
+// per-axis maximum deceleration [m/s^2]
 constant A_MAX: Fixed64_32 := 2.0
-constant X_MIN: Fixed64_32 := -0.14
-constant X_MAX: Fixed64_32 :=  0.04
-constant Y_MIN: Fixed64_32 :=  0.12
-constant Y_MAX: Fixed64_32 :=  0.28
+
+// geofence walls [m], read from the trace (same hold pattern as the center)
+input x_min: Fixed64_32
+input x_max: Fixed64_32
+input y_min: Fixed64_32
+input y_max: Fixed64_32
+
+output X_MIN: Fixed64_32 @a1m := x_min.hold(or: -0.14)
+output X_MAX: Fixed64_32 @a1m := x_max.hold(or:  0.04)
+output Y_MIN: Fixed64_32 @a1m := y_min.hold(or:  0.12)
+output Y_MAX: Fixed64_32 @a1m := y_max.hold(or:  0.28)
 
 // ---- x-axis alpha-beta observer: state (phat_x, vhat_x) ----
 output pxpred := phat_x.offset(by:-1).defaults(to: px) + vhat_x.offset(by:-1).defaults(to: 0.0) * DT

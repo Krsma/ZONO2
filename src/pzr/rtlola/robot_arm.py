@@ -16,28 +16,28 @@ TRACE_KINDS = (
     "figure8",
     "figure8_drift",
     "random",
-    "random_violated",
+    "random_drift",
     "square",
     "square_drift",
 )
 DEFAULT_TRACE_KIND = "figure8_drift"
-RLOLAEVAL_REVISION = "f587a0ecb783dbc88f2feb6621c5278a10cf781d"
+RLOLAEVAL_REVISION = "e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5"
 ROBOT_ARM_SPEC_SHA256 = (
-    "ec1cb912dfcf7ed79b5bdf8a994ecb560b52e19add4dfd05095fa53d20cef721"
+    "aab5b768d872bc4f5b6dc11b96805c2d451cc5c91eb573225f6b0e246cee6acc"
 )
 ROBOT_ARM_TRACE_SHA256 = {
-    "figure8": "e9b8819a065af9e23f04b66da6558c3c0f91b4984fe488893549356dfaa52bd3",
-    "figure8_drift": "3acc3c1215b15e593446d2a55a95063ab54a99144042789100a80697ea556487",
-    "random": "62379cd35dca115e65fd42949a754333b860d5841915d7fbb25f2bb75a8314f0",
-    "random_violated": "8b1d137f1104771ed8bb25ee757dd2bc35b3038919c7e4268e4e619698c6c755",
-    "square": "d84eece264cb7b7a890b27f14f089665d3bbe4be4dd6837ee22f66eb588304ef",
-    "square_drift": "ba7d89fcc42e15315ce1656e183e8a2e10f69bf18bdbefa8217d4db254894062",
+    "figure8": "fa07293b1a30c409ede95162f359f087f8c2e77e0df07a333d0045978150f309",
+    "figure8_drift": "1a9def5a128a236f0e246f9d7403869ec676e62617a3cf4edf9c904e841362f7",
+    "random": "a1cf0171ae217de251ee988ec6f8997b74acc9dde4e4c631a649f4d69597a898",
+    "random_drift": "2496816715303b30d1bb393d0d3c834e584a0fe1c7e008e100822418072caddc",
+    "square": "c53282d3cbb5cbe25752215e5a5bc329ccd94e290aa449b932dc776a7ca3dc5c",
+    "square_drift": "335c3c2a40e43ca87fca9fe1a68fe6d9a62dfbaee6af863e227a40d8a8766356",
 }
 ROBOT_ARM_TRACE_ROWS = {
     "figure8": 2340,
     "figure8_drift": 2340,
-    "random": 4098,
-    "random_violated": 289,
+    "random": 1495,
+    "random_drift": 1433,
     "square": 1983,
     "square_drift": 1983,
 }
@@ -79,6 +79,7 @@ class RobotArmTraceRow:
     angles: tuple[float, float, float, float, float]
     tcp: tuple[float, float, float]
     expected_center: tuple[float | None, float | None, float | None]
+    geofence: tuple[float | None, float | None, float | None, float | None]
 
 
 def forward_kinematics_5dof(angles: NDArray[np.float64]) -> NDArray[np.float64]:
@@ -138,6 +139,12 @@ def load_robot_arm_trace(trace_kind: str = DEFAULT_TRACE_KIND) -> tuple[RobotArm
                 _optional_float(record.cy),
                 _optional_float(record.cz),
             ),
+            geofence=(
+                _optional_float(record.x_min),
+                _optional_float(record.x_max),
+                _optional_float(record.y_min),
+                _optional_float(record.y_max),
+            ),
         ))
     return tuple(rows)
 
@@ -156,7 +163,7 @@ def generate_robot_arm_events(
     return tuple(
         RtlolaEvent(
             time=row.time,
-            values=(row.time, *row.angles, *row.expected_center),
+            values=(row.time, *row.angles, *row.expected_center, *row.geofence),
         )
         for row in rows
     )
