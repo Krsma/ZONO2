@@ -1,9 +1,11 @@
 import numpy as np
 import pytest
+import torch
 
 pytest.importorskip("rlola_python_binding")
 
 from pzr.learning.ranking import RegretRankingPolicy
+from pzr.learning.ranker import FeatureNormalizer, RankingPolicy, ReducerRanker
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.benchmark import RtlolaBenchmarkConfig, summarize_results
 from pzr.rtlola.engine import RtlolaEngine
@@ -15,6 +17,8 @@ from pzr.rtlola.learning import (
     write_regret_artifacts,
 )
 from pzr.rtlola.learning_data import build_ranking_dataset, collect_teacher_episode
+from pzr.rtlola.learned_policy import RtlolaRankingPolicy
+from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA
 from pzr.rtlola.omni import OMNI_EXPECTED_VERDICT_KEYS, OMNI_SPEC, generate_omni_events
 from pzr.rtlola.scenarios import scenario_by_name
 from pzr.rtlola.search import full_width_terminal_search
@@ -31,6 +35,20 @@ def _overflow_state():
     for step, event in enumerate(events[:12]):
         engine.live_step(event, catalog.no_op, budget=20, step=step + 1)
     return catalog, events, engine, engine.snapshot(step=12, time=events[11].time)
+
+
+def _direct_policy(candidate_names=("girard", "scott")):
+    model = ReducerRanker(RTL_RANKING_FEATURE_SCHEMA, candidate_names)
+    with torch.no_grad():
+        for parameter in model.parameters():
+            parameter.zero_()
+        model.network[-1].bias.copy_(torch.arange(len(candidate_names)))
+    normalizer = FeatureNormalizer(
+        mean=np.zeros(len(RTL_RANKING_FEATURE_SCHEMA.feature_names), dtype=np.float32),
+        std=np.ones(len(RTL_RANKING_FEATURE_SCHEMA.feature_names), dtype=np.float32),
+    )
+    catalog = default_action_catalog(candidate_names)
+    return RtlolaRankingPolicy(RankingPolicy(model, normalizer), catalog)
 
 
 def test_teacher_costs_force_each_root_then_use_shared_candidate_pool():
@@ -97,6 +115,38 @@ def test_teacher_collection_writes_aligned_binding_backed_samples():
     assert np.all(np.any(dataset.feasible, axis=1))
     assert np.all(np.sum(dataset.tie_mask, axis=1) >= 1)
     assert set(metadata["teacher_action"]) <= {"girard", "scott", "interval"}
+
+
+def test_pytorch_policy_uses_current_state_only_for_direct_inference():
+    _, events, engine, state = _overflow_state()
+
+    decision = _direct_policy().choose(engine, state, events[12], budget=10)
+
+    assert decision.first_action.name == "girard"
+    assert decision.predicted_sequence == ("girard",)
+    assert decision.evaluated_leaves == 1
+    assert decision.mpc_variant == "learned_direct"
+
+
+def test_dagger_collection_labels_states_visited_by_learned_behavior():
+    events = generate_omni_events(16, seed=4)
+    samples = collect_teacher_episode(
+        scenario=scenario_by_name("omni_robot"),
+        events=events,
+        trace_id="omni-dagger-seed-4",
+        split="train",
+        condition="omni",
+        seed=4,
+        budget=10,
+        candidate_names=("girard", "scott"),
+        behavior_policy=_direct_policy(),
+    )
+
+    assert samples
+    assert {sample.behavior for sample in samples} == {"learned"}
+    assert {sample.behavior_action for sample in samples} <= {
+        "girard", "scott", "interval",
+    }
 
 
 def test_learned_policy_selects_one_direct_binding_action():

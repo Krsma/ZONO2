@@ -28,9 +28,11 @@ def _sample(sample_id: str, split: str) -> CollectedRankingSample:
         behavior="teacher",
         behavior_action="girard",
         evaluated_leaves=3,
-        reducer_failure_count=1,
-        infeasible_candidate_count=1,
-        fallback_used=False,
+        teacher_reducer_failure_count=1,
+        teacher_infeasible_candidate_count=1,
+        behavior_reducer_failure_count=0,
+        behavior_infeasible_candidate_count=0,
+        behavior_fallback_used=False,
     )
 
 

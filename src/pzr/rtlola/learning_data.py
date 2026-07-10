@@ -5,7 +5,7 @@ from __future__ import annotations
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Mapping, Sequence
+from typing import Mapping, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
@@ -13,13 +13,25 @@ import pandas as pd
 from pzr.learning.artifacts import write_ranking_dataset
 from pzr.learning.dataset import RankingDataset
 from pzr.rtlola.actions import default_action_catalog
-from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent
+from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
 from pzr.rtlola.features import (
     RTL_RANKING_FEATURE_NAMES,
     extract_ranking_features,
 )
 from pzr.rtlola.scenarios import RtlolaScenario
-from pzr.rtlola.search import full_width_terminal_search
+from pzr.rtlola.search import RtlolaSearchResult, full_width_terminal_search
+
+
+class BehaviorPolicy(Protocol):
+    """Minimal direct-policy interface used for state aggregation."""
+
+    def choose(
+        self,
+        engine: RtlolaEngine,
+        state: RtlolaStateRef,
+        event: RtlolaEvent,
+        budget: int,
+    ) -> RtlolaSearchResult: ...
 
 
 @dataclass(frozen=True)
@@ -41,9 +53,11 @@ class CollectedRankingSample:
     behavior: str
     behavior_action: str
     evaluated_leaves: int
-    reducer_failure_count: int
-    infeasible_candidate_count: int
-    fallback_used: bool
+    teacher_reducer_failure_count: int
+    teacher_infeasible_candidate_count: int
+    behavior_reducer_failure_count: int
+    behavior_infeasible_candidate_count: int
+    behavior_fallback_used: bool
 
 
 def collect_teacher_episode(
@@ -56,8 +70,9 @@ def collect_teacher_episode(
     seed: int,
     budget: int,
     candidate_names: tuple[str, ...],
+    behavior_policy: BehaviorPolicy | None = None,
 ) -> tuple[CollectedRankingSample, ...]:
-    """Follow the full-width teacher and label every over-bound state."""
+    """Label every over-bound state while following teacher or learned behavior."""
     if len(events) < 2:
         raise ValueError("two-event teacher collection requires at least two events")
     catalog = default_action_catalog(candidate_names)
@@ -87,7 +102,15 @@ def collect_teacher_episode(
                 decision.root_evaluations, candidate_names,
             )
             tie_mask = _tie_mask(costs, feasible)
-            sample_id = f"{trace_id}:budget-{budget}:step-{step}"
+            behavior_name = "teacher" if behavior_policy is None else "learned"
+            sample_id = (
+                f"{trace_id}:{behavior_name}:budget-{budget}:step-{step}"
+            )
+            behavior_decision = (
+                decision
+                if behavior_policy is None
+                else behavior_policy.choose(engine, state, event, budget)
+            )
             samples.append(CollectedRankingSample(
                 sample_id=sample_id,
                 trace_id=trace_id,
@@ -103,14 +126,18 @@ def collect_teacher_episode(
                 tie_mask=tuple(bool(value) for value in tie_mask),
                 teacher_action=decision.first_action.name,
                 teacher_sequence=decision.predicted_sequence,
-                behavior="teacher",
-                behavior_action=decision.first_action.name,
+                behavior=behavior_name,
+                behavior_action=behavior_decision.first_action.name,
                 evaluated_leaves=decision.evaluated_leaves,
-                reducer_failure_count=decision.reducer_failure_count,
-                infeasible_candidate_count=decision.infeasible_candidate_count,
-                fallback_used=decision.fallback_used,
+                teacher_reducer_failure_count=decision.reducer_failure_count,
+                teacher_infeasible_candidate_count=decision.infeasible_candidate_count,
+                behavior_reducer_failure_count=behavior_decision.reducer_failure_count,
+                behavior_infeasible_candidate_count=(
+                    behavior_decision.infeasible_candidate_count
+                ),
+                behavior_fallback_used=behavior_decision.fallback_used,
             ))
-            action = decision.first_action
+            action = behavior_decision.first_action
         engine.live_step(event, action, budget, step=step + 1)
     return tuple(samples)
 
@@ -154,9 +181,15 @@ def build_ranking_dataset(
             "behavior": sample.behavior,
             "behavior_action": sample.behavior_action,
             "evaluated_leaves": sample.evaluated_leaves,
-            "reducer_failure_count": sample.reducer_failure_count,
-            "infeasible_candidate_count": sample.infeasible_candidate_count,
-            "fallback_used": sample.fallback_used,
+            "teacher_reducer_failure_count": sample.teacher_reducer_failure_count,
+            "teacher_infeasible_candidate_count": (
+                sample.teacher_infeasible_candidate_count
+            ),
+            "behavior_reducer_failure_count": sample.behavior_reducer_failure_count,
+            "behavior_infeasible_candidate_count": (
+                sample.behavior_infeasible_candidate_count
+            ),
+            "behavior_fallback_used": sample.behavior_fallback_used,
         }
         for sample in samples
     ])
