@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-arm-mpc-vs-girard-four-actions-b60-80-100-20260706}"
-REFERENCE_DIR="${PZR_REFERENCE_DIR:-$ROOT_DIR/results/rtlola-arm-mpc-variants-a143dd6-e6ecd0b-exact-metrics/references}"
+REFERENCE_DIR="${PZR_REFERENCE_DIR:-$ROOT_DIR/results/rtlola-arm-mpc-variants-b4cfbf4-e6ecd0b-exact-metrics/references}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 
 if [[ -z "${PZR_REFERENCE_NAMESPACE:-}" ]]; then

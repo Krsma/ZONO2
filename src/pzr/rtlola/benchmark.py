@@ -140,6 +140,7 @@ class RtlolaStepRecord:
     active_total_generator_count: int
     zero_dynamic_generator_count: int
     zero_total_generator_count: int
+    logical_dynamic_dimension: int
     reduced: bool
     reducer_used: str
     state_width: float
@@ -676,6 +677,7 @@ def make_step_record(
         active_total_generator_count=committed.metrics.active_total_generator_count,
         zero_dynamic_generator_count=committed.metrics.zero_dynamic_generator_count,
         zero_total_generator_count=committed.metrics.zero_total_generator_count,
+        logical_dynamic_dimension=committed.metrics.logical_dynamic_dimension,
         reduced=decision.first_action.name != EXACT_BASELINE_ACTION_NAME,
         reducer_used=decision.first_action.name,
         state_width=committed.metrics.state_width,
@@ -758,6 +760,7 @@ def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
                 "active_total_generator_count": step.active_total_generator_count,
                 "zero_dynamic_generator_count": step.zero_dynamic_generator_count,
                 "zero_total_generator_count": step.zero_total_generator_count,
+                "logical_dynamic_dimension": step.logical_dynamic_dimension,
                 "reduced": step.reduced,
                 "reducer_used": step.reducer_used,
                 "state_width": step.state_width,
@@ -883,6 +886,10 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             [step.zero_dynamic_generator_count for step in run.steps],
             dtype=np.float64,
         )
+        logical_dims = np.asarray(
+            [step.logical_dynamic_dimension for step in run.steps],
+            dtype=np.float64,
+        )
         approx_losses = np.asarray([step.approx_loss for step in run.steps], dtype=np.float64)
         fps = np.asarray([step.false_positive for step in run.steps], dtype=np.float64)
         fns = np.asarray([step.false_negative for step in run.steps], dtype=np.float64)
@@ -923,6 +930,8 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             "max_active_dynamic_generator_count": int(np.max(active_gens)),
             "mean_zero_dynamic_generator_count": float(np.mean(zero_gens)),
             "max_zero_dynamic_generator_count": int(np.max(zero_gens)),
+            "mean_logical_dynamic_dimension": float(np.mean(logical_dims)),
+            "max_logical_dynamic_dimension": int(np.max(logical_dims)),
             "total_reductions": run.total_reductions,
             "total_time_ms": run.total_time_ms,
             "mean_approx_loss": _nanmean(approx_losses),

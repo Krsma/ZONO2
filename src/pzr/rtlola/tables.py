@@ -46,6 +46,8 @@ SUMMARY_REPORT_METRICS = (
     "mean_generator_count",
     "mean_active_dynamic_generator_count",
     "mean_zero_dynamic_generator_count",
+    "mean_logical_dynamic_dimension",
+    "max_logical_dynamic_dimension",
     "total_reductions",
     "total_time_ms",
     "fallback_count",
@@ -61,6 +63,7 @@ TIMESERIES_REPORT_METRICS = (
     "generator_count",
     "active_dynamic_generator_count",
     "zero_dynamic_generator_count",
+    "logical_dynamic_dimension",
     "decision_time_ms",
 )
 
@@ -159,6 +162,9 @@ def method_comparison(summary: pd.DataFrame) -> pd.DataFrame:
             "max_state_width",
             "mean_generator_count",
             "mean_active_dynamic_generator_count",
+            "mean_zero_dynamic_generator_count",
+            "mean_logical_dynamic_dimension",
+            "max_logical_dynamic_dimension",
             "total_reductions",
             "total_time_ms",
             "fallback_count",

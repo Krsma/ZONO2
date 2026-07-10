@@ -21,6 +21,7 @@ class RtlolaMatrixMetrics:
     width_mean: float
     width_max: float
     dimension: int
+    logical_dynamic_dimension: int
     center_l2: float
     center_linf: float
     gen_norm_mean: float
@@ -61,6 +62,17 @@ def row_widths(matrix: NDArray[np.float64]) -> NDArray[np.float64]:
     return 2.0 * np.abs(generators).sum(axis=1)
 
 
+def active_row_mask(matrix: NDArray[np.float64], *, atol: float = 1e-12) -> NDArray[np.bool_]:
+    """Return rows represented in the interpreter's compact reducer zonotope."""
+    z = np.asarray(matrix, dtype=np.float64)
+    if z.ndim != 2 or z.shape[1] < 1:
+        raise ValueError(f"expected 2D zonotope matrix with center column, got {z.shape}")
+    generators = z[:, 1:]
+    if not generators.size:
+        return np.zeros(z.shape[0], dtype=np.bool_)
+    return np.any(np.abs(generators) > atol, axis=1)
+
+
 def matrix_metrics(
     dynamic_matrix: NDArray[np.float64],
     total_matrix: NDArray[np.float64] | None = None,
@@ -73,13 +85,24 @@ def matrix_metrics(
         raise ValueError("zonotope matrix contains non-finite values")
 
     total = np.asarray(total_matrix, dtype=np.float64) if total_matrix is not None else z
+    if total.ndim != 2 or total.shape[1] < 1:
+        raise ValueError(f"expected 2D total zonotope matrix with center column, got {total.shape}")
+    if total.shape[0] != z.shape[0]:
+        raise ValueError(
+            "dynamic and total zonotope matrices expose different row counts "
+            f"({z.shape[0]} != {total.shape[0]})"
+        )
+    if not np.all(np.isfinite(total)):
+        raise ValueError("total zonotope matrix contains non-finite values")
     dynamic_count = generator_count(z)
     total_count = generator_count(total)
     active_dynamic_count = active_generator_count(z)
     active_total_count = active_generator_count(total)
-    center = z[:, 0]
-    generators = z[:, 1:]
-    widths = row_widths(z)
+    reducer_rows = active_row_mask(total)
+    compact = z[reducer_rows]
+    center = compact[:, 0]
+    generators = compact[:, 1:]
+    widths = row_widths(compact) if compact.size else np.zeros(0, dtype=np.float64)
     gen_norms = (
         np.linalg.norm(generators, axis=0)
         if generators.size else np.asarray([0.0], dtype=np.float64)
@@ -108,7 +131,8 @@ def matrix_metrics(
         state_width=_safe(float(np.sum(widths))),
         width_mean=_safe(float(np.mean(widths))) if widths.size else 0.0,
         width_max=_safe(float(np.max(widths))) if widths.size else 0.0,
-        dimension=int(z.shape[0]),
+        dimension=int(np.count_nonzero(reducer_rows)),
+        logical_dynamic_dimension=int(z.shape[0]),
         center_l2=_safe(float(np.linalg.norm(center))),
         center_linf=_safe(float(np.max(np.abs(center)))) if center.size else 0.0,
         gen_norm_mean=_safe(float(np.mean(gen_norms))),

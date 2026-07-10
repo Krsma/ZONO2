@@ -87,7 +87,7 @@ def main(argv: list[str] | None = None) -> None:
         choices=["exact", "verdict", "off"],
         default="exact",
         help=(
-            "exact caches compact unreduced references for approximation loss "
+            "exact caches logical-row unreduced references for approximation loss "
             "and FPR/FNR; verdict caches only exact trigger outcomes"
         ),
     )

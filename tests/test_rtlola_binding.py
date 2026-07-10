@@ -283,12 +283,14 @@ def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
     assert "post_event_over_bound" in result.timeseries
     assert "active_dynamic_generator_count" in result.timeseries
     assert "zero_dynamic_generator_count" in result.timeseries
+    assert "logical_dynamic_dimension" in result.timeseries
+    assert "mean_logical_dynamic_dimension" in result.summary
     assert "budget_violation" not in result.timeseries
     assert result.config.mpc_objective == "terminal_binding_approx_loss"
     config_text = (tmp_path / "config.yaml").read_text()
     assert "mpc_objective: terminal_binding_approx_loss" in config_text
     assert "source_revision: e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5" in config_text
-    assert "interpreter_revision: a143dd6a1500d54c1eabe9e83e5b54271734d6b2" in config_text
+    assert "interpreter_revision: b4cfbf4680e6641f131a64d6d9e9ef57ec228976" in config_text
     assert "binding_build_profile: release" in config_text
 
 
@@ -561,6 +563,45 @@ def test_cached_exact_loss_matches_direct_binding_state_loss(tmp_path):
         "final_approx_loss_mean",
         "sum_approx_loss_mean",
     } <= set(result.aggregate)
+
+
+def test_logical_zero_rows_do_not_inflate_reducer_dimension_or_cached_loss():
+    spec = """
+        import math
+        input a: Float
+        constant delta: Variable
+        output epsilon: Variable @a
+        output corrected := a + 0.5 * epsilon + 2.0 * delta
+        output sum := sum.offset(by: -1).defaults(to: 0.0) + corrected
+        output zero := zero.offset(by: -1).defaults(to: 0.0) + a + 0.0 * epsilon + 0.0 * delta
+    """
+    catalog = default_action_catalog().by_name
+    events = (
+        RtlolaEvent(0.0, (12.0,)),
+        RtlolaEvent(1.0, (-5.0,)),
+    )
+    engine = RtlolaEngine(spec, event_arity=1)
+    exact_state = engine.snapshot(step=0, time=0.0)
+
+    for index, event in enumerate(events, start=1):
+        exact = engine.branch_step(exact_state, event, catalog["none"], budget=2)
+        candidate = engine.live_step(event, catalog["girard"], budget=2, step=index)
+        metrics = candidate.metrics
+        assert metrics.logical_dynamic_dimension > metrics.dimension
+
+        total = engine.matrices(exact.state)[1]
+        reference = RtlolaApproximationReference(
+            center=total[:, 0],
+            radius=np.abs(total[:, 1:]).sum(axis=1),
+            spec_id=engine.spec_id,
+            step=index,
+        )
+
+        assert reference.center.size == metrics.logical_dynamic_dimension
+        assert engine.approx_loss_reference(reference, candidate.state) == pytest.approx(
+            engine.approx_loss(exact.state, candidate.state)
+        )
+        exact_state = exact.state
 
 
 def test_failed_static_run_is_recorded_and_other_methods_continue(monkeypatch, tmp_path):

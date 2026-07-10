@@ -25,7 +25,7 @@ REFERENCE_CACHE_SCHEMA = 2
 
 @dataclass(frozen=True)
 class RtlolaReferenceStep:
-    """Exact verdicts and optional compact native-loss reference."""
+    """Exact verdicts and optional logical-row native-loss reference."""
 
     verdicts: dict[str, bool]
     approximation: RtlolaApproximationReference | None = None
@@ -40,7 +40,7 @@ def load_or_compute_reference(
     cache_path: Path | None,
     include_approximation: bool,
 ) -> tuple[RtlolaReferenceStep, ...]:
-    """Load or compute exact trigger and compact approximation references."""
+    """Load or compute exact trigger and logical-row approximation references."""
     base_metadata = _reference_metadata(
         trace,
         scenario=scenario,

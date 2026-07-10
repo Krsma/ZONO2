@@ -37,7 +37,7 @@ class RtlolaStateRef:
 
 @dataclass(frozen=True)
 class RtlolaApproximationReference:
-    """Compact exact-state data sufficient for the binding-native loss."""
+    """Exact logical-row state data sufficient for the binding-native loss."""
 
     center: np.ndarray
     radius: np.ndarray
@@ -198,7 +198,7 @@ class RtlolaEngine:
         reference: RtlolaApproximationReference,
         candidate: RtlolaStateRef,
     ) -> float:
-        """Evaluate native loss against a compact exact interval reference."""
+        """Evaluate native loss against a logical-row exact interval reference."""
         self._validate_state(candidate)
         if reference.spec_id != self.spec_id:
             raise ValueError(
@@ -291,7 +291,8 @@ class RtlolaEngine:
         if not action.explicit_budget:
             return
         dyn = np.asarray(self.live.current_zonotope(False), dtype=np.float64)
-        dimension = int(dyn.shape[0]) if dyn.ndim == 2 else 0
+        total = np.asarray(self.live.current_zonotope(True), dtype=np.float64)
+        dimension = matrix_metrics(dyn, total).dimension
         if budget < dimension:
             raise ValueError(
                 "RTLola budget is below the current live state-zonotope dimension "

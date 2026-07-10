@@ -5,8 +5,8 @@ from __future__ import annotations
 from importlib import import_module
 from typing import Any
 
-BINDING_REVISION = "dbef0fb52b66f38da763f694f857dfa6f1e40975"
-INTERPRETER_REVISION = "a143dd6a1500d54c1eabe9e83e5b54271734d6b2"
+BINDING_REVISION = "7371495a113694ebb9958061f93910e7f65e84f3"
+INTERPRETER_REVISION = "b4cfbf4680e6641f131a64d6d9e9ef57ec228976"
 BINDING_BUILD_PROFILE = "release"
 PROVENANCE_MODULE = "rlola_python_binding_pzr_provenance"
 

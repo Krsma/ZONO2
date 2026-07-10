@@ -4,8 +4,8 @@ set -euo pipefail
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 CONDA="${PZR_CONDA:-$ROOT_DIR/external/miniconda3/bin/conda}"
 ENV_NAME="${PZR_RTLOLA_ENV:-pzr-rtlola}"
-BINDING_REV="dbef0fb52b66f38da763f694f857dfa6f1e40975"
-INTERPRETER_REV="a143dd6a1500d54c1eabe9e83e5b54271734d6b2"
+BINDING_REV="7371495a113694ebb9958061f93910e7f65e84f3"
+INTERPRETER_REV="b4cfbf4680e6641f131a64d6d9e9ef57ec228976"
 BINDING_PROFILE="release"
 BINDING_DIR="$ROOT_DIR/rlolapythonbinding"
 

@@ -326,6 +326,24 @@ def test_matrix_metrics_distinguish_dense_active_and_constant_generators():
     assert metrics.state_width == pytest.approx(3.0)
 
 
+def test_matrix_metrics_keep_reducer_dimension_compact_with_logical_zero_rows():
+    dynamic = np.array([
+        [1.0, 0.5, 0.0],
+        [0.0, 0.0, 0.0],
+        [2.0, 0.0, -0.25],
+        [3.0, 0.0, 0.0],
+    ])
+    total = np.column_stack([dynamic, np.array([0.0, 0.0, 0.1, 0.2])])
+
+    metrics = matrix_metrics(dynamic, total)
+
+    assert metrics.logical_dynamic_dimension == 4
+    assert metrics.dimension == 3
+    assert metrics.state_width == pytest.approx(1.5)
+    assert metrics.width_mean == pytest.approx(0.5)
+    assert metrics.width_max == pytest.approx(1.0)
+
+
 def test_packaged_specs_and_registered_scenarios_are_authoritative():
     assert "constant delta: Variable" in OMNI_SPEC
     assert "#[public]\noutput position_x :=" in OMNI_SPEC
@@ -432,6 +450,7 @@ def test_make_step_record_uses_executed_step_boundary():
         active_total_generator_count=11,
         zero_dynamic_generator_count=2,
         zero_total_generator_count=2,
+        logical_dynamic_dimension=3,
         state_width=4.5,
     )
     committed = SimpleNamespace(
@@ -480,6 +499,7 @@ def test_make_step_record_uses_executed_step_boundary():
     assert record.pre_generator_count == 9
     assert record.reducer_used == "girard"
     assert record.reduced is True
+    assert record.logical_dynamic_dimension == 3
     assert record.approx_loss == pytest.approx(8.0)
     assert record.false_positive is True
     assert record.post_event_over_bound is True

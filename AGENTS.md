@@ -36,7 +36,7 @@ pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
 tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
   --output /tmp/pzr-arm
 
-PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-e6ecd0b-exact-metrics \
+PZR_OUT_DIR=results/rtlola-arm-mpc-variants-b4cfbf4-e6ecd0b-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 
 pzr-benchmark --profile smoke --scenario omni_robot --budget 10 \
@@ -57,18 +57,21 @@ Do not substitute an older local robot-arm specification.
 
 The required native stack is:
 
-- binding revision `dbef0fb52b66f38da763f694f857dfa6f1e40975`;
-- interpreter revision `a143dd6a1500d54c1eabe9e83e5b54271734d6b2`;
+- binding revision `7371495a113694ebb9958061f93910e7f65e84f3`;
+- interpreter revision `b4cfbf4680e6641f131a64d6d9e9ef57ec228976`;
 - a `maturin build --release`/release-profile binding.
 
 `src/pzr/rtlola/binding.py` rejects a mismatched interpreter or debug build.
-The current interpreter may compact all-zero dynamic generator rows. Negative
-coefficients are not zero and must remain represented. Python code must not
-depend on stable generator row positions or dense matrix shapes; use the
-binding-native transforms, counters, and approximation loss.
+The current interpreter exposes logical all-zero dynamic rows for state export,
+while binding-native transformations still reduce compact nonzero rows.
+Negative coefficients are not zero and must remain represented. Python code
+must not depend on stable generator row positions or dense matrix shapes; use
+the binding-native transforms, counters, and approximation loss. PZR reports
+the compact reducer dimension separately from the exported logical row count,
+and budget checks must use the compact reducer dimension.
 
 The last recorded full release-binding validation after this integration was
-56 passing tests with no skips.
+64 passing tests with no skips.
 
 The authoritative trace kinds and full lengths are:
 
@@ -108,7 +111,7 @@ completed six-trace evaluation.
 The focused Girard-versus-MPC run started on 2026-07-06 was deliberately
 terminated before completing the square traces. Its partial artifact is not a
 completed evaluation. The next run must use a fresh output directory. Exact
-reference stages cache trigger verdicts and compact center/radius data once per
+reference stages cache trigger verdicts and logical-row center/radius data once per
 trace. Method summaries report `fpr`, `fnr`, mean/final/max/summed native
 approximation loss, and mean/max `state_width`; `primary_metrics.csv` contains
 the compact completion table. `mpc_vs_static_metrics.csv` selects the best
@@ -159,8 +162,8 @@ Benchmark reference mode controls offline metrics and caching only. MPC and
 teacher searches construct their own unreduced horizon rollouts.
 
 Offline exact references remain specification-independent. Each cache row
-contains exact trigger booleans and total-state center/radius vectors. The
-engine reconstructs a compact interval matrix and invokes the existing native
+contains exact trigger booleans and total-state logical-row center/radius
+vectors. The engine reconstructs an interval matrix and invokes the existing native
 `approx_loss` while the candidate is applied only to the planner monitor. It
 must restore the planner in `finally` and must never mutate the live monitor.
 Do not edit the RTLola binding to implement these metrics.
