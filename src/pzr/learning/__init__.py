@@ -18,13 +18,6 @@ from pzr.learning.ranker import (
     train_ranking_policy,
 )
 
-from pzr.learning.ranking import (
-    RegretDataset,
-    RegretRankingPolicy,
-    RegretTrainingResult,
-    train_regret_policy,
-)
-
 __all__ = [
     "FeatureNormalizer",
     "FeatureSchema",
@@ -34,13 +27,9 @@ __all__ = [
     "RankingTrainingResult",
     "RANKING_DATASET_SCHEMA",
     "ReducerRanker",
-    "RegretDataset",
-    "RegretRankingPolicy",
-    "RegretTrainingResult",
     "cost_sensitive_pairwise_loss",
     "evaluate_ranking",
     "load_ranking_dataset",
     "train_ranking_policy",
-    "train_regret_policy",
     "write_ranking_dataset",
 ]

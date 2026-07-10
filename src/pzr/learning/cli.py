@@ -13,7 +13,6 @@ import pandas as pd
 from pzr.learning.artifacts import load_ranking_dataset
 from pzr.learning.dataset import RankingDataset
 from pzr.learning.ranker import train_ranking_policy
-from pzr.learning.reporting import write_learning_plots
 from pzr.rtlola.actions import MPC_ACTION_NAMES, default_action_catalog
 from pzr.rtlola.binding import (
     BINDING_BUILD_PROFILE,
@@ -217,6 +216,8 @@ def run_train(args: argparse.Namespace) -> None:
 
 
 def run_evaluate(args: argparse.Namespace) -> None:
+    from pzr.learning.reporting import write_learning_plots
+
     unknown_traces = set(args.trace_kinds) - set(TRACE_KINDS)
     if unknown_traces:
         raise ValueError(f"unknown fixed robot-arm traces: {sorted(unknown_traces)}")

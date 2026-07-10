@@ -72,7 +72,7 @@ the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
 The last recorded full release-binding validation after this integration was
-89 passing tests with no skips.
+83 passing tests with no skips.
 
 The authoritative trace kinds and full lengths are:
 

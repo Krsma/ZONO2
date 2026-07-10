@@ -117,17 +117,6 @@ class RtlolaBenchmarkConfig:
     reference_mode: str = "exact"
     reference_cache: str | None = None
     output_dir: str = "results/rtlola"
-    learned_mode: str = "none"
-    regret_iterations: int = 3
-    regret_epochs: int = 100
-    regret_train_seeds: int | None = None
-    regret_eval_seeds: int | None = None
-    regret_train_seed_start: int = 10_000
-    regret_eval_seed_start: int = 0
-    regret_loss: str = "pairwise"
-    regret_budgets: list[int] | None = None
-    regret_train_trace_kinds: list[str] | None = None
-    regret_eval_trace_kinds: list[str] | None = None
     mpc_objective: str = field(
         init=False,
         default=TERMINAL_BINDING_APPROX_LOSS,

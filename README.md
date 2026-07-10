@@ -65,8 +65,8 @@ pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
 ```
 
 See `science/LEARNING_PIPELINE.md` for teacher semantics, one-round aggregation,
-the full-length fixed-trace evaluation command, and artifact schemas. The old
-one-shot `--learned-mode regret` benchmark path is superseded.
+the full-length fixed-trace evaluation command, and artifact schemas. Learning
+runs are intentionally separate from `pzr-benchmark`.
 
 Prepare or resume the full FPR-first robot-arm sweep:
 
