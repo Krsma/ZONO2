@@ -31,12 +31,14 @@ import matplotlib
 import mujoco
 import numpy
 import pandas
+import torch
 from rlola_python_binding import RLolaMonitor, ZonotopeConfig
 
 print(f"numpy {numpy.__version__}")
 print(f"pandas {pandas.__version__}")
 print(f"matplotlib {matplotlib.__version__}")
 print(f"mujoco {mujoco.__version__}")
+print(f"torch {torch.__version__}")
 print("rtlola binding ok")
 '
 
