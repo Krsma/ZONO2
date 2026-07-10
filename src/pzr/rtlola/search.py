@@ -145,6 +145,18 @@ class BeamItem:
     tail_fallback_count: int = 0
 
 
+@dataclass(frozen=True)
+class FullWidthLeaf:
+    """One complete two-event full-width terminal rollout."""
+
+    first_action: RtlolaAction
+    first_step: RtlolaStepResult
+    terminal_step: RtlolaStepResult
+    cost: float
+    sequence: tuple[str, ...]
+    fallback_used: bool = False
+
+
 def choose_static_action(
     engine: RtlolaEngine,
     state: RtlolaStateRef,
@@ -202,6 +214,198 @@ def choose_static_action(
         reducer_failure_count=failures,
         infeasible_candidate_count=failures,
     )
+
+
+def full_width_terminal_search(
+    engine: RtlolaEngine,
+    state: RtlolaStateRef,
+    current_event: RtlolaEvent,
+    future_event: RtlolaEvent | None,
+    actions: tuple[RtlolaAction, ...],
+    budget: int,
+    *,
+    fallback: RtlolaAction,
+    none_action: RtlolaAction,
+) -> RtlolaSearchResult:
+    """Exhaustively score every feasible root over exactly two events."""
+    if not actions:
+        raise ValueError("full-width search requires at least one candidate")
+    if len({action.name for action in actions}) != len(actions):
+        raise ValueError("full-width candidate names must be unique")
+    pre_metrics = engine.metrics(state)
+    if pre_metrics.dynamic_generator_count <= budget:
+        step = _branch_none(engine, state, current_event, none_action, budget)
+        return RtlolaSearchResult(
+            first_action=none_action,
+            first_action_budget=budget,
+            first_step=step,
+            predicted_cost=0.0,
+            predicted_sequence=(none_action.name,),
+            evaluated_leaves=1,
+            pruned_branches=0,
+            mpc_variant="mpc_terminal_full_width",
+            mpc_objective=MpcObjective.TERMINAL.value,
+            root_strategy="full_width",
+            optimized_horizon=1,
+            realized_optimized_horizon=int(future_event is not None),
+        )
+
+    rollout_events = (
+        (current_event, future_event)
+        if future_event is not None else (current_event,)
+    )
+    reference = _reference_rollout(
+        engine,
+        state,
+        rollout_events,
+        none_action,
+        budget,
+    )
+    leaves: list[FullWidthLeaf] = []
+    root_rows: list[MpcRootEvaluation] = []
+    total_failures = 0
+    for root in actions:
+        root_failures = 0
+        first_step = _try_action(engine, state, current_event, root, budget)
+        if first_step is None:
+            total_failures += 1
+            root_rows.append(MpcRootEvaluation(
+                root_action=root.name,
+                feasible=False,
+                complete=False,
+                failure_count=1,
+            ))
+            continue
+        root_leaves: list[FullWidthLeaf] = []
+        if future_event is None:
+            root_leaves.append(FullWidthLeaf(
+                first_action=root,
+                first_step=first_step,
+                terminal_step=first_step,
+                cost=engine.approx_loss(reference[0], first_step.state),
+                sequence=(root.name,),
+            ))
+        else:
+            root_failures, total_failures = _expand_full_width_root(
+                engine=engine,
+                first_step=first_step,
+                future_event=future_event,
+                actions=actions,
+                budget=budget,
+                fallback=fallback,
+                none_action=none_action,
+                reference_state=reference[1],
+                root=root,
+                root_leaves=root_leaves,
+                root_failures=root_failures,
+                total_failures=total_failures,
+            )
+        if not root_leaves:
+            root_rows.append(MpcRootEvaluation(
+                root_action=root.name,
+                feasible=True,
+                complete=False,
+                failure_count=root_failures,
+            ))
+            continue
+        best_root = min(root_leaves, key=lambda leaf: (leaf.cost, leaf.sequence))
+        leaves.extend(root_leaves)
+        root_rows.append(MpcRootEvaluation(
+            root_action=root.name,
+            feasible=True,
+            complete=True,
+            predicted_cost=best_root.cost,
+            predicted_sequence=best_root.sequence,
+            explicit_terminal_loss=best_root.cost,
+            failure_count=root_failures,
+        ))
+    if not leaves:
+        raise RtlolaNoFeasibleAction(
+            f"no full-width RTLola root completed with bound={budget}"
+        )
+    best = min(leaves, key=lambda leaf: (leaf.cost, leaf.sequence))
+    return RtlolaSearchResult(
+        first_action=best.first_action,
+        first_action_budget=budget,
+        first_step=best.first_step,
+        predicted_cost=best.cost,
+        predicted_sequence=best.sequence,
+        evaluated_leaves=len(leaves),
+        pruned_branches=0,
+        reducer_failure_count=total_failures,
+        infeasible_candidate_count=total_failures,
+        mpc_variant="mpc_terminal_full_width",
+        mpc_objective=MpcObjective.TERMINAL.value,
+        root_strategy="full_width",
+        optimized_horizon=1,
+        realized_optimized_horizon=int(future_event is not None),
+        explicit_terminal_loss=best.cost,
+        tail_fallback_count=int(best.fallback_used),
+        root_evaluations=tuple(root_rows),
+    )
+
+
+def _expand_full_width_root(
+    *,
+    engine: RtlolaEngine,
+    first_step: RtlolaStepResult,
+    future_event: RtlolaEvent,
+    actions: tuple[RtlolaAction, ...],
+    budget: int,
+    fallback: RtlolaAction,
+    none_action: RtlolaAction,
+    reference_state: RtlolaStateRef,
+    root: RtlolaAction,
+    root_leaves: list[FullWidthLeaf],
+    root_failures: int,
+    total_failures: int,
+) -> tuple[int, int]:
+    future_metrics = engine.metrics(first_step.state)
+    if future_metrics.dynamic_generator_count <= budget:
+        terminal = _branch_none(
+            engine, first_step.state, future_event, none_action, budget,
+        )
+        root_leaves.append(FullWidthLeaf(
+            first_action=root,
+            first_step=first_step,
+            terminal_step=terminal,
+            cost=engine.approx_loss(reference_state, terminal.state),
+            sequence=(root.name, none_action.name),
+        ))
+        return root_failures, total_failures
+    for continuation in actions:
+        terminal = _try_action(
+            engine, first_step.state, future_event, continuation, budget,
+        )
+        if terminal is None:
+            root_failures += 1
+            total_failures += 1
+            continue
+        root_leaves.append(FullWidthLeaf(
+            first_action=root,
+            first_step=first_step,
+            terminal_step=terminal,
+            cost=engine.approx_loss(reference_state, terminal.state),
+            sequence=(root.name, continuation.name),
+        ))
+    if root_leaves:
+        return root_failures, total_failures
+    terminal = _try_action(
+        engine, first_step.state, future_event, fallback, budget,
+    )
+    if terminal is not None:
+        root_leaves.append(FullWidthLeaf(
+            first_action=root,
+            first_step=first_step,
+            terminal_step=terminal,
+            cost=engine.approx_loss(reference_state, terminal.state),
+            sequence=(root.name, fallback.name),
+            fallback_used=True,
+        ))
+    else:
+        root_failures += 1
+        total_failures += 1
+    return root_failures, total_failures
 
 
 def beam_search(

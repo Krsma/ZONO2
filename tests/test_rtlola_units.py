@@ -55,6 +55,7 @@ from pzr.rtlola.search import (
     MPC_VARIANTS,
     RtlolaSearchResult,
     beam_search,
+    full_width_terminal_search,
     search_mpc_variant,
 )
 from pzr.rtlola.sweep_report import consolidate_sweep
@@ -650,6 +651,101 @@ def test_beam_search_uses_binding_reference_loss_at_terminal_horizon():
         ("none",),
         ("none", "none"),
     }
+
+
+def test_full_width_terminal_search_scores_every_root_without_pruning():
+    none = RtlolaAction("none", lambda _budget: object(), explicit_budget=False)
+    fallback = RtlolaAction("interval", lambda _budget: object(), explicit_budget=False)
+    alpha = RtlolaAction("alpha", lambda _budget: object(), explicit_budget=False)
+    beta = RtlolaAction("beta", lambda _budget: object(), explicit_budget=False)
+
+    class FakeEngine:
+        def metrics(self, state):
+            return SimpleNamespace(dynamic_generator_count=99, dimension=1)
+
+        def branch_step(self, state, event, action, config_budget):
+            del event, config_budget
+            next_state = SimpleNamespace(
+                depth=state.depth + 1,
+                path=(*state.path, action.name),
+            )
+            return SimpleNamespace(
+                verdict={},
+                state=next_state,
+                action_name=action.name,
+                metrics=SimpleNamespace(state_width=0.0),
+            )
+
+        def approx_loss(self, reference, candidate):
+            assert reference.path == ("none", "none")
+            costs = {
+                ("alpha", "alpha"): 5.0,
+                ("alpha", "beta"): 3.0,
+                ("beta", "alpha"): 2.0,
+                ("beta", "beta"): 4.0,
+            }
+            return costs[candidate.path]
+
+    result = full_width_terminal_search(
+        FakeEngine(),
+        SimpleNamespace(depth=0, path=()),
+        object(),
+        object(),
+        (alpha, beta),
+        budget=10,
+        fallback=fallback,
+        none_action=none,
+    )
+
+    assert result.first_action.name == "beta"
+    assert result.predicted_sequence == ("beta", "alpha")
+    assert result.predicted_cost == pytest.approx(2.0)
+    assert result.evaluated_leaves == 4
+    assert result.pruned_branches == 0
+    assert [row.root_action for row in result.root_evaluations] == ["alpha", "beta"]
+    assert [row.predicted_cost for row in result.root_evaluations] == [3.0, 2.0]
+
+
+def test_full_width_terminal_search_uses_automatic_none_in_continuation():
+    none = RtlolaAction("none", lambda _budget: object(), explicit_budget=False)
+    fallback = RtlolaAction("interval", lambda _budget: object(), explicit_budget=False)
+    alpha = RtlolaAction("alpha", lambda _budget: object(), explicit_budget=False)
+    beta = RtlolaAction("beta", lambda _budget: object(), explicit_budget=False)
+
+    class FakeEngine:
+        def metrics(self, state):
+            count = 99 if state.depth == 0 or state.path[0] == "beta" else 1
+            return SimpleNamespace(dynamic_generator_count=count, dimension=1)
+
+        def branch_step(self, state, event, action, config_budget):
+            del event, config_budget
+            next_state = SimpleNamespace(
+                depth=state.depth + 1,
+                path=(*state.path, action.name),
+            )
+            return SimpleNamespace(
+                verdict={}, state=next_state, action_name=action.name,
+                metrics=SimpleNamespace(state_width=0.0),
+            )
+
+        def approx_loss(self, reference, candidate):
+            del reference
+            return 0.0 if candidate.path == ("alpha", "none") else 1.0
+
+    result = full_width_terminal_search(
+        FakeEngine(),
+        SimpleNamespace(depth=0, path=()),
+        object(),
+        object(),
+        (alpha, beta),
+        budget=10,
+        fallback=fallback,
+        none_action=none,
+    )
+
+    assert result.first_action.name == "alpha"
+    assert result.predicted_sequence == ("alpha", "none")
+    assert result.evaluated_leaves == 3
 
 
 def test_tail_variants_preserve_roots_and_score_distinct_objectives():

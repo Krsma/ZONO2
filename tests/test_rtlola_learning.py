@@ -14,7 +14,10 @@ from pzr.rtlola.learning import (
     train_and_evaluate_regret,
     write_regret_artifacts,
 )
+from pzr.rtlola.learning_data import build_ranking_dataset, collect_teacher_episode
 from pzr.rtlola.omni import OMNI_EXPECTED_VERDICT_KEYS, OMNI_SPEC, generate_omni_events
+from pzr.rtlola.scenarios import scenario_by_name
+from pzr.rtlola.search import full_width_terminal_search
 
 
 def _overflow_state():
@@ -44,6 +47,56 @@ def test_teacher_costs_force_each_root_then_use_shared_candidate_pool():
 
     assert {row.name for row in rows} == set(catalog.mpc_candidate_names)
     assert all(row.sequence[0] == row.name for row in rows)
+
+
+def test_full_width_teacher_scores_all_roots_without_mutating_live_state():
+    _, events, engine, state = _overflow_state()
+    catalog = default_action_catalog(("girard", "scott"))
+    live_before = engine.snapshot(step=12, time=events[11].time)
+    live_before_matrices = engine.matrices(live_before)
+
+    decision = full_width_terminal_search(
+        engine,
+        state,
+        events[12],
+        events[13],
+        catalog.mpc_candidates,
+        budget=10,
+        fallback=catalog.fallback,
+        none_action=catalog.no_op,
+    )
+
+    assert {row.root_action for row in decision.root_evaluations} == {
+        "girard", "scott",
+    }
+    assert decision.evaluated_leaves > 0
+    assert np.isfinite(decision.predicted_cost)
+    assert decision.predicted_sequence[0] == decision.first_action.name
+    live_after = engine.snapshot(step=12, time=events[11].time)
+    for actual, expected in zip(engine.matrices(live_after), live_before_matrices):
+        np.testing.assert_allclose(actual, expected)
+
+
+def test_teacher_collection_writes_aligned_binding_backed_samples():
+    events = generate_omni_events(16, seed=4)
+    samples = collect_teacher_episode(
+        scenario=scenario_by_name("omni_robot"),
+        events=events,
+        trace_id="omni-seed-4",
+        split="train",
+        condition="omni",
+        seed=4,
+        budget=10,
+        candidate_names=("girard", "scott"),
+    )
+    dataset, metadata = build_ranking_dataset(samples)
+
+    assert dataset.num_samples > 0
+    assert dataset.candidate_names == ("girard", "scott")
+    assert dataset.teacher_costs.shape == (dataset.num_samples, 2)
+    assert np.all(np.any(dataset.feasible, axis=1))
+    assert np.all(np.sum(dataset.tie_mask, axis=1) >= 1)
+    assert set(metadata["teacher_action"]) <= {"girard", "scott", "interval"}
 
 
 def test_learned_policy_selects_one_direct_binding_action():

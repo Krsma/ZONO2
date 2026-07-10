@@ -47,6 +47,7 @@ from pzr.rtlola.search import (
     RtlolaSearchResult,
     beam_search,
     choose_static_action,
+    full_width_terminal_search,
     search_mpc_variant,
 )
 from pzr.rtlola.tables import trigger_confusion
@@ -56,7 +57,8 @@ METHOD_SET_CHOICES = ("core", "static", "mpc", "all")
 CORE_STATIC_METHODS = CORE_STATIC_ACTION_NAMES
 STATIC_METHODS = STATIC_ACTION_METHOD_NAMES
 BASELINE_MPC_METHODS = ("mpc_terminal_beam",)
-MPC_METHODS = tuple(MPC_VARIANTS)
+FULL_WIDTH_MPC_METHOD = "mpc_terminal_full_width"
+MPC_METHODS = (*tuple(MPC_VARIANTS), FULL_WIDTH_MPC_METHOD)
 ALL_METHODS = (*STATIC_METHODS, *MPC_METHODS)
 CORE_METHODS = (*CORE_STATIC_METHODS, *BASELINE_MPC_METHODS)
 TERMINAL_BINDING_APPROX_LOSS = "terminal_binding_approx_loss"
@@ -550,6 +552,17 @@ def _select_method_decision(
             none_action=by_name[EXACT_BASELINE_ACTION_NAME],
             use_reference_loss=True,
             configured_horizon=config.horizon,
+        )
+    if method == FULL_WIDTH_MPC_METHOD:
+        return full_width_terminal_search(
+            engine,
+            state,
+            event,
+            trace[step + 1] if step + 1 < len(trace) else None,
+            mpc_candidates,
+            config.budget,
+            fallback=fallback,
+            none_action=by_name[EXACT_BASELINE_ACTION_NAME],
         )
     if method in MPC_VARIANTS:
         variant = MPC_VARIANTS[method]
