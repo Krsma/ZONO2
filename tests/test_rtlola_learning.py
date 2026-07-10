@@ -7,7 +7,11 @@ pytest.importorskip("rlola_python_binding")
 from pzr.learning.ranking import RegretRankingPolicy
 from pzr.learning.ranker import FeatureNormalizer, RankingPolicy, ReducerRanker
 from pzr.rtlola.actions import default_action_catalog
-from pzr.rtlola.benchmark import RtlolaBenchmarkConfig, summarize_results
+from pzr.rtlola.benchmark import (
+    RtlolaBenchmarkConfig,
+    run_direct_policy_benchmark,
+    summarize_results,
+)
 from pzr.rtlola.engine import RtlolaEngine
 from pzr.rtlola.learning import (
     RTL_FEATURE_NAMES,
@@ -147,6 +151,26 @@ def test_dagger_collection_labels_states_visited_by_learned_behavior():
     assert {sample.behavior_action for sample in samples} <= {
         "girard", "scott", "interval",
     }
+
+
+def test_direct_policy_benchmark_uses_standard_exact_metric_schema(tmp_path):
+    config = RtlolaBenchmarkConfig(
+        scenario="omni_robot",
+        length=14,
+        seeds=1,
+        budget=10,
+        reference_mode="exact",
+        reference_cache=str(tmp_path / "reference.json"),
+        mpc_candidate_names=["girard", "scott"],
+    )
+
+    result = run_direct_policy_benchmark(config, _direct_policy())
+
+    assert not result.failures
+    assert result.raw_results
+    assert result.raw_results[0].method == "learned_direct"
+    assert np.isfinite(result.summary["mean_approx_loss"]).all()
+    assert {"fpr", "fnr", "fallback_rate"} <= set(result.summary.columns)
 
 
 def test_learned_policy_selects_one_direct_binding_action():

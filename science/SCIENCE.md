@@ -40,10 +40,11 @@ The benchmark reference mode is independent of this search reference.
 `verdict` mode avoids retaining full offline state histories, but MPC still
 constructs an unreduced terminal reference for each horizon search.
 
-Regret/ranking distillation uses the same objective. Each training row forces
-one candidate first action, then permits full beam continuation over the
-standard candidate pool. Direct learned inference ranks candidates once and
-tries binding actions in that order.
+Ranking distillation uses a two-event, full-width teacher. Each training row
+forces one candidate first action and exhaustively evaluates required second
+actions against an ephemeral unreduced rollout using binding-native terminal
+loss. Direct learned inference uses aggregate current-state features only,
+ranks candidates once, and tries binding actions in stable score order.
 
 ## Scenarios
 

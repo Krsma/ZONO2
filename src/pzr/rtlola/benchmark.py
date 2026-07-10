@@ -6,7 +6,7 @@ from dataclasses import asdict, dataclass, field
 import hashlib
 from pathlib import Path
 import time
-from typing import Sequence
+from typing import Protocol, Sequence
 
 import numpy as np
 import pandas as pd
@@ -89,6 +89,16 @@ RTLOLA_AGGREGATE_METRICS = [
     "infeasible_candidate_count",
     "tail_fallback_count",
 ]
+
+
+class DirectRtlolaPolicy(Protocol):
+    def choose(
+        self,
+        engine: RtlolaEngine,
+        state: RtlolaStateRef,
+        event: RtlolaEvent,
+        budget: int,
+    ) -> RtlolaSearchResult: ...
 
 
 @dataclass(frozen=True)
@@ -391,6 +401,63 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
     )
 
 
+def run_direct_policy_benchmark(
+    config: RtlolaBenchmarkConfig,
+    policy: DirectRtlolaPolicy,
+    *,
+    method: str = "learned_direct",
+) -> RtlolaBenchmarkResult:
+    """Evaluate one direct policy with the standard trace and reference machinery."""
+    if config.reference_mode not in {"exact", "verdict", "off"}:
+        raise ValueError("reference_mode must be one of: exact, verdict, off")
+    scenario = scenario_by_name(config.scenario)
+    catalog = default_action_catalog(tuple(config.mpc_candidate_names))
+    raw: list[RtlolaRunResult] = []
+    failures: list[RtlolaRunFailure] = []
+    for seed in range(config.seeds):
+        generated = scenario.generate_trace(
+            config.length, seed, trace_kind=config.trace_kind,
+        )
+        reference = (
+            load_or_compute_reference(
+                generated.events,
+                scenario=scenario,
+                trace_kind=generated.trace_kind,
+                seed=seed,
+                cache_path=reference_cache_path(
+                    config.reference_cache, seed, config.seeds,
+                ),
+                include_approximation=config.reference_mode == "exact",
+            )
+            if config.reference_mode != "off" else None
+        )
+        outcome = _run_single(
+            config,
+            scenario,
+            generated.events,
+            method,
+            catalog.mpc_candidates,
+            catalog.by_name,
+            catalog.fallback,
+            seed,
+            generated.trace_kind,
+            reference,
+            direct_policy=policy,
+        )
+        if isinstance(outcome, RtlolaRunFailure):
+            failures.append(outcome)
+        else:
+            raw.append(outcome)
+    return RtlolaBenchmarkResult(
+        config=config,
+        raw_results=tuple(raw),
+        timeseries=results_to_dataframe(raw),
+        summary=summarize_results(raw),
+        aggregate=aggregate_summary(summarize_results(raw)),
+        failures=tuple(failures),
+    )
+
+
 def _run_single(
     config: RtlolaBenchmarkConfig,
     scenario: RtlolaScenario,
@@ -402,6 +469,7 @@ def _run_single(
     seed: int,
     trace_kind: str,
     reference: Sequence[RtlolaReferenceStep] | None,
+    direct_policy: DirectRtlolaPolicy | None = None,
 ) -> RtlolaRunResult | RtlolaRunFailure:
     engine = RtlolaEngine(
         scenario.spec,
@@ -428,7 +496,9 @@ def _run_single(
         future = tuple(trace[index + 1:index + 1 + config.horizon])
         start = time.perf_counter()
         try:
-            decision = _select_method_decision(
+            decision = direct_policy.choose(
+                engine, state, event, config.budget,
+            ) if direct_policy is not None else _select_method_decision(
                 config=config,
                 engine=engine,
                 trace=trace,

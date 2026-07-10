@@ -11,7 +11,7 @@ scenario traces, bounded search, learning, metrics, and artifact generation.
   traces, native transform catalog, MPC search, benchmark runner, and CLI.
 - `../rlola-eval/`: upstream source of truth for the packaged robot-arm
   specification and recorded traces.
-- `src/pzr/learning/`: scenario-neutral regret-ranking model.
+- `src/pzr/learning/`: scenario-neutral cost-sensitive ranking model.
 - `rlolapythonbinding/`: pinned RTLola Python binding submodule.
 - `tests/`: pure unit tests and binding-backed semantic tests.
 - `tools/`: binding/MuJoCo environment setup and robot-arm smoke wrapper.
@@ -55,15 +55,18 @@ The Omni scenario provides the historically compatible `canonical` trace and
 calibrated `safe`, `x_violated`, and `y_violated` traces. Numeric public
 `position_x` and `position_y` bounds are included in its artifacts.
 
-Run regret/ranking distillation:
+Run the staged current-state ranking pipeline:
 
 ```bash
-pzr-benchmark --profile smoke --scenario robot_arm \
-  --trace-kind figure8_drift --budget 80 --method-set core \
-  --learned-mode regret --regret-iterations 1 --regret-epochs 10 \
-  --regret-train-seeds 1 --regret-eval-seeds 1 \
-  --output /tmp/pzr-arm-learned
+pzr-learning collect --output /tmp/pzr-learning/base --event-count 30 \
+  --budgets 40,80 --train-seeds 2 --validation-seeds 1 --test-seeds 1
+pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
+  --output /tmp/pzr-learning/model
 ```
+
+See `science/LEARNING_PIPELINE.md` for teacher semantics, one-round aggregation,
+the full-length fixed-trace evaluation command, and artifact schemas. The old
+one-shot `--learned-mode regret` benchmark path is superseded.
 
 Prepare or resume the full FPR-first robot-arm sweep:
 
@@ -154,8 +157,9 @@ emergency fallback.
   predicted actions.
 - The benchmark reference mode controls offline metrics and caching only;
   binding-loss MPC always constructs its own unreduced horizon rollout.
-- Learned inference ranks native transforms and directly tries them through
-  the binding. It never writes a Python-reduced matrix into RTLola.
+- Learned inference uses 12 aggregate current-zonotope/budget features, ranks
+  native transforms once, and directly tries them through the binding. It has
+  no future-event input or inference-time rollout and never writes a matrix.
 - `none` and fallback actions are excluded from learned targets.
 - Robot-arm and Omni constant calibration generators are kept outside dynamic
   reduction and protected by binding-backed regression tests.
@@ -180,12 +184,14 @@ emergency fallback.
 
 ## Artifacts
 
-Each run writes `timeseries.csv`, `summary.csv`, `aggregate.csv`, and
+Each benchmark run writes `timeseries.csv`, `summary.csv`, `aggregate.csv`, and
 `run_failures.csv` below the scenario directory, plus `config.yaml`,
 trigger-confusion data, and runtime/loss figures. Incomplete runs are recorded
 in the failure table and excluded from metrics. Learned runs also write policy,
 candidate-cost, training, ranking, metadata, and held-out evaluation files
-under `learning/<scenario>/`.
+under `learning/<scenario>/`. The staged pipeline instead writes versioned
+datasets, explicit PyTorch model directories, and generalization evaluation
+artifacts at the user-provided paths.
 The overnight wrapper additionally writes `combined_summary.csv`,
 `combined_trigger_confusion.csv`, `combined_reducer_counts.csv`,
 `combined_run_failures.csv`, `method_comparison.csv`,

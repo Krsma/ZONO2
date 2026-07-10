@@ -11,6 +11,9 @@ An experiment is ready only when:
 - dense, active, zero, and constant generators are interpreted separately;
 - exact-reference approximation loss and trigger outcomes are available;
 - learned candidates exactly match the MPC candidate catalog;
+- learning splits are disjoint by trajectory seed and preserve trace kind;
+- teacher labels use short online unreduced rollouts, not offline exact caches;
+- direct inference reads no future events and performs no planner rollout;
 - held-out learned rows record real decision time and fallback metadata;
 - all generated CSV, YAML, PDF, PNG, policy, and metadata artifacts are
   non-empty.

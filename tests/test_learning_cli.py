@@ -4,7 +4,7 @@ import numpy as np
 import pandas as pd
 
 from pzr.learning.artifacts import write_ranking_dataset
-from pzr.learning.cli import _split_seeds, run_train
+from pzr.learning.cli import _split_seeds, build_parser, run_train
 from pzr.learning.dataset import RankingDataset
 from pzr.learning.ranker import RankingPolicy
 from pzr.rtlola.features import RTL_RANKING_FEATURE_NAMES
@@ -71,3 +71,18 @@ def test_staged_train_writes_explicit_pytorch_artifacts(tmp_path):
     assert (output / "model.json").stat().st_size > 0
     assert (output / "training.json").stat().st_size > 0
     assert not (output / "model.onnx").exists()
+
+
+def test_evaluate_command_defaults_to_all_fixed_traces_and_exact_lengths(tmp_path):
+    args = build_parser().parse_args([
+        "evaluate",
+        "--model", str(tmp_path / "model"),
+        "--output", str(tmp_path / "evaluation"),
+        "--budgets", "40,80",
+    ])
+
+    assert args.trace_kinds == (
+        "figure8", "figure8_drift", "random", "random_drift",
+        "square", "square_drift",
+    )
+    assert args.budgets == (40, 80)

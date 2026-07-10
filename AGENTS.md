@@ -6,7 +6,7 @@ This Python 3.11 research package is RTLola-centered:
 
 - `src/pzr/rtlola/`: specifications, trace adapters, binding wrapper, native
   transform catalog, search, benchmark execution, reporting, and CLI.
-- `src/pzr/learning/`: generic regret-ranking data/model/training code.
+- `src/pzr/learning/`: generic cost-sensitive ranking data/model/training code.
 - `rlolapythonbinding/`: pinned binding submodule.
 - `tests/`: pure tests plus binding-backed semantic contracts.
 - `tools/`: reproducible environment setup and robot-arm smoke execution.
@@ -39,11 +39,12 @@ tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
 PZR_OUT_DIR=results/rtlola-arm-mpc-variants-b4cfbf4-e6ecd0b-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 
-pzr-benchmark --profile smoke --scenario omni_robot --budget 10 \
-  --methods girard,mpc_terminal_beam --learned-mode regret \
-  --regret-iterations 1 --regret-epochs 2 \
-  --regret-train-seeds 1 --regret-eval-seeds 1 \
-  --output /tmp/pzr-learned
+pzr-learning collect --output /tmp/pzr-learning --event-count 10 \
+  --budgets 10 --candidates girard,scott \
+  --conditions random_waypoint --train-seeds 1 \
+  --validation-seeds 1 --test-seeds 1
+pzr-learning train --dataset /tmp/pzr-learning/dataset \
+  --output /tmp/pzr-learning-model --epochs 2
 ```
 
 ## Current RTLola Experiment Configuration
@@ -71,7 +72,7 @@ the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
 The last recorded full release-binding validation after this integration was
-64 passing tests with no skips.
+89 passing tests with no skips.
 
 The authoritative trace kinds and full lengths are:
 
