@@ -15,6 +15,7 @@ BATCH_SIZE="${PZR_BATCH_SIZE:-256}"
 PATIENCE="${PZR_PATIENCE:-10}"
 TRAINING_SEED="${PZR_TRAINING_SEED:-42}"
 EVAL_LENGTH="${PZR_EVAL_LENGTH:-}"
+WORKERS="${PZR_WORKERS:-8}"
 SEED_START="${PZR_SEED_START:-0}"
 BASE_TRAIN_SEEDS="${PZR_BASE_TRAIN_SEEDS:-12}"
 BASE_VALIDATION_SEEDS="${PZR_BASE_VALIDATION_SEEDS:-4}"
@@ -60,6 +61,7 @@ run_logged collect_base \
     --train-seeds "$BASE_TRAIN_SEEDS" \
     --validation-seeds "$BASE_VALIDATION_SEEDS" \
     --test-seeds 0 \
+    --workers "$WORKERS" \
     --seed-start "$SEED_START"
 
 run_logged train_base \
@@ -80,6 +82,7 @@ run_logged collect_dagger_1 \
     --train-seeds "$DAGGER_SEEDS" \
     --validation-seeds 0 \
     --test-seeds 0 \
+    --workers "$WORKERS" \
     --seed-start "$DAGGER_1_SEED_START" \
     --behavior-model "$OUT_DIR/model-base"
 
@@ -102,6 +105,7 @@ run_logged collect_dagger_2 \
     --train-seeds "$DAGGER_SEEDS" \
     --validation-seeds 0 \
     --test-seeds 0 \
+    --workers "$WORKERS" \
     --seed-start "$DAGGER_2_SEED_START" \
     --behavior-model "$OUT_DIR/model-dagger-1"
 
@@ -129,6 +133,7 @@ run_logged evaluate_fixed \
     --candidates "$CANDIDATES" \
     --trace-kinds "$TRACE_KINDS" \
     --baselines girard,mpc_terminal_full_width \
+    --workers "$WORKERS" \
     "${length_args[@]}"
 
 echo "RTLola geometry15 learning experiment complete: $OUT_DIR"

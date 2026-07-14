@@ -45,6 +45,17 @@ def test_random_waypoint_trace_store_is_non_empty_resumable_and_aligned(
     resumed = generate_random_waypoint_trace_store(_config(tmp_path, seed_count=2))
     assert resumed.manifest_sha256 == first.manifest_sha256
 
+    monkeypatch.setattr(
+        "pzr.rtlola.learning_traces.pzr_source_sha256",
+        lambda: "changed-learning-source",
+    )
+    reused_after_source_change = load_random_waypoint_trace_store(tmp_path)
+    assert reused_after_source_change.manifest_sha256 == first.manifest_sha256
+    regenerated_after_source_change = generate_random_waypoint_trace_store(
+        _config(tmp_path, seed_count=2),
+    )
+    assert regenerated_after_source_change.manifest_sha256 == first.manifest_sha256
+
 
 def test_random_waypoint_trace_store_rejects_tampering(tmp_path):
     pytest.importorskip("mujoco")

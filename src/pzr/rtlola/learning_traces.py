@@ -83,7 +83,11 @@ def generate_random_waypoint_trace_store(
     existing = None
     if manifest_path.exists():
         existing = json.loads(manifest_path.read_text())
-        _validate_manifest_identity(existing, identity)
+        _validate_manifest_identity(
+            existing,
+            identity,
+            ignored=("pzr_source_sha256",),
+        )
 
     records = []
     for seed in config.seeds:
@@ -102,7 +106,9 @@ def generate_random_waypoint_trace_store(
             records.append(_trace_record(trace_id, relative_path, trace))
 
     manifest = {**identity, "traces": records}
-    if existing is not None and existing != manifest:
+    if existing is not None and _without_pzr_source(existing) != _without_pzr_source(
+        manifest,
+    ):
         raise ValueError("random-waypoint trace-store manifest contents differ")
     if existing is None:
         _write_json_atomic(manifest, manifest_path)
@@ -124,7 +130,11 @@ def load_random_waypoint_trace_store(directory: Path) -> RandomWaypointTraceStor
         seed_start=int(manifest["seed_start"]),
         seed_count=int(manifest["seed_count"]),
     )
-    _validate_manifest_identity(manifest, _store_identity(config))
+    _validate_manifest_identity(
+        manifest,
+        _store_identity(config),
+        ignored=("pzr_source_sha256",),
+    )
     event_count = config.event_count
     conditions = config.conditions
     seed_start = config.seed_start
@@ -196,10 +206,12 @@ def _store_identity(config: RandomWaypointTraceStoreConfig) -> dict[str, object]
 def _validate_manifest_identity(
     manifest: dict[str, object],
     expected: dict[str, object],
+    *,
+    ignored: tuple[str, ...] = (),
 ) -> None:
     mismatched = [
         name for name, value in expected.items()
-        if manifest.get(name) != value
+        if name not in ignored and manifest.get(name) != value
     ]
     if mismatched:
         raise ValueError(
@@ -249,3 +261,10 @@ def _write_json_atomic(payload: object, path: Path) -> None:
     temporary = path.with_name(f".{path.name}.tmp")
     temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
     temporary.replace(path)
+
+
+def _without_pzr_source(payload: dict[str, object]) -> dict[str, object]:
+    return {
+        name: value for name, value in payload.items()
+        if name != "pzr_source_sha256"
+    }

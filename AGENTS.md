@@ -73,8 +73,8 @@ the binding-native transforms, counters, and approximation loss. PZR reports
 the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
-The last recorded full release-binding validation after the random500
-learning integration was 94 passing tests with no skips.
+The last recorded full release-binding validation after the parallel learning
+integration was 95 passing tests with no skips.
 
 The authoritative trace kinds and full lengths are:
 
@@ -163,6 +163,9 @@ waypoint traces: twelve base-training seeds, four validation seeds, and two
 fresh twelve-seed DAgger rounds. Its fixed-trace comparison is Girard versus
 `learned_geometry15` versus the two-event `mpc_terminal_full_width` teacher.
 The six fixed evaluation traces always retain their full authoritative lengths.
+Teacher shards and post-reference evaluation cells use spawned worker
+processes, defaulting to `PZR_WORKERS=8`; each worker owns its monitor and
+planner. BLAS, OpenMP, MKL, and NumExpr remain limited to one thread per worker.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the

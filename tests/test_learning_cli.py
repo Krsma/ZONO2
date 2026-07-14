@@ -102,6 +102,7 @@ def test_evaluate_command_defaults_to_all_fixed_traces_and_exact_lengths(tmp_pat
     assert args.model_name == "learned_geometry15"
     assert args.length is None
     assert args.horizon == 1
+    assert args.workers == 1
 
 
 def test_generate_command_defaults_to_nominal_random_waypoints(tmp_path):
@@ -118,7 +119,9 @@ def test_generate_command_defaults_to_nominal_random_waypoints(tmp_path):
     assert args.seed_count == 40
 
 
-def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):
+def test_collection_parallelizes_and_reuses_validated_trace_budget_shards(
+    tmp_path, monkeypatch,
+):
     monkeypatch.setattr(learning_cli, "default_action_catalog", lambda _names: object())
     trace = SimpleNamespace(
         events=(object(), object()),
@@ -144,6 +147,23 @@ def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):
         lambda _path: trace_store,
     )
     calls = []
+    pool_sizes = []
+
+    class ImmediatePool:
+        def __init__(self, *, max_workers, mp_context):
+            del mp_context
+            pool_sizes.append(max_workers)
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def map(self, function, jobs):
+            return tuple(function(job) for job in jobs)
+
+    monkeypatch.setattr(learning_cli, "ProcessPoolExecutor", ImmediatePool)
 
     def collect(**kwargs):
         calls.append((kwargs["condition"], kwargs["budget"]))
@@ -162,14 +182,17 @@ def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):
         validation_seeds=0,
         test_seeds=0,
         seed_start=0,
+        workers=2,
         behavior_model=None,
     )
 
     run_collect(args)
     assert calls == [("random_waypoint", 40)]
+    assert pool_sizes == [2]
     calls.clear()
     run_collect(args)
     assert calls == []
+    assert pool_sizes == [2]
     dataset, _, manifest = load_ranking_dataset(tmp_path / "dataset")
     assert dataset.num_samples == 1
     assert manifest["shard_count"] == 1

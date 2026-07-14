@@ -126,6 +126,79 @@ def test_fixed_learning_evaluation_rejects_stale_cell(tmp_path, monkeypatch):
         )
 
 
+def test_fixed_learning_evaluation_prepares_references_before_parallel_cells(
+    tmp_path, monkeypatch,
+):
+    calls = []
+    monkeypatch.setattr(
+        evaluation,
+        "prepare_reference_cache",
+        lambda config: calls.append(("reference", config.trace_kind)),
+    )
+    monkeypatch.setattr(
+        evaluation,
+        "run_benchmark",
+        lambda config: _result(config, config.methods[0]),
+    )
+    monkeypatch.setattr(
+        evaluation,
+        "run_direct_policy_benchmark",
+        lambda config, _policy, *, method: _result(config, method),
+    )
+
+    class ImmediatePool:
+        def __init__(self, *, max_workers, mp_context):
+            del mp_context
+            calls.append(("pool", max_workers))
+
+        def __enter__(self):
+            return self
+
+        def __exit__(self, *_args):
+            return False
+
+        def map(self, function, jobs):
+            return tuple(function(job) for job in jobs)
+
+    monkeypatch.setattr(evaluation, "ProcessPoolExecutor", ImmediatePool)
+
+    def run_job(job):
+        policy = object() if job.method == job.learned_method else None
+        evaluation._load_or_run_cell(
+            directory=job.directory,
+            identity=job.identity,
+            benchmark_config=job.benchmark_config,
+            method=job.method,
+            learned_method=job.learned_method,
+            policy=policy,
+            expected_length=job.expected_length,
+        )
+
+    monkeypatch.setattr(evaluation, "_run_evaluation_cell_job", run_job)
+    config = FixedLearningEvaluationConfig(
+        output=tmp_path,
+        model_name="learned_geometry15",
+        trace_kinds=("figure8", "square"),
+        budgets=(40,),
+        baselines=("girard",),
+        candidate_names=("girard", "scott", "pca", "combastel"),
+        length=2,
+    )
+
+    _, summary = run_fixed_learning_evaluation(
+        config,
+        object(),
+        model_sha256="model",
+        source_sha256="source",
+        model_directory=tmp_path / "model",
+        workers=2,
+    )
+
+    assert calls[:2] == [("reference", "figure8"), ("reference", "square")]
+    assert calls[2] == ("pool", 2)
+    assert len(summary) == 4
+
+
 def test_learned_comparison_requires_aligned_cells():
     summary = pd.DataFrame([
         {"trace_kind": "figure8", "budget": 40, "method": "learned"},

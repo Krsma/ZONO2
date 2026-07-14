@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import argparse
-from dataclasses import asdict
+from concurrent.futures import ProcessPoolExecutor
+from dataclasses import asdict, dataclass
 import json
+from multiprocessing import get_context
 from pathlib import Path
 from typing import Sequence
 
@@ -21,6 +23,7 @@ from pzr.rtlola.binding import (
     BINDING_REVISION,
     INTERPRETER_REVISION,
 )
+from pzr.rtlola.engine import RtlolaEvent
 from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA
 from pzr.rtlola.learned_policy import RtlolaRankingPolicy
 from pzr.rtlola.learning_data import collect_teacher_episode, write_collected_dataset
@@ -76,6 +79,7 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--validation-seeds", type=int, default=1)
     collect.add_argument("--test-seeds", type=int, default=1)
     collect.add_argument("--seed-start", type=int, default=0)
+    collect.add_argument("--workers", type=int, default=1)
     collect.add_argument(
         "--behavior-model",
         type=Path,
@@ -111,6 +115,7 @@ def build_parser() -> argparse.ArgumentParser:
     )
     evaluate.add_argument("--horizon", type=int, default=1)
     evaluate.add_argument("--beam-width", type=int, default=4)
+    evaluate.add_argument("--workers", type=int, default=1)
     return parser
 
 
@@ -151,6 +156,8 @@ def run_collect(args: argparse.Namespace) -> None:
         raise ValueError("training needs a seed and split seed counts cannot be negative")
     if args.seed_start < 0:
         raise ValueError("seed start must be non-negative")
+    if args.workers < 1:
+        raise ValueError("collection workers must be positive")
     trace_store = load_random_waypoint_trace_store(args.trace_store)
     candidate_names = tuple(args.candidates)
     catalog = default_action_catalog(candidate_names)
@@ -169,8 +176,7 @@ def run_collect(args: argparse.Namespace) -> None:
     scenario = scenario_by_name("robot_arm")
     collection = "dagger" if behavior is not None else "teacher"
     source_sha256 = pzr_source_sha256()
-    shard_datasets = []
-    shard_metadata_frames = []
+    jobs = []
     trace_records = []
     for split, seed in _split_seeds(args):
         for stored_trace in trace_store.traces_for_seed(seed):
@@ -210,35 +216,23 @@ def run_collect(args: argparse.Namespace) -> None:
                     "binding_build_profile": BINDING_BUILD_PROFILE,
                     "pzr_source_sha256": source_sha256,
                 }
-                if shard_dir.exists():
-                    dataset, sample_metadata, manifest = load_ranking_dataset(
-                        shard_dir,
-                    )
-                    _validate_shard_manifest(manifest, shard_identity)
-                else:
-                    samples = collect_teacher_episode(
-                        scenario=scenario,
-                        events=trace.events,
-                        trace_id=trace_id,
-                        split=split,
-                        condition=condition,
-                        seed=seed,
-                        budget=budget,
-                        candidate_names=candidate_names,
-                        behavior_policy=behavior,
-                    )
-                    write_collected_dataset(
-                        samples,
-                        shard_dir,
-                        shard_identity,
-                        candidate_names=candidate_names,
-                    )
-                    dataset, sample_metadata, manifest = load_ranking_dataset(
-                        shard_dir,
-                    )
-                    _validate_shard_manifest(manifest, shard_identity)
-                shard_datasets.append(dataset)
-                shard_metadata_frames.append(sample_metadata)
+                jobs.append(_CollectionShardJob(
+                    directory=shard_dir,
+                    identity=shard_identity,
+                    scenario_name=scenario.name,
+                    events=trace.events,
+                    trace_id=trace_id,
+                    split=split,
+                    condition=condition,
+                    seed=seed,
+                    budget=budget,
+                    candidate_names=candidate_names,
+                    behavior_model=args.behavior_model,
+                ))
+    _run_collection_jobs(jobs, args.workers)
+    loaded_shards = [_load_collection_shard(job) for job in jobs]
+    shard_datasets = [item[0] for item in loaded_shards]
+    shard_metadata_frames = [item[1] for item in loaded_shards]
     dataset = RankingDataset.concatenate(shard_datasets)
     if dataset.num_samples == 0:
         raise ValueError("teacher collection produced no reduction decisions")
@@ -269,6 +263,78 @@ def run_collect(args: argparse.Namespace) -> None:
     )
     _write_collection_summaries(sample_metadata, args.output / "dataset")
     print(f"Learning dataset complete: {args.output / 'dataset'}")
+
+
+@dataclass(frozen=True)
+class _CollectionShardJob:
+    directory: Path
+    identity: dict[str, object]
+    scenario_name: str
+    events: tuple[RtlolaEvent, ...]
+    trace_id: str
+    split: str
+    condition: str
+    seed: int
+    budget: int
+    candidate_names: tuple[str, ...]
+    behavior_model: Path | None
+
+
+def _run_collection_jobs(
+    jobs: Sequence[_CollectionShardJob],
+    workers: int,
+) -> None:
+    missing = []
+    for job in jobs:
+        if (job.directory / "manifest.json").is_file():
+            _load_collection_shard(job)
+        else:
+            missing.append(job)
+    if not missing:
+        return
+    if workers == 1:
+        for job in missing:
+            _run_collection_shard(job)
+        return
+    with ProcessPoolExecutor(
+        max_workers=workers,
+        mp_context=get_context("spawn"),
+    ) as executor:
+        tuple(executor.map(_run_collection_shard, missing))
+
+
+def _run_collection_shard(job: _CollectionShardJob) -> None:
+    behavior = None
+    if job.behavior_model is not None:
+        behavior = RtlolaRankingPolicy(
+            policy=_load_policy(job.behavior_model),
+            catalog=default_action_catalog(job.candidate_names),
+        )
+    samples = collect_teacher_episode(
+        scenario=scenario_by_name(job.scenario_name),
+        events=job.events,
+        trace_id=job.trace_id,
+        split=job.split,
+        condition=job.condition,
+        seed=job.seed,
+        budget=job.budget,
+        candidate_names=job.candidate_names,
+        behavior_policy=behavior,
+    )
+    write_collected_dataset(
+        samples,
+        job.directory,
+        job.identity,
+        candidate_names=job.candidate_names,
+    )
+
+
+def _load_collection_shard(
+    job: _CollectionShardJob,
+) -> tuple[RankingDataset, pd.DataFrame]:
+    dataset, sample_metadata, manifest = load_ranking_dataset(job.directory)
+    _validate_shard_manifest(manifest, job.identity)
+    return dataset, sample_metadata
 
 
 def _validate_shard_manifest(
@@ -416,6 +482,8 @@ def run_evaluate(args: argparse.Namespace) -> None:
         policy,
         model_sha256=model_sha256(args.model),
         source_sha256=pzr_source_sha256(),
+        model_directory=args.model,
+        workers=args.workers,
     )
     print(f"Learning evaluation complete: {args.output}")
 

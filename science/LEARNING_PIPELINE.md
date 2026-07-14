@@ -79,6 +79,7 @@ The complete resumable run is:
 
 ```bash
 PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-7371495-b4cfbf4-e6ecd0b \
+  PZR_WORKERS=8 \
   tools/run_rtlola_learning_full.sh
 ```
 
@@ -86,6 +87,12 @@ Trace generation writes one shared, resumable store of inspectable CSVs,
 per-trace metadata, hashes, and a versioned manifest. Collection consumes that
 store and writes aligned compressed arrays, sample rows, long-form candidate
 costs, and a versioned dataset manifest.
+Missing teacher shards execute in isolated worker processes and are reloaded
+in deterministic split/seed/budget order. Exact reference caches are prepared
+before missing evaluation cells execute in isolated workers. Worker count is
+an execution setting, not part of either scientific artifact identity; each
+worker constructs its own binding monitor and planner state. Native BLAS and
+OpenMP thread counts remain one to avoid oversubscription.
 Training writes `weights.pt`, `model.json`, `training.json`, and grouped
 validation metrics. Evaluation runs Girard, `learned_geometry15`, and the
 teacher-matched `mpc_terminal_full_width` in fingerprinted trace/budget/method

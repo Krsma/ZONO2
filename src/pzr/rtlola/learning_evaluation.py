@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+from concurrent.futures import ProcessPoolExecutor
 from dataclasses import asdict, dataclass
 import json
+from multiprocessing import get_context
 from pathlib import Path
 import re
 
@@ -11,7 +13,9 @@ import numpy as np
 import pandas as pd
 
 from pzr.learning.provenance import payload_sha256
+from pzr.learning.ranker import RankingPolicy
 from pzr.learning.reporting import write_learning_plots
+from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.binding import (
     BINDING_BUILD_PROFILE,
     BINDING_REVISION,
@@ -72,8 +76,14 @@ def run_fixed_learning_evaluation(
     *,
     model_sha256: str,
     source_sha256: str,
+    model_directory: Path | None = None,
+    workers: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run or resume every exact fixed-trace evaluation cell."""
+    if workers < 1:
+        raise ValueError("evaluation workers must be positive")
+    if workers > 1 and model_directory is None:
+        raise ValueError("parallel learned evaluation requires the model directory")
     experiment_fingerprint = _experiment_fingerprint(
         config, model_sha256=model_sha256, source_sha256=source_sha256,
     )
@@ -84,8 +94,7 @@ def run_fixed_learning_evaluation(
             raise ValueError(f"stale learning evaluation output: {config.output}")
     config.output.mkdir(parents=True, exist_ok=True)
     method_names = (*config.baselines, config.model_name)
-    completed_timeseries = []
-    completed_summaries = []
+    reference_caches = {}
     for trace_kind in config.trace_kinds:
         length = _trace_length(config, trace_kind)
         reference_cache = (
@@ -95,6 +104,12 @@ def run_fixed_learning_evaluation(
             config, trace_kind, length, config.baselines[0], reference_cache,
         )
         prepare_reference_cache(reference_config)
+        reference_caches[trace_kind] = reference_cache
+
+    jobs = []
+    for trace_kind in config.trace_kinds:
+        length = _trace_length(config, trace_kind)
+        reference_cache = reference_caches[trace_kind]
         for budget in config.budgets:
             for method in method_names:
                 cell_config = _benchmark_config(
@@ -113,17 +128,51 @@ def run_fixed_learning_evaluation(
                     config.output / "cells" / trace_kind
                     / f"budget-{budget}" / method
                 )
-                timeseries, summary = _load_or_run_cell(
+                jobs.append(_EvaluationCellJob(
                     directory=cell_dir,
                     identity=identity,
                     benchmark_config=cell_config,
                     method=method,
                     learned_method=config.model_name,
-                    policy=policy,
                     expected_length=length,
-                )
-                completed_timeseries.append(timeseries)
-                completed_summaries.append(summary)
+                    model_directory=model_directory,
+                    candidate_names=config.candidate_names,
+                ))
+    missing = [job for job in jobs if not (job.directory / "manifest.json").is_file()]
+    if not missing:
+        pass
+    elif workers == 1:
+        for job in missing:
+            _load_or_run_cell(
+                directory=job.directory,
+                identity=job.identity,
+                benchmark_config=job.benchmark_config,
+                method=job.method,
+                learned_method=job.learned_method,
+                policy=policy,
+                expected_length=job.expected_length,
+            )
+    else:
+        with ProcessPoolExecutor(
+            max_workers=workers,
+            mp_context=get_context("spawn"),
+        ) as executor:
+            tuple(executor.map(_run_evaluation_cell_job, missing))
+
+    completed = [
+        _load_or_run_cell(
+            directory=job.directory,
+            identity=job.identity,
+            benchmark_config=job.benchmark_config,
+            method=job.method,
+            learned_method=job.learned_method,
+            policy=policy,
+            expected_length=job.expected_length,
+        )
+        for job in jobs
+    ]
+    completed_timeseries = [item[0] for item in completed]
+    completed_summaries = [item[1] for item in completed]
     timeseries = pd.concat(completed_timeseries, ignore_index=True)
     summary = pd.concat(completed_summaries, ignore_index=True)
     _write_evaluation_reports(config, timeseries, summary)
@@ -142,12 +191,45 @@ def run_fixed_learning_evaluation(
         "experiment_fingerprint": experiment_fingerprint,
         "cell_count": len(completed_summaries),
         "failure_count": 0,
+        "worker_count": workers,
         "binding_revision": BINDING_REVISION,
         "interpreter_revision": INTERPRETER_REVISION,
         "binding_build_profile": BINDING_BUILD_PROFILE,
     }
     _write_json_atomic(manifest, root_manifest_path)
     return timeseries, summary
+
+
+@dataclass(frozen=True)
+class _EvaluationCellJob:
+    directory: Path
+    identity: dict[str, object]
+    benchmark_config: RtlolaBenchmarkConfig
+    method: str
+    learned_method: str
+    expected_length: int
+    model_directory: Path | None
+    candidate_names: tuple[str, ...]
+
+
+def _run_evaluation_cell_job(job: _EvaluationCellJob) -> None:
+    policy = None
+    if job.method == job.learned_method:
+        if job.model_directory is None:
+            raise ValueError("learned evaluation worker lacks a model directory")
+        policy = RtlolaRankingPolicy(
+            RankingPolicy.load(job.model_directory),
+            default_action_catalog(job.candidate_names),
+        )
+    _load_or_run_cell(
+        directory=job.directory,
+        identity=job.identity,
+        benchmark_config=job.benchmark_config,
+        method=job.method,
+        learned_method=job.learned_method,
+        policy=policy,
+        expected_length=job.expected_length,
+    )
 
 
 def _experiment_fingerprint(
@@ -241,7 +323,7 @@ def _load_or_run_cell(
     benchmark_config: RtlolaBenchmarkConfig,
     method: str,
     learned_method: str,
-    policy: RtlolaRankingPolicy,
+    policy: RtlolaRankingPolicy | None,
     expected_length: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     manifest_path = directory / "manifest.json"
@@ -255,6 +337,8 @@ def _load_or_run_cell(
         return timeseries, summary
 
     if method == learned_method:
+        if policy is None:
+            raise ValueError("learned evaluation cell lacks a ranking policy")
         result = run_direct_policy_benchmark(
             benchmark_config, policy, method=learned_method,
         )
