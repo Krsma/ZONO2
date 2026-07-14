@@ -3,6 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-geometry15-random500-7371495-b4cfbf4-e6ecd0b}"
+TRACE_STORE="${PZR_TRACE_STORE:-$OUT_DIR/traces}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
 EVENT_COUNT="${PZR_EVENT_COUNT:-500}"
@@ -46,7 +47,7 @@ run_logged() {
 
 run_logged generate_traces \
     "$PYTHON" -m pzr.learning.cli generate \
-    --output "$OUT_DIR/traces" \
+    --output "$TRACE_STORE" \
     --event-count "$EVENT_COUNT" \
     --conditions "$CONDITIONS" \
     --seed-start "$SEED_START" \
@@ -55,7 +56,7 @@ run_logged generate_traces \
 run_logged collect_base \
     "$PYTHON" -m pzr.learning.cli collect \
     --output "$OUT_DIR/base" \
-    --trace-store "$OUT_DIR/traces" \
+    --trace-store "$TRACE_STORE" \
     --budgets "$BUDGETS" \
     --candidates "$CANDIDATES" \
     --train-seeds "$BASE_TRAIN_SEEDS" \
@@ -76,7 +77,7 @@ run_logged train_base \
 run_logged collect_dagger_1 \
     "$PYTHON" -m pzr.learning.cli collect \
     --output "$OUT_DIR/dagger-1" \
-    --trace-store "$OUT_DIR/traces" \
+    --trace-store "$TRACE_STORE" \
     --budgets "$BUDGETS" \
     --candidates "$CANDIDATES" \
     --train-seeds "$DAGGER_SEEDS" \
@@ -99,7 +100,7 @@ run_logged train_dagger_1 \
 run_logged collect_dagger_2 \
     "$PYTHON" -m pzr.learning.cli collect \
     --output "$OUT_DIR/dagger-2" \
-    --trace-store "$OUT_DIR/traces" \
+    --trace-store "$TRACE_STORE" \
     --budgets "$BUDGETS" \
     --candidates "$CANDIDATES" \
     --train-seeds "$DAGGER_SEEDS" \

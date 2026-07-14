@@ -78,6 +78,8 @@ PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-7371495-b4cfbf4-e6ecd0b
 Collection shards and fixed-evaluation cells use isolated worker processes.
 The wrapper defaults to eight workers while keeping BLAS, OpenMP, and MKL at
 one native thread per worker. Set `PZR_WORKERS=1` for serial debugging.
+Set `PZR_TRACE_STORE` to reuse an immutable validated trace store with a fresh
+experiment output directory after a source change.
 
 See `science/LEARNING_PIPELINE.md` for the feature contract, seed schedule,
 teacher semantics, aggregation rounds, exact evaluation, and artifact schemas.

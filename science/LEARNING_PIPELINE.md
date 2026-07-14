@@ -93,6 +93,9 @@ before missing evaluation cells execute in isolated workers. Worker count is
 an execution setting, not part of either scientific artifact identity; each
 worker constructs its own binding monitor and planner state. Native BLAS and
 OpenMP thread counts remain one to avoid oversubscription.
+`PZR_TRACE_STORE` may point at an existing validated trace store when a source
+change requires a fresh experiment output directory. Collection and evaluation
+artifacts remain source-fingerprinted and are never migrated implicitly.
 Training writes `weights.pt`, `model.json`, `training.json`, and grouped
 validation metrics. Evaluation runs Girard, `learned_geometry15`, and the
 teacher-matched `mpc_terminal_full_width` in fingerprinted trace/budget/method
