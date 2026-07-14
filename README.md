@@ -67,7 +67,7 @@ pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
 Run the resumable two-round Geometry15 experiment with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-drift4cm-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-geometry15-7371495-b4cfbf4-e6ecd0b \
   tools/run_rtlola_learning_full.sh
 ```
 

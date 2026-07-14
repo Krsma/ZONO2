@@ -106,20 +106,14 @@ def test_evaluate_command_defaults_to_all_fixed_traces_and_exact_lengths(tmp_pat
 
 def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):
     monkeypatch.setattr(learning_cli, "default_action_catalog", lambda _names: object())
-    activity = []
-
-    def load_trace(config, _directory):
-        activity.append(f"trace:{config.condition}:{config.drift_z}")
-        return SimpleNamespace(
-            events=(object(), object()),
-            metadata=SimpleNamespace(trace_sha256=f"trace-{config.condition}"),
-        )
-
-    monkeypatch.setattr(learning_cli, "_load_or_generate_trace", load_trace)
+    trace = SimpleNamespace(
+        events=(object(), object()),
+        metadata=SimpleNamespace(trace_sha256="trace-hash"),
+    )
+    monkeypatch.setattr(learning_cli, "_load_or_generate_trace", lambda *_args: trace)
     calls = []
 
     def collect(**kwargs):
-        activity.append(f"collect:{kwargs['condition']}")
         calls.append((kwargs["condition"], kwargs["budget"]))
         return (_collected_sample(
             f"{kwargs['trace_id']}:teacher:budget-{kwargs['budget']}:step-0",
@@ -132,38 +126,22 @@ def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):
         event_count=2,
         budgets=(40,),
         candidates=("girard", "scott"),
-        conditions=("random_waypoint", "random_waypoint_drift"),
+        conditions=("random_waypoint",),
         train_seeds=1,
         validation_seeds=0,
         test_seeds=0,
         seed_start=0,
-        waypoint_drift_z=0.04,
         behavior_model=None,
     )
 
     run_collect(args)
-    assert activity == [
-        "trace:random_waypoint:0.04",
-        "trace:random_waypoint_drift:0.04",
-        "collect:random_waypoint",
-        "collect:random_waypoint_drift",
-    ]
-    assert calls == [
-        ("random_waypoint", 40),
-        ("random_waypoint_drift", 40),
-    ]
-    activity.clear()
+    assert calls == [("random_waypoint", 40)]
     calls.clear()
     run_collect(args)
     assert calls == []
-    assert activity == [
-        "trace:random_waypoint:0.04",
-        "trace:random_waypoint_drift:0.04",
-    ]
     dataset, _, manifest = load_ranking_dataset(tmp_path / "dataset")
-    assert dataset.num_samples == 2
-    assert manifest["shard_count"] == 2
-    assert manifest["waypoint_drift_z"] == 0.04
+    assert dataset.num_samples == 1
+    assert manifest["shard_count"] == 1
 
 
 def _collected_sample(

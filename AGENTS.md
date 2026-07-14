@@ -72,7 +72,7 @@ the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
 The last recorded full release-binding validation after the Geometry15
-learning integration was 91 passing tests with no skips.
+learning integration was 90 passing tests with no skips.
 
 The authoritative trace kinds and full lengths are:
 
@@ -159,9 +159,7 @@ history, spectral statistics, or an inference-time preview rollout. The
 full experiment uses three 2,000-event training seeds, one validation seed,
 and two fresh three-seed DAgger rounds. Its fixed-trace comparison is Girard
 versus `learned_geometry15` versus the two-event
-`mpc_terminal_full_width` teacher. The long-trace generator profile uses a
-provenance-recorded 4 cm progressive vertical drift and preflights all traces
-before teacher labeling.
+`mpc_terminal_full_width` teacher.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the

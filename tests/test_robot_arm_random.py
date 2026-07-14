@@ -44,16 +44,6 @@ def test_random_waypoint_conditions_have_expected_fault_flags():
         assert config.has_geofence_fault == ("geofence" in condition)
 
 
-def test_random_waypoint_config_rejects_negative_drift():
-    with pytest.raises(ValueError, match="drift must be non-negative"):
-        RandomWaypointConfig(
-            seed=1,
-            condition="random_waypoint_drift",
-            event_count=2,
-            drift_z=-0.01,
-        )
-
-
 def test_random_waypoint_generation_is_deterministic_and_persistable(tmp_path):
     pytest.importorskip("mujoco")
     config = RandomWaypointConfig(

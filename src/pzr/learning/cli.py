@@ -71,12 +71,6 @@ def build_parser() -> argparse.ArgumentParser:
     collect.add_argument("--test-seeds", type=int, default=1)
     collect.add_argument("--seed-start", type=int, default=0)
     collect.add_argument(
-        "--waypoint-drift-z",
-        type=float,
-        default=0.08,
-        help="Progressive vertical drift applied over each generated trace",
-    )
-    collect.add_argument(
         "--behavior-model",
         type=Path,
         default=None,
@@ -135,8 +129,6 @@ def run_collect(args: argparse.Namespace) -> None:
         raise ValueError("training needs a seed and split seed counts cannot be negative")
     if args.seed_start < 0:
         raise ValueError("seed start must be non-negative")
-    if args.waypoint_drift_z < 0.0:
-        raise ValueError("waypoint drift must be non-negative")
     unknown_conditions = set(args.conditions) - set(RANDOM_WAYPOINT_CONDITIONS)
     if unknown_conditions:
         raise ValueError(f"unknown random-waypoint conditions: {sorted(unknown_conditions)}")
@@ -160,12 +152,6 @@ def run_collect(args: argparse.Namespace) -> None:
     shard_datasets = []
     shard_metadata_frames = []
     trace_records = []
-    prepared_traces: list[
-        tuple[str, int, str, str, RandomWaypointTrace]
-    ] = []
-
-    # Validate and persist every requested trace before starting expensive
-    # teacher labeling. This makes generator failures a cheap preflight error.
     for split, seed in _split_seeds(args):
         for condition in args.conditions:
             trace_id = f"{condition}:seed-{seed}"
@@ -173,11 +159,9 @@ def run_collect(args: argparse.Namespace) -> None:
                 seed=seed,
                 condition=condition,
                 event_count=args.event_count,
-                drift_z=args.waypoint_drift_z,
             )
             trace_dir = args.output / "traces" / split / trace_id
             trace = _load_or_generate_trace(trace_config, trace_dir)
-            prepared_traces.append((split, seed, condition, trace_id, trace))
             trace_records.append({
                 "trace_id": trace_id,
                 "split": split,
@@ -185,60 +169,59 @@ def run_collect(args: argparse.Namespace) -> None:
                 "seed": seed,
                 "trace_sha256": trace.metadata.trace_sha256,
             })
-    for split, seed, condition, trace_id, trace in prepared_traces:
-        for budget in args.budgets:
-            shard_dir = (
-                args.output / "shards" / split / condition
-                / f"seed-{seed}" / f"budget-{budget}"
-            )
-            shard_identity = {
-                "collection_shard": True,
-                "scenario": scenario.name,
-                "collection": collection,
-                "event_count": args.event_count,
-                "trace_id": trace_id,
-                "split": split,
-                "condition": condition,
-                "seed": seed,
-                "budget": budget,
-                "candidate_names": list(candidate_names),
-                "feature_schema": _feature_schema_payload(),
-                "trace_sha256": trace.metadata.trace_sha256,
-                "behavior_model_sha256": behavior_model_sha256,
-                "binding_revision": BINDING_REVISION,
-                "interpreter_revision": INTERPRETER_REVISION,
-                "binding_build_profile": BINDING_BUILD_PROFILE,
-                "pzr_source_sha256": source_sha256,
-            }
-            if shard_dir.exists():
-                dataset, sample_metadata, manifest = load_ranking_dataset(
-                    shard_dir,
+            for budget in args.budgets:
+                shard_dir = (
+                    args.output / "shards" / split / condition
+                    / f"seed-{seed}" / f"budget-{budget}"
                 )
-                _validate_shard_manifest(manifest, shard_identity)
-            else:
-                samples = collect_teacher_episode(
-                    scenario=scenario,
-                    events=trace.events,
-                    trace_id=trace_id,
-                    split=split,
-                    condition=condition,
-                    seed=seed,
-                    budget=budget,
-                    candidate_names=candidate_names,
-                    behavior_policy=behavior,
-                )
-                write_collected_dataset(
-                    samples,
-                    shard_dir,
-                    shard_identity,
-                    candidate_names=candidate_names,
-                )
-                dataset, sample_metadata, manifest = load_ranking_dataset(
-                    shard_dir,
-                )
-                _validate_shard_manifest(manifest, shard_identity)
-            shard_datasets.append(dataset)
-            shard_metadata_frames.append(sample_metadata)
+                shard_identity = {
+                    "collection_shard": True,
+                    "scenario": scenario.name,
+                    "collection": collection,
+                    "event_count": args.event_count,
+                    "trace_id": trace_id,
+                    "split": split,
+                    "condition": condition,
+                    "seed": seed,
+                    "budget": budget,
+                    "candidate_names": list(candidate_names),
+                    "feature_schema": _feature_schema_payload(),
+                    "trace_sha256": trace.metadata.trace_sha256,
+                    "behavior_model_sha256": behavior_model_sha256,
+                    "binding_revision": BINDING_REVISION,
+                    "interpreter_revision": INTERPRETER_REVISION,
+                    "binding_build_profile": BINDING_BUILD_PROFILE,
+                    "pzr_source_sha256": source_sha256,
+                }
+                if shard_dir.exists():
+                    dataset, sample_metadata, manifest = load_ranking_dataset(
+                        shard_dir,
+                    )
+                    _validate_shard_manifest(manifest, shard_identity)
+                else:
+                    samples = collect_teacher_episode(
+                        scenario=scenario,
+                        events=trace.events,
+                        trace_id=trace_id,
+                        split=split,
+                        condition=condition,
+                        seed=seed,
+                        budget=budget,
+                        candidate_names=candidate_names,
+                        behavior_policy=behavior,
+                    )
+                    write_collected_dataset(
+                        samples,
+                        shard_dir,
+                        shard_identity,
+                        candidate_names=candidate_names,
+                    )
+                    dataset, sample_metadata, manifest = load_ranking_dataset(
+                        shard_dir,
+                    )
+                    _validate_shard_manifest(manifest, shard_identity)
+                shard_datasets.append(dataset)
+                shard_metadata_frames.append(sample_metadata)
     dataset = RankingDataset.concatenate(shard_datasets)
     if dataset.num_samples == 0:
         raise ValueError("teacher collection produced no reduction decisions")
@@ -249,7 +232,6 @@ def run_collect(args: argparse.Namespace) -> None:
         "event_count": args.event_count,
         "budgets": list(args.budgets),
         "conditions": list(args.conditions),
-        "waypoint_drift_z": args.waypoint_drift_z,
         "seed_start": args.seed_start,
         "binding_revision": BINDING_REVISION,
         "interpreter_revision": INTERPRETER_REVISION,
