@@ -107,6 +107,32 @@ def test_pytorch_policy_uses_current_state_only_for_direct_inference():
     assert decision.mpc_variant == "learned_direct"
 
 
+def test_direct_policy_features_do_not_depend_on_current_event_values():
+    _, events, engine, state = _overflow_state()
+
+    class RecordingPolicy:
+        candidate_names = ("girard", "scott")
+        feature_schema = RTL_RANKING_FEATURE_SCHEMA
+
+        def __init__(self):
+            self.features = []
+
+        def predict_scores(self, features):
+            self.features.append(np.asarray(features).copy())
+            return np.asarray([0.0, 1.0], dtype=np.float32)
+
+    ranker = RecordingPolicy()
+    policy = RtlolaRankingPolicy(
+        ranker, default_action_catalog(ranker.candidate_names),
+    )
+
+    first = policy.choose(engine, state, events[12], budget=10)
+    second = policy.choose(engine, state, events[13], budget=10)
+
+    assert first.first_action.name == second.first_action.name == "girard"
+    np.testing.assert_array_equal(ranker.features[0], ranker.features[1])
+
+
 def test_dagger_collection_labels_states_visited_by_learned_behavior():
     events = generate_omni_events(16, seed=4)
     samples = collect_teacher_episode(

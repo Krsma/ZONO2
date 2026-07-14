@@ -14,14 +14,20 @@ def write_learning_plots(
     timeseries: pd.DataFrame,
     summary: pd.DataFrame,
     output: Path,
+    *,
+    learned_method: str = "learned_direct",
 ) -> None:
     if timeseries.empty or summary.empty:
         raise ValueError("learning plots require non-empty evaluation artifacts")
     output.mkdir(parents=True, exist_ok=True)
     _metric_budget_plot(summary, output / "metrics_vs_budget.png")
     _trace_generalization_plot(summary, output / "generalization_by_trace.png")
-    _candidate_selection_plot(timeseries, output / "candidate_selection.png")
-    _loss_over_time_plot(timeseries, output / "learned_loss_over_time.png")
+    _candidate_selection_plot(
+        timeseries, output / "candidate_selection.png", learned_method,
+    )
+    _loss_over_time_plot(
+        timeseries, output / "learned_loss_over_time.png", learned_method,
+    )
 
 
 def _metric_budget_plot(summary: pd.DataFrame, path: Path) -> None:
@@ -54,8 +60,12 @@ def _trace_generalization_plot(summary: pd.DataFrame, path: Path) -> None:
     plt.close(axis.figure)
 
 
-def _candidate_selection_plot(timeseries: pd.DataFrame, path: Path) -> None:
-    learned = timeseries[timeseries["method"] == "learned_direct"]
+def _candidate_selection_plot(
+    timeseries: pd.DataFrame,
+    path: Path,
+    learned_method: str,
+) -> None:
+    learned = timeseries[timeseries["method"] == learned_method]
     counts = learned.groupby(["trace_kind", "reducer_used"]).size()
     fractions = counts.groupby(level=0).transform(lambda values: values / values.sum())
     pivot = fractions.unstack(fill_value=0.0)
@@ -68,8 +78,12 @@ def _candidate_selection_plot(timeseries: pd.DataFrame, path: Path) -> None:
     plt.close(axis.figure)
 
 
-def _loss_over_time_plot(timeseries: pd.DataFrame, path: Path) -> None:
-    learned = timeseries[timeseries["method"] == "learned_direct"]
+def _loss_over_time_plot(
+    timeseries: pd.DataFrame,
+    path: Path,
+    learned_method: str,
+) -> None:
+    learned = timeseries[timeseries["method"] == learned_method]
     figure, axis = plt.subplots(figsize=(11, 5), constrained_layout=True)
     for (trace_kind, budget), rows in learned.groupby(["trace_kind", "budget"]):
         axis.plot(

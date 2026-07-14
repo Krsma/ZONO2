@@ -94,7 +94,10 @@ def test_evaluate_command_defaults_to_all_fixed_traces_and_exact_lengths(tmp_pat
     )
     assert args.budgets == (40, 80)
     assert args.candidates == ("girard", "scott", "pca", "combastel")
-    assert args.baselines == ("girard", "scott", "pca", "combastel")
+    assert args.baselines == ("girard", "mpc_terminal_full_width")
+    assert args.model_name == "learned_geometry15"
+    assert args.length is None
+    assert args.horizon == 1
 
 
 def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):

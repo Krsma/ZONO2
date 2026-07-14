@@ -4,7 +4,6 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
-import hashlib
 import json
 from pathlib import Path
 from typing import Sequence
@@ -14,6 +13,7 @@ import pandas as pd
 
 from pzr.learning.artifacts import load_ranking_dataset, write_ranking_dataset
 from pzr.learning.dataset import RankingDataset
+from pzr.learning.provenance import model_sha256, pzr_source_sha256
 from pzr.learning.ranker import RankingPolicy, evaluate_ranking, train_ranking_policy
 from pzr.rtlola.actions import MPC_ACTION_NAMES, default_action_catalog
 from pzr.rtlola.binding import (
@@ -21,17 +21,14 @@ from pzr.rtlola.binding import (
     BINDING_REVISION,
     INTERPRETER_REVISION,
 )
-from pzr.rtlola.benchmark import (
-    RtlolaBenchmarkConfig,
-    results_to_dataframe,
-    run_benchmark,
-    run_direct_policy_benchmark,
-    summarize_results,
-)
 from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA
 from pzr.rtlola.learned_policy import RtlolaRankingPolicy
 from pzr.rtlola.learning_data import collect_teacher_episode, write_collected_dataset
-from pzr.rtlola.robot_arm import ROBOT_ARM_TRACE_ROWS, TRACE_KINDS
+from pzr.rtlola.learning_evaluation import (
+    FixedLearningEvaluationConfig,
+    run_fixed_learning_evaluation,
+)
+from pzr.rtlola.robot_arm import TRACE_KINDS
 from pzr.rtlola.robot_arm_random import (
     RANDOM_WAYPOINT_CONDITIONS,
     RandomWaypointConfig,
@@ -92,6 +89,7 @@ def build_parser() -> argparse.ArgumentParser:
         "evaluate", help="Evaluate generalization on fixed robot-arm traces",
     )
     evaluate.add_argument("--model", type=Path, required=True)
+    evaluate.add_argument("--model-name", default="learned_geometry15")
     evaluate.add_argument("--output", type=Path, required=True)
     evaluate.add_argument("--budgets", type=_csv_ints, required=True)
     evaluate.add_argument("--candidates", type=_csv_strings, default=MPC_ACTION_NAMES)
@@ -99,9 +97,13 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--baselines",
         type=_csv_strings,
-        default=MPC_ACTION_NAMES,
+        default=("girard", "mpc_terminal_full_width"),
     )
-    evaluate.add_argument("--horizon", type=int, default=2)
+    evaluate.add_argument(
+        "--length", type=int, default=None,
+        help="Optional common fixed-trace prefix length for timing smokes",
+    )
+    evaluate.add_argument("--horizon", type=int, default=1)
     evaluate.add_argument("--beam-width", type=int, default=4)
     return parser
 
@@ -143,10 +145,10 @@ def run_collect(args: argparse.Namespace) -> None:
             policy=_load_policy(args.behavior_model),
             catalog=catalog,
         )
-        behavior_model_sha256 = _model_sha256(args.behavior_model)
+        behavior_model_sha256 = model_sha256(args.behavior_model)
     scenario = scenario_by_name("robot_arm")
     collection = "dagger" if behavior is not None else "teacher"
-    source_sha256 = _pzr_source_sha256()
+    source_sha256 = pzr_source_sha256()
     shard_datasets = []
     shard_metadata_frames = []
     trace_records = []
@@ -292,35 +294,6 @@ def _feature_schema_payload() -> dict[str, object]:
     }
 
 
-def _model_sha256(directory: Path) -> str:
-    return _sha256_files((directory / "model.json", directory / "weights.pt"))
-
-
-def _pzr_source_sha256() -> str:
-    root = Path(__file__).parents[1]
-    return _sha256_files(tuple(sorted(
-        path for path in root.rglob("*")
-        if path.is_file() and path.suffix in {".py", ".lola"}
-    )), relative_to=root)
-
-
-def _sha256_files(
-    paths: Sequence[Path],
-    *,
-    relative_to: Path | None = None,
-) -> str:
-    digest = hashlib.sha256()
-    for path in paths:
-        if not path.is_file():
-            raise ValueError(f"fingerprinted artifact is missing: {path}")
-        name = path.relative_to(relative_to) if relative_to is not None else path.name
-        digest.update(str(name).encode("utf-8"))
-        digest.update(b"\0")
-        digest.update(path.read_bytes())
-        digest.update(b"\0")
-    return digest.hexdigest()
-
-
 def run_train(args: argparse.Namespace) -> None:
     loaded = [load_ranking_dataset(path) for path in args.dataset]
     dataset = RankingDataset.concatenate([item[0] for item in loaded])
@@ -415,8 +388,6 @@ def _validation_metric_frame(
 
 
 def run_evaluate(args: argparse.Namespace) -> None:
-    from pzr.learning.reporting import write_learning_plots
-
     unknown_traces = set(args.trace_kinds) - set(TRACE_KINDS)
     if unknown_traces:
         raise ValueError(f"unknown fixed robot-arm traces: {sorted(unknown_traces)}")
@@ -424,60 +395,21 @@ def run_evaluate(args: argparse.Namespace) -> None:
     policy = RtlolaRankingPolicy(
         _load_policy(args.model), default_action_catalog(candidate_names),
     )
-    raw_results = []
-    failures = []
-    for trace_kind in args.trace_kinds:
-        for budget in args.budgets:
-            config = RtlolaBenchmarkConfig(
-                scenario="robot_arm",
-                trace_kind=trace_kind,
-                length=ROBOT_ARM_TRACE_ROWS[trace_kind],
-                budget=budget,
-                horizon=args.horizon,
-                beam_width=args.beam_width,
-                seeds=1,
-                methods=list(args.baselines),
-                reference_mode="exact",
-                reference_cache=str(
-                    args.output / "references" / f"{trace_kind}-exact.json"
-                ),
-                mpc_candidate_names=list(candidate_names),
-            )
-            baseline = run_benchmark(config)
-            learned = run_direct_policy_benchmark(config, policy)
-            raw_results.extend(baseline.raw_results)
-            raw_results.extend(learned.raw_results)
-            failures.extend(baseline.failures)
-            failures.extend(learned.failures)
-    args.output.mkdir(parents=True, exist_ok=True)
-    timeseries = results_to_dataframe(raw_results)
-    summary = summarize_results(raw_results)
-    timeseries.to_csv(args.output / "timeseries.csv", index=False)
-    summary.to_csv(args.output / "summary.csv", index=False)
-    selection = (
-        timeseries.groupby(
-            ["trace_kind", "budget", "method", "reducer_used"],
-            dropna=False,
-        ).size().rename("count").reset_index()
-    )
-    selection.to_csv(args.output / "candidate_selection.csv", index=False)
-    write_learning_plots(timeseries, summary, args.output / "plots")
-    (args.output / "failures.json").write_text(json.dumps(
-        [asdict(failure) for failure in failures], indent=2, sort_keys=True,
-    ))
-    manifest = {
-        "schema": "pzr.learning-evaluation.v1",
-        "reference_mode": "exact",
-        "full_length": True,
-        "trace_kinds": list(args.trace_kinds),
-        "budgets": list(args.budgets),
-        "candidate_names": list(candidate_names),
-        "baselines": list(args.baselines),
-        "model": str(args.model),
-        "failure_count": len(failures),
-    }
-    (args.output / "manifest.json").write_text(
-        json.dumps(manifest, indent=2, sort_keys=True),
+    run_fixed_learning_evaluation(
+        FixedLearningEvaluationConfig(
+            output=args.output,
+            model_name=args.model_name,
+            trace_kinds=tuple(args.trace_kinds),
+            budgets=tuple(args.budgets),
+            baselines=tuple(args.baselines),
+            candidate_names=candidate_names,
+            length=args.length,
+            horizon=args.horizon,
+            beam_width=args.beam_width,
+        ),
+        policy,
+        model_sha256=model_sha256(args.model),
+        source_sha256=pzr_source_sha256(),
     )
     print(f"Learning evaluation complete: {args.output}")
 
