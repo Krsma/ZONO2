@@ -9,6 +9,7 @@ from pzr.rtlola.robot_arm_random import (
     _make_waypoint_path,
     _nearest_neighbor_sort,
     generate_random_waypoint_trace,
+    load_random_waypoint_trace,
     write_random_waypoint_trace,
 )
 
@@ -72,3 +73,7 @@ def test_random_waypoint_generation_is_deterministic_and_persistable(tmp_path):
     write_random_waypoint_trace(first, tmp_path)
     assert (tmp_path / "trace.csv").stat().st_size > 0
     assert (tmp_path / "metadata.json").stat().st_size > 0
+    loaded = load_random_waypoint_trace(tmp_path)
+    assert loaded.metadata == first.metadata
+    assert loaded.rows == first.rows
+    assert loaded.events == first.events

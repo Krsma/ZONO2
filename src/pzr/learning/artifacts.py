@@ -13,6 +13,13 @@ from pzr.learning.dataset import RankingDataset
 
 
 RANKING_DATASET_SCHEMA = "pzr.ranking-dataset.v1"
+CANDIDATE_COST_COLUMNS = (
+    "sample_id",
+    "candidate",
+    "candidate_index",
+    "feasible",
+    "teacher_cost",
+)
 
 
 def write_ranking_dataset(
@@ -97,7 +104,7 @@ def _candidate_cost_frame(dataset: RankingDataset) -> pd.DataFrame:
                 "feasible": bool(dataset.feasible[sample, candidate]),
                 "teacher_cost": dataset.teacher_costs[sample, candidate],
             })
-    return pd.DataFrame(rows)
+    return pd.DataFrame(rows, columns=CANDIDATE_COST_COLUMNS)
 
 
 def _validate_sample_metadata(

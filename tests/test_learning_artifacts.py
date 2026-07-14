@@ -50,3 +50,27 @@ def test_ranking_dataset_artifact_rejects_misaligned_metadata(tmp_path):
     metadata = _metadata().iloc[::-1].reset_index(drop=True)
     with pytest.raises(ValueError, match="identifiers"):
         write_ranking_dataset(_dataset(), tmp_path, metadata, {})
+
+
+def test_empty_ranking_shard_round_trip_keeps_explicit_schema(tmp_path):
+    dataset = RankingDataset(
+        features=np.empty((0, 2), dtype=np.float32),
+        teacher_costs=np.empty((0, 2), dtype=np.float64),
+        feasible=np.empty((0, 2), dtype=np.bool_),
+        tie_mask=np.empty((0, 2), dtype=np.bool_),
+        candidate_names=("girard", "scott"),
+        feature_names=("count", "width"),
+        splits=(),
+        sample_ids=(),
+    )
+    metadata = pd.DataFrame(columns=(
+        "sample_id", "split", "trace_id", "budget", "step",
+    ))
+
+    write_ranking_dataset(dataset, tmp_path, metadata, {"collection_shard": True})
+    loaded, loaded_metadata, manifest = load_ranking_dataset(tmp_path)
+
+    assert loaded.num_samples == 0
+    assert loaded.features.shape == (0, 2)
+    assert loaded_metadata.empty
+    assert manifest["collection_shard"] is True

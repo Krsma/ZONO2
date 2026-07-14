@@ -144,10 +144,17 @@ def collect_teacher_episode(
 
 def build_ranking_dataset(
     samples: Sequence[CollectedRankingSample],
+    *,
+    candidate_names: tuple[str, ...] | None = None,
 ) -> tuple[RankingDataset, pd.DataFrame]:
     if not samples:
-        raise ValueError("teacher collection produced no reduction decisions")
-    candidate_names = samples[0].candidate_names
+        if candidate_names is None:
+            raise ValueError("empty collection requires an explicit candidate catalog")
+        return _empty_ranking_dataset(candidate_names)
+    sample_candidate_names = samples[0].candidate_names
+    if candidate_names is not None and candidate_names != sample_candidate_names:
+        raise ValueError("explicit candidate catalog differs from collected samples")
+    candidate_names = sample_candidate_names
     for sample in samples:
         if sample.candidate_names != candidate_names:
             raise ValueError("collected samples use different candidate catalogs")
@@ -196,12 +203,40 @@ def build_ranking_dataset(
     return dataset, metadata
 
 
+def _empty_ranking_dataset(
+    candidate_names: tuple[str, ...],
+) -> tuple[RankingDataset, pd.DataFrame]:
+    candidate_count = len(candidate_names)
+    dataset = RankingDataset(
+        features=np.empty((0, len(RTL_RANKING_FEATURE_NAMES)), dtype=np.float32),
+        teacher_costs=np.empty((0, candidate_count), dtype=np.float64),
+        feasible=np.empty((0, candidate_count), dtype=np.bool_),
+        tie_mask=np.empty((0, candidate_count), dtype=np.bool_),
+        candidate_names=candidate_names,
+        feature_names=RTL_RANKING_FEATURE_NAMES,
+        splits=(),
+        sample_ids=(),
+    )
+    return dataset, pd.DataFrame(columns=(
+        "sample_id", "trace_id", "split", "condition", "seed", "budget",
+        "step", "teacher_action", "teacher_sequence", "behavior",
+        "behavior_action", "evaluated_leaves",
+        "teacher_reducer_failure_count", "teacher_infeasible_candidate_count",
+        "behavior_reducer_failure_count", "behavior_infeasible_candidate_count",
+        "behavior_fallback_used",
+    ))
+
+
 def write_collected_dataset(
     samples: Sequence[CollectedRankingSample],
     directory: Path,
     metadata: Mapping[str, object],
+    *,
+    candidate_names: tuple[str, ...] | None = None,
 ) -> RankingDataset:
-    dataset, sample_metadata = build_ranking_dataset(samples)
+    dataset, sample_metadata = build_ranking_dataset(
+        samples, candidate_names=candidate_names,
+    )
     write_ranking_dataset(dataset, directory, sample_metadata, metadata)
     return dataset
 

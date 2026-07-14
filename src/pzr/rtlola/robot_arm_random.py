@@ -231,7 +231,8 @@ def write_random_waypoint_trace(trace: RandomWaypointTrace, directory: Path) -> 
     """Persist a generated trace and provenance as an explicit artifact."""
     directory.mkdir(parents=True, exist_ok=True)
     csv_path = directory / "trace.csv"
-    with csv_path.open("w", newline="") as handle:
+    temporary_csv = directory / ".trace.csv.tmp"
+    with temporary_csv.open("w", newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow((
             "time", "a1m", "a2m", "a3m", "a4m", "a5m",
@@ -246,9 +247,71 @@ def write_random_waypoint_trace(trace: RandomWaypointTrace, directory: Path) -> 
                 *(_sparse_value(value) for value in row.expected_center),
                 *(_sparse_value(value) for value in row.geofence),
             ))
-    (directory / "metadata.json").write_text(
+    temporary_csv.replace(csv_path)
+    temporary_metadata = directory / ".metadata.json.tmp"
+    temporary_metadata.write_text(
         json.dumps(asdict(trace.metadata), indent=2, sort_keys=True),
     )
+    temporary_metadata.replace(directory / "metadata.json")
+
+
+def load_random_waypoint_trace(directory: Path) -> RandomWaypointTrace:
+    """Load and validate one persisted generated trace."""
+    metadata_payload = json.loads((directory / "metadata.json").read_text())
+    with (directory / "trace.csv").open(newline="") as handle:
+        reader = csv.reader(handle)
+        header = next(reader)
+        expected_header = [
+            "time", "a1m", "a2m", "a3m", "a4m", "a5m",
+            "x", "y", "z", "cx", "cy", "cz",
+            "x_min", "x_max", "y_min", "y_max",
+        ]
+        if header != expected_header:
+            raise ValueError("random-waypoint trace CSV schema differs")
+        rows = tuple(_parse_trace_row(values) for values in reader)
+    metadata = RandomWaypointMetadata(
+        source_revision=str(metadata_payload["source_revision"]),
+        condition=str(metadata_payload["condition"]),
+        seed=int(metadata_payload["seed"]),
+        event_count=int(metadata_payload["event_count"]),
+        attempts=int(metadata_payload["attempts"]),
+        waypoint_center=tuple(metadata_payload["waypoint_center"]),  # type: ignore[arg-type]
+        perimeter=float(metadata_payload["perimeter"]),
+        traveled_distance=float(metadata_payload["traveled_distance"]),
+        completed_lap_fraction=float(metadata_payload["completed_lap_fraction"]),
+        sv_spread=float(metadata_payload["sv_spread"]),
+        singular_values=tuple(metadata_payload["singular_values"]),  # type: ignore[arg-type]
+        max_tracking_error=float(metadata_payload["max_tracking_error"]),
+        geofence=tuple(metadata_payload["geofence"]),  # type: ignore[arg-type]
+        mujoco_version=str(metadata_payload["mujoco_version"]),
+        trace_sha256=str(metadata_payload["trace_sha256"]),
+        generator_config=dict(metadata_payload["generator_config"]),
+    )
+    if len(rows) != metadata.event_count:
+        raise ValueError("random-waypoint trace length differs from metadata")
+    if _trace_sha256(rows) != metadata.trace_sha256:
+        raise ValueError("random-waypoint trace hash differs from metadata")
+    return RandomWaypointTrace(
+        rows=rows,
+        events=tuple(_row_to_event(row) for row in rows),
+        metadata=metadata,
+    )
+
+
+def _parse_trace_row(values: list[str]) -> RobotArmTraceRow:
+    if len(values) != 16:
+        raise ValueError(f"random-waypoint trace row has {len(values)} columns")
+    return RobotArmTraceRow(
+        time=float(values[0]),
+        angles=tuple(float(value) for value in values[1:6]),  # type: ignore[arg-type]
+        tcp=tuple(float(value) for value in values[6:9]),  # type: ignore[arg-type]
+        expected_center=tuple(_parse_sparse_value(value) for value in values[9:12]),  # type: ignore[arg-type]
+        geofence=tuple(_parse_sparse_value(value) for value in values[12:16]),  # type: ignore[arg-type]
+    )
+
+
+def _parse_sparse_value(value: str) -> float | None:
+    return None if value == "#" else float(value)
 
 
 def _sample_reachable_waypoints(

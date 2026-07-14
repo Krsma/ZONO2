@@ -4,15 +4,17 @@ from __future__ import annotations
 
 import argparse
 from dataclasses import asdict
+import hashlib
 import json
 from pathlib import Path
 from typing import Sequence
 
+import numpy as np
 import pandas as pd
 
-from pzr.learning.artifacts import load_ranking_dataset
+from pzr.learning.artifacts import load_ranking_dataset, write_ranking_dataset
 from pzr.learning.dataset import RankingDataset
-from pzr.learning.ranker import train_ranking_policy
+from pzr.learning.ranker import RankingPolicy, evaluate_ranking, train_ranking_policy
 from pzr.rtlola.actions import MPC_ACTION_NAMES, default_action_catalog
 from pzr.rtlola.binding import (
     BINDING_BUILD_PROFILE,
@@ -29,13 +31,15 @@ from pzr.rtlola.benchmark import (
 from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA
 from pzr.rtlola.learned_policy import RtlolaRankingPolicy
 from pzr.rtlola.learning_data import collect_teacher_episode, write_collected_dataset
+from pzr.rtlola.robot_arm import ROBOT_ARM_TRACE_ROWS, TRACE_KINDS
 from pzr.rtlola.robot_arm_random import (
     RANDOM_WAYPOINT_CONDITIONS,
     RandomWaypointConfig,
+    RandomWaypointTrace,
     generate_random_waypoint_trace,
+    load_random_waypoint_trace,
     write_random_waypoint_trace,
 )
-from pzr.rtlola.robot_arm import ROBOT_ARM_TRACE_ROWS, TRACE_KINDS
 from pzr.rtlola.scenarios import scenario_by_name
 
 
@@ -129,6 +133,7 @@ def run_collect(args: argparse.Namespace) -> None:
     candidate_names = tuple(args.candidates)
     catalog = default_action_catalog(candidate_names)
     behavior = None
+    behavior_model_sha256 = None
     if args.behavior_model is not None:
         if args.validation_seeds or args.test_seeds:
             raise ValueError(
@@ -138,19 +143,23 @@ def run_collect(args: argparse.Namespace) -> None:
             policy=_load_policy(args.behavior_model),
             catalog=catalog,
         )
+        behavior_model_sha256 = _model_sha256(args.behavior_model)
     scenario = scenario_by_name("robot_arm")
-    samples = []
+    collection = "dagger" if behavior is not None else "teacher"
+    source_sha256 = _pzr_source_sha256()
+    shard_datasets = []
+    shard_metadata_frames = []
     trace_records = []
     for split, seed in _split_seeds(args):
         for condition in args.conditions:
             trace_id = f"{condition}:seed-{seed}"
-            trace = generate_random_waypoint_trace(RandomWaypointConfig(
+            trace_config = RandomWaypointConfig(
                 seed=seed,
                 condition=condition,
                 event_count=args.event_count,
-            ))
+            )
             trace_dir = args.output / "traces" / split / trace_id
-            write_random_waypoint_trace(trace, trace_dir)
+            trace = _load_or_generate_trace(trace_config, trace_dir)
             trace_records.append({
                 "trace_id": trace_id,
                 "split": split,
@@ -159,20 +168,65 @@ def run_collect(args: argparse.Namespace) -> None:
                 "trace_sha256": trace.metadata.trace_sha256,
             })
             for budget in args.budgets:
-                samples.extend(collect_teacher_episode(
-                    scenario=scenario,
-                    events=trace.events,
-                    trace_id=trace_id,
-                    split=split,
-                    condition=condition,
-                    seed=seed,
-                    budget=budget,
-                    candidate_names=candidate_names,
-                    behavior_policy=behavior,
-                ))
+                shard_dir = (
+                    args.output / "shards" / split / condition
+                    / f"seed-{seed}" / f"budget-{budget}"
+                )
+                shard_identity = {
+                    "collection_shard": True,
+                    "scenario": scenario.name,
+                    "collection": collection,
+                    "event_count": args.event_count,
+                    "trace_id": trace_id,
+                    "split": split,
+                    "condition": condition,
+                    "seed": seed,
+                    "budget": budget,
+                    "candidate_names": list(candidate_names),
+                    "feature_schema": _feature_schema_payload(),
+                    "trace_sha256": trace.metadata.trace_sha256,
+                    "behavior_model_sha256": behavior_model_sha256,
+                    "binding_revision": BINDING_REVISION,
+                    "interpreter_revision": INTERPRETER_REVISION,
+                    "binding_build_profile": BINDING_BUILD_PROFILE,
+                    "pzr_source_sha256": source_sha256,
+                }
+                if shard_dir.exists():
+                    dataset, sample_metadata, manifest = load_ranking_dataset(
+                        shard_dir,
+                    )
+                    _validate_shard_manifest(manifest, shard_identity)
+                else:
+                    samples = collect_teacher_episode(
+                        scenario=scenario,
+                        events=trace.events,
+                        trace_id=trace_id,
+                        split=split,
+                        condition=condition,
+                        seed=seed,
+                        budget=budget,
+                        candidate_names=candidate_names,
+                        behavior_policy=behavior,
+                    )
+                    write_collected_dataset(
+                        samples,
+                        shard_dir,
+                        shard_identity,
+                        candidate_names=candidate_names,
+                    )
+                    dataset, sample_metadata, manifest = load_ranking_dataset(
+                        shard_dir,
+                    )
+                    _validate_shard_manifest(manifest, shard_identity)
+                shard_datasets.append(dataset)
+                shard_metadata_frames.append(sample_metadata)
+    dataset = RankingDataset.concatenate(shard_datasets)
+    if dataset.num_samples == 0:
+        raise ValueError("teacher collection produced no reduction decisions")
+    sample_metadata = pd.concat(shard_metadata_frames, ignore_index=True)
     metadata = {
         "scenario": scenario.name,
-        "collection": "dagger" if behavior is not None else "teacher",
+        "collection": collection,
         "event_count": args.event_count,
         "budgets": list(args.budgets),
         "conditions": list(args.conditions),
@@ -180,15 +234,97 @@ def run_collect(args: argparse.Namespace) -> None:
         "binding_revision": BINDING_REVISION,
         "interpreter_revision": INTERPRETER_REVISION,
         "binding_build_profile": BINDING_BUILD_PROFILE,
+        "behavior_model_sha256": behavior_model_sha256,
+        "feature_schema": _feature_schema_payload(),
+        "pzr_source_sha256": source_sha256,
+        "shard_count": len(shard_datasets),
         "traces": trace_records,
     }
-    write_collected_dataset(samples, args.output / "dataset", metadata)
+    write_ranking_dataset(
+        dataset,
+        args.output / "dataset",
+        sample_metadata,
+        metadata,
+    )
+    _write_collection_summaries(sample_metadata, args.output / "dataset")
     print(f"Learning dataset complete: {args.output / 'dataset'}")
 
 
+def _load_or_generate_trace(
+    config: RandomWaypointConfig,
+    directory: Path,
+) -> RandomWaypointTrace:
+    trace_path = directory / "trace.csv"
+    metadata_path = directory / "metadata.json"
+    if trace_path.exists() != metadata_path.exists():
+        raise ValueError(f"incomplete random-waypoint trace artifact: {directory}")
+    if trace_path.exists():
+        trace = load_random_waypoint_trace(directory)
+        if trace.metadata.generator_config != asdict(config):
+            raise ValueError(f"random-waypoint trace configuration differs: {directory}")
+        return trace
+    trace = generate_random_waypoint_trace(config)
+    write_random_waypoint_trace(trace, directory)
+    return trace
+
+
+def _validate_shard_manifest(
+    manifest: dict[str, object],
+    expected: dict[str, object],
+) -> None:
+    mismatched = [
+        name for name, value in expected.items()
+        if manifest.get(name) != value
+    ]
+    if mismatched:
+        raise ValueError(
+            "learning collection shard identity differs for: "
+            + ", ".join(sorted(mismatched))
+        )
+
+
+def _feature_schema_payload() -> dict[str, object]:
+    return {
+        "name": RTL_RANKING_FEATURE_SCHEMA.name,
+        "version": RTL_RANKING_FEATURE_SCHEMA.version,
+        "feature_names": list(RTL_RANKING_FEATURE_SCHEMA.feature_names),
+        "log1p_features": list(RTL_RANKING_FEATURE_SCHEMA.log1p_features),
+    }
+
+
+def _model_sha256(directory: Path) -> str:
+    return _sha256_files((directory / "model.json", directory / "weights.pt"))
+
+
+def _pzr_source_sha256() -> str:
+    root = Path(__file__).parents[1]
+    return _sha256_files(tuple(sorted(
+        path for path in root.rglob("*")
+        if path.is_file() and path.suffix in {".py", ".lola"}
+    )), relative_to=root)
+
+
+def _sha256_files(
+    paths: Sequence[Path],
+    *,
+    relative_to: Path | None = None,
+) -> str:
+    digest = hashlib.sha256()
+    for path in paths:
+        if not path.is_file():
+            raise ValueError(f"fingerprinted artifact is missing: {path}")
+        name = path.relative_to(relative_to) if relative_to is not None else path.name
+        digest.update(str(name).encode("utf-8"))
+        digest.update(b"\0")
+        digest.update(path.read_bytes())
+        digest.update(b"\0")
+    return digest.hexdigest()
+
+
 def run_train(args: argparse.Namespace) -> None:
-    loaded = [load_ranking_dataset(path)[0] for path in args.dataset]
-    dataset = RankingDataset.concatenate(loaded)
+    loaded = [load_ranking_dataset(path) for path in args.dataset]
+    dataset = RankingDataset.concatenate([item[0] for item in loaded])
+    sample_metadata = pd.concat([item[1] for item in loaded], ignore_index=True)
     policy, result = train_ranking_policy(
         dataset,
         RTL_RANKING_FEATURE_SCHEMA,
@@ -212,7 +348,70 @@ def run_train(args: argparse.Namespace) -> None:
     (args.output / "training.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True),
     )
+    _validation_metric_frame(policy, dataset, sample_metadata).to_csv(
+        args.output / "validation_metrics.csv", index=False,
+    )
     print(f"Reducer ranker complete: {args.output}")
+
+
+def _write_collection_summaries(metadata: pd.DataFrame, output: Path) -> None:
+    groups = ["split", "condition", "budget"]
+    summary = metadata.groupby(groups, dropna=False).agg(
+        sample_count=("sample_id", "size"),
+        mean_evaluated_leaves=("evaluated_leaves", "mean"),
+        teacher_reducer_failure_count=("teacher_reducer_failure_count", "sum"),
+        teacher_infeasible_candidate_count=("teacher_infeasible_candidate_count", "sum"),
+        behavior_reducer_failure_count=("behavior_reducer_failure_count", "sum"),
+        behavior_infeasible_candidate_count=("behavior_infeasible_candidate_count", "sum"),
+        behavior_fallback_count=("behavior_fallback_used", "sum"),
+    ).reset_index()
+    summary["behavior_fallback_rate"] = (
+        summary["behavior_fallback_count"] / summary["sample_count"]
+    )
+    summary.to_csv(output / "collection_summary.csv", index=False)
+    for column, filename in (
+        ("teacher_action", "teacher_action_counts.csv"),
+        ("behavior_action", "behavior_action_counts.csv"),
+    ):
+        counts = (
+            metadata.groupby([*groups, column], dropna=False)
+            .size()
+            .rename("count")
+            .reset_index()
+        )
+        counts.to_csv(output / filename, index=False)
+
+
+def _validation_metric_frame(
+    policy: RankingPolicy,
+    dataset: RankingDataset,
+    metadata: pd.DataFrame,
+) -> pd.DataFrame:
+    validation = np.asarray(dataset.splits) == "validation"
+    if not np.any(validation):
+        raise ValueError("training diagnostics require a validation split")
+    grouped_metadata = metadata.copy()
+    if "condition" not in grouped_metadata:
+        grouped_metadata["condition"] = "__unspecified__"
+    rows = []
+    groups: list[tuple[str, int | None, np.ndarray]] = [
+        ("__all__", None, validation),
+    ]
+    for (condition, budget), indices in grouped_metadata[validation].groupby(
+        ["condition", "budget"], dropna=False,
+    ).groups.items():
+        mask = np.zeros(dataset.num_samples, dtype=np.bool_)
+        mask[np.asarray(list(indices), dtype=np.int64)] = True
+        groups.append((str(condition), int(budget), mask))
+    for condition, budget, mask in groups:
+        metrics = evaluate_ranking(policy, dataset.subset(np.flatnonzero(mask)))
+        rows.append({
+            "condition": condition,
+            "budget": budget,
+            "sample_count": int(np.count_nonzero(mask)),
+            **asdict(metrics),
+        })
+    return pd.DataFrame(rows)
 
 
 def run_evaluate(args: argparse.Namespace) -> None:
