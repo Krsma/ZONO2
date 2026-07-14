@@ -1,4 +1,5 @@
 from argparse import Namespace
+import json
 from types import SimpleNamespace
 
 import numpy as np
@@ -78,6 +79,9 @@ def test_staged_train_writes_explicit_pytorch_artifacts(tmp_path):
     assert (output / "training.json").stat().st_size > 0
     assert (output / "validation_metrics.csv").stat().st_size > 0
     assert not (output / "model.onnx").exists()
+    training = json.loads((output / "training.json").read_text())
+    assert len(training["dataset_sha256"]) == 1
+    assert len(training["pzr_source_sha256"]) == 64
 
 
 def test_evaluate_command_defaults_to_all_fixed_traces_and_exact_lengths(tmp_path):

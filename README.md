@@ -55,7 +55,7 @@ The Omni scenario provides the historically compatible `canonical` trace and
 calibrated `safe`, `x_violated`, and `y_violated` traces. Numeric public
 `position_x` and `position_y` bounds are included in its artifacts.
 
-Run the staged current-state ranking pipeline:
+Run a small staged current-state ranking smoke:
 
 ```bash
 pzr-learning collect --output /tmp/pzr-learning/base --event-count 30 \
@@ -64,9 +64,16 @@ pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
   --output /tmp/pzr-learning/model
 ```
 
-See `science/LEARNING_PIPELINE.md` for teacher semantics, one-round aggregation,
-the full-length fixed-trace evaluation command, and artifact schemas. Learning
-runs are intentionally separate from `pzr-benchmark`.
+Run the resumable two-round Geometry15 experiment with:
+
+```bash
+PZR_OUT_DIR=results/rtlola-learning-geometry15-7371495-b4cfbf4-e6ecd0b \
+  tools/run_rtlola_learning_full.sh
+```
+
+See `science/LEARNING_PIPELINE.md` for the feature contract, seed schedule,
+teacher semantics, aggregation rounds, exact evaluation, and artifact schemas.
+Learning runs are intentionally separate from `pzr-benchmark`.
 
 Prepare or resume the full FPR-first robot-arm sweep:
 
@@ -158,7 +165,7 @@ transform bound. `interval` is an emergency fallback.
   predicted actions.
 - The benchmark reference mode controls offline metrics and caching only;
   binding-loss MPC always constructs its own unreduced horizon rollout.
-- Learned inference uses 12 aggregate current-zonotope/budget features, ranks
+- Learned inference uses 15 aggregate current-zonotope/budget features, ranks
   native transforms once, and directly tries them through the binding. It has
   no future-event input or inference-time rollout and never writes a matrix.
 - `none` and fallback actions are excluded from learned targets.

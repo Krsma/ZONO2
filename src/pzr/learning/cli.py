@@ -13,7 +13,7 @@ import pandas as pd
 
 from pzr.learning.artifacts import load_ranking_dataset, write_ranking_dataset
 from pzr.learning.dataset import RankingDataset
-from pzr.learning.provenance import model_sha256, pzr_source_sha256
+from pzr.learning.provenance import model_sha256, pzr_source_sha256, sha256_files
 from pzr.learning.ranker import RankingPolicy, evaluate_ranking, train_ranking_policy
 from pzr.rtlola.actions import MPC_ACTION_NAMES, default_action_catalog
 from pzr.rtlola.binding import (
@@ -313,10 +313,15 @@ def run_train(args: argparse.Namespace) -> None:
     payload = {
         "schema": "pzr.ranking-training.v1",
         "datasets": [str(path) for path in args.dataset],
+        "dataset_sha256": [
+            sha256_files((path / "manifest.json", path / "samples.npz"))
+            for path in args.dataset
+        ],
         "candidate_names": list(policy.candidate_names),
         "feature_schema": asdict(policy.feature_schema),
         "training": asdict(result),
         "seed": args.seed,
+        "pzr_source_sha256": pzr_source_sha256(),
     }
     (args.output / "training.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True),

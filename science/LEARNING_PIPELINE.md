@@ -17,7 +17,7 @@ It does not read future events, run MPC, mutate matrices, or use exact caches.
 
 ## Features And Targets
 
-Feature schema `rtlola.current-zonotope` version 1 contains 12 scalars:
+Feature schema `rtlola.current-zonotope` version 2 contains 15 scalars:
 
 1. budget;
 2. dense dynamic generator count;
@@ -30,17 +30,22 @@ Feature schema `rtlola.current-zonotope` version 1 contains 12 scalars:
 9. maximum row width;
 10. mean active generator norm;
 11. maximum-to-mean active generator norm;
-12. mean absolute coupling between active generators.
+12. mean absolute coupling between active generators;
+13. maximum-row-width share of total dynamic width;
+14. coefficient of variation of active generator L2 norms;
+15. mean normalized off-axis generator mass `(L1 - Linf) / L1`.
 
 Features use aggregate quantities only. They do not assume stable dense row or
-column positions, and state width excludes constant calibration slack.
+column positions, and state width excludes constant calibration slack. The
+policy is strictly pre-event: it does not use raw stream values, history,
+centers, spectral statistics, or a post-event preview branch.
 
 The teacher exhaustively evaluates every configured first action and every
 required second action over the current and next event. Its terminal target is
 binding-native approximation loss against an ephemeral two-event `none`
 rollout. The full exact trajectory is never precomputed for teacher labels.
 Incomplete roots are masked infeasible; equal-cost best candidates are retained
-in an explicit tie mask. The 12-32-32-K ReLU model is trained with a
+in an explicit tie mask. The 15-32-32-K ReLU model is trained with a
 cost-weighted pairwise ranking loss, where lower output scores are better.
 
 ## Data And Splits
@@ -52,59 +57,44 @@ drift/geofence interaction. Each trace records its seed, condition, generator
 configuration, source revision, trace hash, and MuJoCo diagnostics.
 
 Splits are made by trajectory seed before budgets are expanded. All budgets for
-a trajectory remain in the same split. Base teacher collection requires
-non-empty train, validation, and test splits. A learned-behavior aggregation
-round contains training trajectories only; validation and test data remain
-teacher-collected and held out.
+a trajectory remain in the same split. The Geometry15 experiment uses
+2,000-event traces: seeds 0--2 train, seed 3 validates early stopping, seeds
+4--6 form the first DAgger round, and seeds 7--9 form the second. DAgger shards
+are training-only. The six packaged fixed traces are the final out-of-
+distribution evaluation rather than a generated test split.
+
+Collection checkpoints each split/condition/seed/budget shard. Reuse requires
+matching trace hashes, candidates, features, behavior-model hash, PZR source,
+and native revisions. Explicitly empty under-bound shards are valid, while the
+consolidated training dataset must be non-empty.
 
 ## Staged Commands
 
-Base collection:
+The complete resumable run is:
 
 ```bash
-pzr-learning collect --output /tmp/pzr-learning/base --event-count 200 \
-  --budgets 40,80,120,180 --train-seeds 8 --validation-seeds 2 --test-seeds 2
-```
-
-Initial training:
-
-```bash
-pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
-  --output /tmp/pzr-learning/model-initial
-```
-
-One learned-behavior aggregation round and final training:
-
-```bash
-pzr-learning collect --output /tmp/pzr-learning/dagger --event-count 200 \
-  --budgets 40,80,120,180 --train-seeds 8 --validation-seeds 0 --test-seeds 0 \
-  --behavior-model /tmp/pzr-learning/model-initial
-
-pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
-  --dataset /tmp/pzr-learning/dagger/dataset \
-  --output /tmp/pzr-learning/model-final
-```
-
-Full-length generalization evaluation always uses exact references and the six
-packaged fixed traces:
-
-```bash
-pzr-learning evaluate --model /tmp/pzr-learning/model-final \
-  --budgets 40,80,120,180 --output /tmp/pzr-learning/evaluation
+PZR_OUT_DIR=results/rtlola-learning-geometry15-7371495-b4cfbf4-e6ecd0b \
+  tools/run_rtlola_learning_full.sh
 ```
 
 Collection writes inspectable trace CSVs and metadata, aligned compressed
 arrays, sample rows, long-form candidate costs, and a versioned manifest.
-Training writes `weights.pt`, `model.json`, and `training.json`. Evaluation
-writes exact-metric time series and summaries, candidate-selection counts,
-failures, reference caches, and a manifest. ONNX is not exported automatically;
-an explicit export command may be added after the model contract stabilizes.
+Training writes `weights.pt`, `model.json`, `training.json`, and grouped
+validation metrics. Evaluation runs Girard, `learned_geometry15`, and the
+teacher-matched `mpc_terminal_full_width` in fingerprinted trace/budget/method
+cells. It writes exact-metric time series, macro loss/width summaries,
+micro-pooled FPR/FNR, reduction-conditioned candidate composition, comparison
+tables, plots, reference caches, and a manifest. ONNX is not exported
+automatically; an explicit export command may be added after the model contract
+stabilizes.
 
 ## Evaluation Contract
 
-Static and MPC baselines use the same budget and trace as the learned policy.
+Girard and full-width MPC use the same budget and trace as the learned policy.
 `none` is an exact diagnostic reference, not a learned candidate. Full-length
 tables report FPR, FNR, mean/final/max/summed native loss, state width, runtime,
 fallback and infeasible rates, and reducer selection. Ranking accuracy,
-teacher agreement, and chosen regret are evaluated on held-out generated data.
-No current smoke artifact is a completed six-trace result.
+feasible selection, and chosen regret are evaluated on the held-out validation
+seed. Automatic `none` steps are separated from action composition on
+reduction-required steps. No prefix or timing smoke is a completed six-trace
+result.
