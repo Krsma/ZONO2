@@ -63,6 +63,8 @@ class RandomWaypointConfig:
             raise ValueError("candidate count must cover at least two waypoints")
         if self.speed <= 0.0 or self.sample_rate <= 0.0:
             raise ValueError("speed and sample rate must be positive")
+        if self.drift_z < 0.0:
+            raise ValueError("drift must be non-negative")
         if self.max_retries < 1 or self.max_tracking_error <= 0.0:
             raise ValueError("retry and tracking-error bounds must be positive")
         if not 0.0 <= self.fault_onset_fraction < self.fault_full_fraction <= 1.0:
@@ -333,8 +335,8 @@ def _sample_reachable_waypoints(
         position = _forward_kinematics(model, data, site_id, q)
         if position[2] < config.z_min:
             continue
-        if config.has_drift and position[2] > 0.25:
-            continue
+        # Drift feasibility is checked on the complete faulted simulation. A
+        # drift-only z prefilter otherwise changes the base path distribution.
         if np.linalg.norm(position[:2]) < config.xy_min:
             continue
         if config.has_geofence_fault:

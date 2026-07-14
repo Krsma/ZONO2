@@ -55,6 +55,10 @@ Robot-arm learning traces adapt RLolaEval revision
 four fixed conditions are nominal, drift, geofence interaction, and combined
 drift/geofence interaction. Each trace records its seed, condition, generator
 configuration, source revision, trace hash, and MuJoCo diagnostics.
+Waypoint sampling uses the same reachable-state distribution for nominal and
+drift conditions; the complete simulation and its 2 cm tracking-error bound
+decide whether a faulted path is feasible. The long-run wrapper applies 4 cm
+of progressive vertical drift explicitly through `PZR_WAYPOINT_DRIFT_Z`.
 
 Splits are made by trajectory seed before budgets are expanded. All budgets for
 a trajectory remain in the same split. The Geometry15 experiment uses
@@ -67,13 +71,16 @@ Collection checkpoints each split/condition/seed/budget shard. Reuse requires
 matching trace hashes, candidates, features, behavior-model hash, PZR source,
 and native revisions. Explicitly empty under-bound shards are valid, while the
 consolidated training dataset must be non-empty.
+All requested traces are generated and validated before the first teacher
+shard is labeled, so an infeasible generator configuration fails during
+preflight rather than partway through an expensive collection stage.
 
 ## Staged Commands
 
 The complete resumable run is:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-geometry15-drift4cm-7371495-b4cfbf4-e6ecd0b \
   tools/run_rtlola_learning_full.sh
 ```
 
