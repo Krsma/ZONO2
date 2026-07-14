@@ -23,9 +23,12 @@ def test_ranking_features_preserve_dense_active_zero_and_constant_distinctions()
     assert by_name["logical_dynamic_dimension"] == 3
     assert by_name["state_width"] == 10.0
     assert by_name["mean_active_generator_norm"] == 2.5
+    assert by_name["row_width_concentration"] == np.float32(0.6)
+    assert by_name["active_generator_norm_cv"] == np.float32(0.2)
+    assert by_name["mean_generator_off_axis_fraction"] == 0.0
 
 
-def test_ranking_features_are_generator_permutation_and_sign_invariant():
+def test_ranking_features_are_row_generator_permutation_and_sign_invariant():
     dynamic = np.asarray([
         [0.0, -1.0, 2.0, 0.0],
         [0.0, 1.0, 1.0, 0.0],
@@ -36,3 +39,22 @@ def test_ranking_features_are_generator_permutation_and_sign_invariant():
     permuted[:, 1:] *= -1.0
     actual = ranking_features_from_matrices(permuted, permuted, budget=2)
     np.testing.assert_allclose(actual, expected)
+
+    row_permuted = permuted[[1, 0]]
+    np.testing.assert_allclose(
+        ranking_features_from_matrices(row_permuted, row_permuted, budget=2),
+        expected,
+    )
+
+
+def test_geometry_features_describe_scale_distribution_and_axis_alignment():
+    dynamic = np.asarray([
+        [0.0, 3.0, 1.0],
+        [0.0, 4.0, 0.0],
+    ])
+    features = ranking_features_from_matrices(dynamic, dynamic, budget=2)
+    by_name = dict(zip(RTL_RANKING_FEATURE_NAMES, features))
+
+    assert by_name["row_width_concentration"] == np.float32(4 / 8)
+    assert by_name["active_generator_norm_cv"] == np.float32(2 / 3)
+    assert by_name["mean_generator_off_axis_fraction"] == np.float32(3 / 14)

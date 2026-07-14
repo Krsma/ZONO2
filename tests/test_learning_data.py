@@ -7,6 +7,7 @@ from pzr.rtlola.learning_data import (
     _aligned_root_costs,
     build_ranking_dataset,
 )
+from pzr.rtlola.features import RTL_RANKING_FEATURE_NAMES
 
 
 def _sample(sample_id: str, split: str) -> CollectedRankingSample:
@@ -18,7 +19,7 @@ def _sample(sample_id: str, split: str) -> CollectedRankingSample:
         seed=1,
         budget=40,
         step=3,
-        features=np.arange(12, dtype=np.float32),
+        features=np.arange(len(RTL_RANKING_FEATURE_NAMES), dtype=np.float32),
         candidate_names=("girard", "scott"),
         teacher_costs=(0.0, 2.0),
         feasible=(True, True),

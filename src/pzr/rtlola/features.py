@@ -23,11 +23,14 @@ RTL_RANKING_FEATURE_NAMES = (
     "mean_active_generator_norm",
     "max_to_mean_generator_norm",
     "generator_coupling",
+    "row_width_concentration",
+    "active_generator_norm_cv",
+    "mean_generator_off_axis_fraction",
 )
 
 RTL_RANKING_FEATURE_SCHEMA = FeatureSchema(
     name="rtlola.current-zonotope",
-    version=1,
+    version=2,
     feature_names=RTL_RANKING_FEATURE_NAMES,
     log1p_features=(
         "budget",
@@ -38,6 +41,7 @@ RTL_RANKING_FEATURE_SCHEMA = FeatureSchema(
         "state_width",
         "max_row_width",
         "mean_active_generator_norm",
+        "active_generator_norm_cv",
     ),
 )
 
@@ -74,7 +78,18 @@ def ranking_features_from_matrices(
         float(np.max(active_norms) / mean_norm)
         if mean_norm > atol else 0.0
     )
+    norm_cv = (
+        float(np.std(active_norms) / mean_norm)
+        if mean_norm > atol else 0.0
+    )
     coupling = _active_generator_coupling(generators[:, active], active_norms)
+    row_width_concentration = (
+        float(metrics.width_max / metrics.state_width)
+        if metrics.state_width > atol else 0.0
+    )
+    off_axis_fraction = _mean_generator_off_axis_fraction(
+        generators[:, active], atol=atol,
+    )
     dense_count = metrics.dynamic_generator_count
     features = np.asarray([
         budget,
@@ -89,6 +104,9 @@ def ranking_features_from_matrices(
         mean_norm,
         max_to_mean,
         coupling,
+        row_width_concentration,
+        norm_cv,
+        off_axis_fraction,
     ], dtype=np.float32)
     if not np.all(np.isfinite(features)):
         raise ValueError("RTLola ranking features contain non-finite values")
@@ -105,3 +123,19 @@ def _active_generator_coupling(
     gram = np.abs(normalized.T @ normalized)
     indices = np.triu_indices(gram.shape[0], k=1)
     return float(np.mean(gram[indices]))
+
+
+def _mean_generator_off_axis_fraction(
+    generators: NDArray[np.float64],
+    *,
+    atol: float,
+) -> float:
+    if generators.shape[1] == 0:
+        return 0.0
+    absolute = np.abs(generators)
+    l1 = np.sum(absolute, axis=0)
+    linf = np.max(absolute, axis=0)
+    valid = l1 > atol
+    if not np.any(valid):
+        return 0.0
+    return float(np.mean((l1[valid] - linf[valid]) / l1[valid]))

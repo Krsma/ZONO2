@@ -28,7 +28,10 @@ def test_split_seeds_are_trajectory_disjoint_and_deterministic():
 
 
 def test_staged_train_writes_explicit_pytorch_artifacts(tmp_path):
-    features = np.arange(48, dtype=np.float32).reshape(4, 12)
+    feature_count = len(RTL_RANKING_FEATURE_NAMES)
+    features = np.arange(4 * feature_count, dtype=np.float32).reshape(
+        4, feature_count,
+    )
     dataset = RankingDataset(
         features=features,
         teacher_costs=np.asarray([[0.0, 1.0], [1.0, 0.0]] * 2),
