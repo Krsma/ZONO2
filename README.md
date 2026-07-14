@@ -58,8 +58,11 @@ calibrated `safe`, `x_violated`, and `y_violated` traces. Numeric public
 Run a small staged current-state ranking smoke:
 
 ```bash
-pzr-learning collect --output /tmp/pzr-learning/base --event-count 30 \
-  --budgets 40,80 --train-seeds 2 --validation-seeds 1 --test-seeds 1
+pzr-learning generate --output /tmp/pzr-learning/traces --event-count 30 \
+  --conditions random_waypoint --seed-count 4
+pzr-learning collect --output /tmp/pzr-learning/base \
+  --trace-store /tmp/pzr-learning/traces --budgets 40,80 \
+  --train-seeds 2 --validation-seeds 1 --test-seeds 1
 pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
   --output /tmp/pzr-learning/model
 ```
@@ -67,7 +70,7 @@ pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
 Run the resumable two-round Geometry15 experiment with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-7371495-b4cfbf4-e6ecd0b \
   tools/run_rtlola_learning_full.sh
 ```
 

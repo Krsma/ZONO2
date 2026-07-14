@@ -39,9 +39,11 @@ tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
 PZR_OUT_DIR=results/rtlola-arm-mpc-variants-b4cfbf4-e6ecd0b-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 
-pzr-learning collect --output /tmp/pzr-learning --event-count 10 \
-  --budgets 10 --candidates girard,scott \
-  --conditions random_waypoint --train-seeds 1 \
+pzr-learning generate --output /tmp/pzr-learning/traces --event-count 10 \
+  --conditions random_waypoint --seed-count 3
+pzr-learning collect --output /tmp/pzr-learning \
+  --trace-store /tmp/pzr-learning/traces \
+  --budgets 10 --candidates girard,scott --train-seeds 1 \
   --validation-seeds 1 --test-seeds 1
 pzr-learning train --dataset /tmp/pzr-learning/dataset \
   --output /tmp/pzr-learning-model --epochs 2
@@ -71,8 +73,8 @@ the binding-native transforms, counters, and approximation loss. PZR reports
 the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
-The last recorded full release-binding validation after the Geometry15
-learning integration was 90 passing tests with no skips.
+The last recorded full release-binding validation after the random500
+learning integration was 94 passing tests with no skips.
 
 The authoritative trace kinds and full lengths are:
 
@@ -156,10 +158,11 @@ the original 12 budget/current-zonotope aggregates plus row-width
 concentration, active-generator norm variation, and mean normalized off-axis
 generator mass. It is strictly pre-event and does not use stream values,
 history, spectral statistics, or an inference-time preview rollout. The
-full experiment uses three 2,000-event training seeds, one validation seed,
-and two fresh three-seed DAgger rounds. Its fixed-trace comparison is Girard
-versus `learned_geometry15` versus the two-event
-`mpc_terminal_full_width` teacher.
+current experiment pre-generates forty independent 500-event nominal random-
+waypoint traces: twelve base-training seeds, four validation seeds, and two
+fresh twelve-seed DAgger rounds. Its fixed-trace comparison is Girard versus
+`learned_geometry15` versus the two-event `mpc_terminal_full_width` teacher.
+The six fixed evaluation traces always retain their full authoritative lengths.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the

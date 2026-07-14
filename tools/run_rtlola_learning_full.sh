@@ -2,19 +2,26 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-geometry15-7371495-b4cfbf4-e6ecd0b}"
+OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-geometry15-random500-7371495-b4cfbf4-e6ecd0b}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
-EVENT_COUNT="${PZR_EVENT_COUNT:-2000}"
+EVENT_COUNT="${PZR_EVENT_COUNT:-500}"
 BUDGETS="${PZR_BUDGETS:-40,80,120,180}"
 CANDIDATES="${PZR_CANDIDATES:-girard,scott,pca,combastel}"
-CONDITIONS="${PZR_CONDITIONS:-random_waypoint,random_waypoint_drift,random_waypoint_geofence,random_waypoint_drift_geofence}"
+CONDITIONS="${PZR_CONDITIONS:-random_waypoint}"
 TRACE_KINDS="${PZR_TRACE_KINDS:-figure8,figure8_drift,random,random_drift,square,square_drift}"
 EPOCHS="${PZR_EPOCHS:-100}"
 BATCH_SIZE="${PZR_BATCH_SIZE:-256}"
 PATIENCE="${PZR_PATIENCE:-10}"
 TRAINING_SEED="${PZR_TRAINING_SEED:-42}"
 EVAL_LENGTH="${PZR_EVAL_LENGTH:-}"
+SEED_START="${PZR_SEED_START:-0}"
+BASE_TRAIN_SEEDS="${PZR_BASE_TRAIN_SEEDS:-12}"
+BASE_VALIDATION_SEEDS="${PZR_BASE_VALIDATION_SEEDS:-4}"
+DAGGER_SEEDS="${PZR_DAGGER_SEEDS:-12}"
+DAGGER_1_SEED_START=$((SEED_START + BASE_TRAIN_SEEDS + BASE_VALIDATION_SEEDS))
+DAGGER_2_SEED_START=$((DAGGER_1_SEED_START + DAGGER_SEEDS))
+TRACE_SEED_COUNT=$((BASE_TRAIN_SEEDS + BASE_VALIDATION_SEEDS + 2 * DAGGER_SEEDS))
 
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
 export OMP_NUM_THREADS="${OMP_NUM_THREADS:-1}"
@@ -36,17 +43,24 @@ run_logged() {
     echo "complete stage: $name"
 }
 
+run_logged generate_traces \
+    "$PYTHON" -m pzr.learning.cli generate \
+    --output "$OUT_DIR/traces" \
+    --event-count "$EVENT_COUNT" \
+    --conditions "$CONDITIONS" \
+    --seed-start "$SEED_START" \
+    --seed-count "$TRACE_SEED_COUNT"
+
 run_logged collect_base \
     "$PYTHON" -m pzr.learning.cli collect \
     --output "$OUT_DIR/base" \
-    --event-count "$EVENT_COUNT" \
+    --trace-store "$OUT_DIR/traces" \
     --budgets "$BUDGETS" \
     --candidates "$CANDIDATES" \
-    --conditions "$CONDITIONS" \
-    --train-seeds 3 \
-    --validation-seeds 1 \
+    --train-seeds "$BASE_TRAIN_SEEDS" \
+    --validation-seeds "$BASE_VALIDATION_SEEDS" \
     --test-seeds 0 \
-    --seed-start 0
+    --seed-start "$SEED_START"
 
 run_logged train_base \
     "$PYTHON" -m pzr.learning.cli train \
@@ -60,14 +74,13 @@ run_logged train_base \
 run_logged collect_dagger_1 \
     "$PYTHON" -m pzr.learning.cli collect \
     --output "$OUT_DIR/dagger-1" \
-    --event-count "$EVENT_COUNT" \
+    --trace-store "$OUT_DIR/traces" \
     --budgets "$BUDGETS" \
     --candidates "$CANDIDATES" \
-    --conditions "$CONDITIONS" \
-    --train-seeds 3 \
+    --train-seeds "$DAGGER_SEEDS" \
     --validation-seeds 0 \
     --test-seeds 0 \
-    --seed-start 4 \
+    --seed-start "$DAGGER_1_SEED_START" \
     --behavior-model "$OUT_DIR/model-base"
 
 run_logged train_dagger_1 \
@@ -83,14 +96,13 @@ run_logged train_dagger_1 \
 run_logged collect_dagger_2 \
     "$PYTHON" -m pzr.learning.cli collect \
     --output "$OUT_DIR/dagger-2" \
-    --event-count "$EVENT_COUNT" \
+    --trace-store "$OUT_DIR/traces" \
     --budgets "$BUDGETS" \
     --candidates "$CANDIDATES" \
-    --conditions "$CONDITIONS" \
-    --train-seeds 3 \
+    --train-seeds "$DAGGER_SEEDS" \
     --validation-seeds 0 \
     --test-seeds 0 \
-    --seed-start 7 \
+    --seed-start "$DAGGER_2_SEED_START" \
     --behavior-model "$OUT_DIR/model-dagger-1"
 
 run_logged train_final \

@@ -52,20 +52,25 @@ cost-weighted pairwise ranking loss, where lower output scores are better.
 
 Robot-arm learning traces adapt RLolaEval revision
 `e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5` random-waypoint generation. The
-four fixed conditions are nominal, drift, geofence interaction, and combined
-drift/geofence interaction. Each trace records its seed, condition, generator
-configuration, source revision, trace hash, and MuJoCo diagnostics.
+primary experiment uses nominal random-waypoint motion only. Drift and
+geofence generators remain available for explicit diagnostics, but they are
+not part of this training distribution. Each trace records its seed,
+condition, generator configuration, source revision, trace hash, and MuJoCo
+diagnostics.
 
 Splits are made by trajectory seed before budgets are expanded. All budgets for
-a trajectory remain in the same split. The Geometry15 experiment uses
-2,000-event traces: seeds 0--2 train, seed 3 validates early stopping, seeds
-4--6 form the first DAgger round, and seeds 7--9 form the second. DAgger shards
-are training-only. The six packaged fixed traces are the final out-of-
-distribution evaluation rather than a generated test split.
+a trajectory remain in the same split. The Geometry15 experiment uses forty
+independent 500-event traces: seeds 0--11 train, seeds 12--15 validate early
+stopping, seeds 16--27 form the first DAgger round, and seeds 28--39 form the
+second. DAgger shards are training-only. The six packaged fixed traces retain
+their full authoritative lengths and form the final out-of-distribution
+evaluation rather than a generated test split.
 
-Collection checkpoints each split/condition/seed/budget shard. Reuse requires
-matching trace hashes, candidates, features, behavior-model hash, PZR source,
-and native revisions. Explicitly empty under-bound shards are valid, while the
+The complete trace store is generated and hash-validated before any teacher
+rollout begins. Collection only reads this store and checkpoints each
+split/condition/seed/budget shard. Reuse requires matching trace-store and
+trace hashes, candidates, features, behavior-model hash, PZR source, and native
+revisions. Explicitly empty under-bound shards are valid, while the
 consolidated training dataset must be non-empty.
 
 ## Staged Commands
@@ -73,12 +78,14 @@ consolidated training dataset must be non-empty.
 The complete resumable run is:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-7371495-b4cfbf4-e6ecd0b \
   tools/run_rtlola_learning_full.sh
 ```
 
-Collection writes inspectable trace CSVs and metadata, aligned compressed
-arrays, sample rows, long-form candidate costs, and a versioned manifest.
+Trace generation writes one shared, resumable store of inspectable CSVs,
+per-trace metadata, hashes, and a versioned manifest. Collection consumes that
+store and writes aligned compressed arrays, sample rows, long-form candidate
+costs, and a versioned dataset manifest.
 Training writes `weights.pt`, `model.json`, `training.json`, and grouped
 validation metrics. Evaluation runs Girard, `learned_geometry15`, and the
 teacher-matched `mpc_terminal_full_width` in fingerprinted trace/budget/method
