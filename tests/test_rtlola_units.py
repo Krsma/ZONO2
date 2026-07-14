@@ -390,8 +390,8 @@ def test_method_set_expansion_preserves_public_contract():
         "none",
         "girard",
         "scott",
-        "interval_hull",
         "pca",
+        "combastel",
         "mpc_terminal_beam",
     )
     assert methods_for_config(RtlolaBenchmarkConfig(method_set="core")) == CORE_METHODS
@@ -399,10 +399,8 @@ def test_method_set_expansion_preserves_public_contract():
         "none",
         "girard",
         "scott",
-        "interval_hull",
         "pca",
         "althoff_a",
-        "clustering",
         "combastel",
         "colinear_scale",
     )
@@ -414,12 +412,21 @@ def test_method_set_expansion_preserves_public_contract():
 
 
 def test_explicit_method_override_accepts_static_mpc_and_fallback_names():
-    methods = ["colinear", "interval", "mpc_terminal_beam", "girard"]
+    methods = [
+        "colinear",
+        "interval",
+        "interval_hull",
+        "clustering",
+        "mpc_terminal_beam",
+        "girard",
+    ]
 
     assert methods_for_config(RtlolaBenchmarkConfig(methods=methods)) == tuple(methods)
     assert set(EXPLICIT_ACTION_METHOD_NAMES) >= {
         "none",
         "girard",
+        "interval_hull",
+        "clustering",
         "colinear",
         "interval",
     }

@@ -86,3 +86,5 @@ def test_evaluate_command_defaults_to_all_fixed_traces_and_exact_lengths(tmp_pat
         "square", "square_drift",
     )
     assert args.budgets == (40, 80)
+    assert args.candidates == ("girard", "scott", "pca", "combastel")
+    assert args.baselines == ("girard", "scott", "pca", "combastel")

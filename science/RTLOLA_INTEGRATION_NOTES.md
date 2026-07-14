@@ -4,6 +4,13 @@ Historical note: this file records an earlier RTLola integration state. The
 current required stack is documented in `AGENTS.md` and
 `science/RTLOLA_BINDING_NATIVE_REFERENCE_NOTES.md`.
 
+The July 2026 learning screen subsequently removed interval hull and
+deterministic clustering from ordinary sweeps and MPC/learning catalogs.
+Interval hull was consistently poor. Clustering's extreme native losses
+dominated the cost-sensitive ranking objective and prevented useful ordering
+of the remaining candidates. Both transforms remain available for explicit
+binding diagnostics.
+
 At the time of this note, the superproject pinned `rlolapythonbinding` at
 `abe3dab33d0c4aa504db0af63901b66ecafb7f71`, which locks the RTLola
 interpreter to `a143dd6a1500d54c1eabe9e83e5b54271734d6b2`.

@@ -19,13 +19,14 @@ An experiment is ready only when:
   non-empty.
 - incomplete transform runs are recorded and excluded from aggregates.
 
-The primary overnight method list contains Girard, Scott, interval hull, PCA,
-Combastel, and beam MPC. The MPC and learning candidate catalog contains those
-five bounded reducers plus deterministic clustering. Clustering is not a
-primary static method because its frequent interval fallback obscures its
-standalone behavior. Althoff A, colinear scale, and the randomized/diverse
-clustering reducers are excluded because they are not tractable or robust at
-robot-arm sweep length.
+The primary overnight method list contains Girard, Scott, PCA, Combastel, and
+beam MPC. The MPC and learning candidate catalog contains the same four
+bounded reducers. Interval hull is excluded because it was consistently poor
+in short exact-reference screens. Deterministic clustering is excluded because
+its extreme losses dominated cost-sensitive ranking and its frequent interval
+fallback obscures standalone behavior. Althoff A, colinear scale, and the
+randomized/diverse clustering reducers are excluded because they are not
+tractable or robust at robot-arm sweep length.
 
 Use `/tmp` for smoke outputs. Serious outputs belong under a new `results/`
 directory and must be generated through `pzr-benchmark`.

@@ -53,17 +53,19 @@ def test_latest_binding_actions_and_mpc_candidates():
     from pzr.rtlola.binding import require_binding
 
     require_binding()
-    assert {"clustering", "combastel"} <= set(catalog.by_name)
+    assert {"interval_hull", "clustering", "combastel"} <= set(catalog.by_name)
     assert catalog.mpc_candidate_names == (
         "girard",
         "scott",
-        "interval_hull",
         "pca",
         "combastel",
-        "clustering",
     )
     assert "none" not in catalog.mpc_candidate_names
     assert "interval" not in catalog.mpc_candidate_names
+    with pytest.raises(ValueError, match="unsupported MPC candidates"):
+        default_action_catalog(("girard", "interval_hull"))
+    with pytest.raises(ValueError, match="unsupported MPC candidates"):
+        default_action_catalog(("girard", "clustering"))
 
 
 def test_binding_accepts_none_for_asynchronous_input():
@@ -343,9 +345,9 @@ def test_robot_arm_tail_mpc_variants_emit_root_diagnostics():
     roots = root_evaluations_to_dataframe(result.raw_results)
     assert not roots.empty
     assert set(roots["method"]) == set(methods)
-    assert {"girard", "scott", "pca", "combastel", "clustering"} <= set(
-        roots["root_action"]
-    )
+    assert set(roots["root_action"]) == {
+        "girard", "scott", "pca", "combastel",
+    }
 
 
 def test_robot_arm_sparse_trigger_outputs_are_normalized():

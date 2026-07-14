@@ -53,25 +53,21 @@ COLINEAR_ACTION_NAME = "colinear"
 MPC_ACTION_NAMES = (
     "girard",
     "scott",
-    "interval_hull",
     "pca",
     "combastel",
-    "clustering",
 )
 CORE_STATIC_ACTION_NAMES = (
     EXACT_BASELINE_ACTION_NAME,
     "girard",
     "scott",
-    "interval_hull",
     "pca",
+    "combastel",
 )
 BOUNDED_STATIC_ACTION_NAMES = (
     "girard",
     "scott",
-    "interval_hull",
     "pca",
     "althoff_a",
-    "clustering",
     "combastel",
     "colinear_scale",
 )
@@ -81,6 +77,8 @@ STATIC_ACTION_METHOD_NAMES = (
 )
 EXPLICIT_ACTION_METHOD_NAMES = (
     *STATIC_ACTION_METHOD_NAMES,
+    "interval_hull",
+    "clustering",
     COLINEAR_ACTION_NAME,
     FALLBACK_ACTION_NAME,
 )

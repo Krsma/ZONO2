@@ -77,10 +77,10 @@ PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-e6ecd0b-exact-metrics \
 
 The overnight wrapper evaluates all six packaged RLolaEval traces at their full
 authoritative lengths and at budgets `40,80,120,180`, with Girard, Scott,
-interval hull, PCA, Combastel, legacy beam MPC, root-tail MPC, endpoint-tail
+PCA, Combastel, legacy beam MPC, root-tail MPC, endpoint-tail
 MPC, and integrated-tail MPC. Tail variants default to an eight-event Girard
 tail and one beam continuation per first-action root. MPC and learning choose
-among those five bounded reducers plus deterministic clustering. Set
+among Girard, Scott, PCA, and Combastel. Set
 `PZR_LENGTH` only when an intentional common truncation is required. Every
 trace/budget/method has its own command- and source-aware completion marker and
 log, so interrupted runs resume without repeating other methods. Successful
@@ -123,23 +123,24 @@ held-out learned policy. Completion markers make the run resumable.
 
 Method sets are:
 
-- `core`: exact no-reduction baseline, Girard, Scott, interval hull, PCA, and
+- `core`: exact no-reduction baseline, Girard, Scott, PCA, Combastel, and
   binding-loss beam MPC.
-- `static`: exact baseline plus every bounded native binding transform.
+- `static`: exact baseline plus the default bounded comparator set; excluded
+  transforms remain available through explicit `--methods` overrides.
 - `mpc`: the legacy beam and all three experimental tail variants.
 - `all`: `static` plus all MPC variants.
 
-The binding also exposes Althoff A, colinear scale, and three clustering
-reducers. Althoff A, colinear scale, and deterministic clustering remain
-opt-in through `--methods`; current robot-arm screening found the first two too
-slow for the full sweep and deterministic clustering frequently falls back on
-rank-deficient states. Random and diverse clustering are not wired into the
-benchmark because both fail immediately on the robot-arm state.
+The binding also exposes interval hull, Althoff A, colinear scale, and three
+clustering reducers. They remain opt-in through `--methods`; current robot-arm
+screening found interval hull consistently poor, Althoff A and colinear scale
+too slow, and deterministic clustering both unreliable and harmful to ranking
+training because of its extreme loss scale. Random and diverse clustering are
+not wired into the benchmark because both fail immediately on the robot-arm
+state.
 
-The MPC and learned candidate set is `girard`, `scott`, `interval_hull`,
-`pca`, `combastel`, and deterministic `clustering`. `none` is automatic only
-while the pre-event state is within the transform bound. `interval` is an
-emergency fallback.
+The MPC and learned candidate set is `girard`, `scott`, `pca`, and
+`combastel`. `none` is automatic only while the pre-event state is within the
+transform bound. `interval` is an emergency fallback.
 
 ## Semantic Contract
 

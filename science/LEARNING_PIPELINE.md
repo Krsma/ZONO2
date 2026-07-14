@@ -5,7 +5,10 @@
 The learned policy selects one binding-native reducer from a fixed catalog.
 The catalog is part of the model artifact and must match exactly at collection,
 training, aggregation, and inference. `none` is automatic while the current
-state is within the transform bound; `interval` is fallback-only.
+state is within the transform bound; `interval` is fallback-only. The current
+ordinary catalog is Girard, Scott, PCA, and Combastel. Interval hull and
+deterministic clustering are explicit diagnostics rather than learning
+candidates.
 
 Inference is intentionally non-predictive. It reads the current zonotope and
 the configured binding transform bound, evaluates one PyTorch MLP, stably ranks

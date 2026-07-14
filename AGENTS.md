@@ -142,12 +142,14 @@ Selectors may inspect states and choose actions, but only
 `rlola_python_binding.ZonotopeConfig` transforms may mutate monitor state.
 Do not add matrix writeback or Python-side reducers.
 
-The current robot-arm experiment explicitly expands the MPC/learning
-candidates to `girard`, `scott`, `interval_hull`, `pca`, `combastel`, and
-deterministic `clustering`. Do not add `none`, `interval`, unbounded
-transforms, random/diverse clustering, Althoff A, or colinear scale without a
-new explicit experiment change. `none` is the exact baseline and automatic
-under-bound action; `interval` is fallback-only.
+The current robot-arm MPC/learning candidates are `girard`, `scott`, `pca`,
+and `combastel`. Interval hull and deterministic clustering remain available
+only as explicit binding diagnostics; short learning screens found interval
+hull consistently poor and clustering's extreme losses dominated the ranking
+objective. Do not add them, `none`, `interval`, unbounded transforms,
+random/diverse clustering, Althoff A, or colinear scale to ordinary candidate
+catalogs without a new explicit experiment change. `none` is the exact
+baseline and automatic under-bound action; `interval` is fallback-only.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the

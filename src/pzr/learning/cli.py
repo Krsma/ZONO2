@@ -95,7 +95,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--baselines",
         type=_csv_strings,
-        default=("girard", "scott", "interval_hull", "pca", "combastel", "clustering"),
+        default=MPC_ACTION_NAMES,
     )
     evaluate.add_argument("--horizon", type=int, default=2)
     evaluate.add_argument("--beam-width", type=int, default=4)
