@@ -28,15 +28,12 @@ from pzr.rtlola.learning_evaluation import (
     FixedLearningEvaluationConfig,
     run_fixed_learning_evaluation,
 )
-from pzr.rtlola.robot_arm import TRACE_KINDS
-from pzr.rtlola.robot_arm_random import (
-    RANDOM_WAYPOINT_CONDITIONS,
-    RandomWaypointConfig,
-    RandomWaypointTrace,
-    generate_random_waypoint_trace,
-    load_random_waypoint_trace,
-    write_random_waypoint_trace,
+from pzr.rtlola.learning_traces import (
+    RandomWaypointTraceStoreConfig,
+    generate_random_waypoint_trace_store,
+    load_random_waypoint_trace_store,
 )
+from pzr.rtlola.robot_arm import TRACE_KINDS
 from pzr.rtlola.scenarios import scenario_by_name
 
 
@@ -60,12 +57,21 @@ def _csv_ints(value: str) -> tuple[int, ...]:
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build RTLola learning artifacts")
     subparsers = parser.add_subparsers(dest="command", required=True)
-    collect = subparsers.add_parser("collect", help="Generate and label waypoint traces")
+    generate = subparsers.add_parser(
+        "generate", help="Build a validated random-waypoint trace store",
+    )
+    generate.add_argument("--output", type=Path, required=True)
+    generate.add_argument("--event-count", type=int, required=True)
+    generate.add_argument(
+        "--conditions", type=_csv_strings, default=("random_waypoint",),
+    )
+    generate.add_argument("--seed-start", type=int, default=0)
+    generate.add_argument("--seed-count", type=int, required=True)
+    collect = subparsers.add_parser("collect", help="Label a validated trace store")
     collect.add_argument("--output", type=Path, required=True)
-    collect.add_argument("--event-count", type=int, required=True)
+    collect.add_argument("--trace-store", type=Path, required=True)
     collect.add_argument("--budgets", type=_csv_ints, required=True)
     collect.add_argument("--candidates", type=_csv_strings, default=MPC_ACTION_NAMES)
-    collect.add_argument("--conditions", type=_csv_strings, default=RANDOM_WAYPOINT_CONDITIONS)
     collect.add_argument("--train-seeds", type=int, default=4)
     collect.add_argument("--validation-seeds", type=int, default=1)
     collect.add_argument("--test-seeds", type=int, default=1)
@@ -110,7 +116,9 @@ def build_parser() -> argparse.ArgumentParser:
 
 def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
-    if args.command == "collect":
+    if args.command == "generate":
+        run_generate(args)
+    elif args.command == "collect":
         run_collect(args)
     elif args.command == "train":
         run_train(args)
@@ -120,18 +128,30 @@ def main(argv: list[str] | None = None) -> None:
         raise AssertionError(args.command)
 
 
+def run_generate(args: argparse.Namespace) -> None:
+    store = generate_random_waypoint_trace_store(
+        RandomWaypointTraceStoreConfig(
+            output=args.output,
+            event_count=args.event_count,
+            conditions=tuple(args.conditions),
+            seed_start=args.seed_start,
+            seed_count=args.seed_count,
+        ),
+    )
+    print(
+        f"Random-waypoint trace store complete: {store.root} "
+        f"({len(store.traces)} traces)",
+    )
+
+
 def run_collect(args: argparse.Namespace) -> None:
-    if args.event_count < 2:
-        raise ValueError("event count must be at least two")
     if not args.budgets:
         raise ValueError("at least one budget is required")
     if args.train_seeds < 1 or min(args.validation_seeds, args.test_seeds) < 0:
         raise ValueError("training needs a seed and split seed counts cannot be negative")
     if args.seed_start < 0:
         raise ValueError("seed start must be non-negative")
-    unknown_conditions = set(args.conditions) - set(RANDOM_WAYPOINT_CONDITIONS)
-    if unknown_conditions:
-        raise ValueError(f"unknown random-waypoint conditions: {sorted(unknown_conditions)}")
+    trace_store = load_random_waypoint_trace_store(args.trace_store)
     candidate_names = tuple(args.candidates)
     catalog = default_action_catalog(candidate_names)
     behavior = None
@@ -153,21 +173,17 @@ def run_collect(args: argparse.Namespace) -> None:
     shard_metadata_frames = []
     trace_records = []
     for split, seed in _split_seeds(args):
-        for condition in args.conditions:
-            trace_id = f"{condition}:seed-{seed}"
-            trace_config = RandomWaypointConfig(
-                seed=seed,
-                condition=condition,
-                event_count=args.event_count,
-            )
-            trace_dir = args.output / "traces" / split / trace_id
-            trace = _load_or_generate_trace(trace_config, trace_dir)
+        for stored_trace in trace_store.traces_for_seed(seed):
+            trace_id = stored_trace.trace_id
+            condition = stored_trace.condition
+            trace = stored_trace.trace
             trace_records.append({
                 "trace_id": trace_id,
                 "split": split,
                 "condition": condition,
                 "seed": seed,
                 "trace_sha256": trace.metadata.trace_sha256,
+                "trace_store_relative_path": str(stored_trace.relative_path),
             })
             for budget in args.budgets:
                 shard_dir = (
@@ -178,7 +194,7 @@ def run_collect(args: argparse.Namespace) -> None:
                     "collection_shard": True,
                     "scenario": scenario.name,
                     "collection": collection,
-                    "event_count": args.event_count,
+                    "event_count": trace_store.event_count,
                     "trace_id": trace_id,
                     "split": split,
                     "condition": condition,
@@ -187,6 +203,7 @@ def run_collect(args: argparse.Namespace) -> None:
                     "candidate_names": list(candidate_names),
                     "feature_schema": _feature_schema_payload(),
                     "trace_sha256": trace.metadata.trace_sha256,
+                    "trace_store_manifest_sha256": trace_store.manifest_sha256,
                     "behavior_model_sha256": behavior_model_sha256,
                     "binding_revision": BINDING_REVISION,
                     "interpreter_revision": INTERPRETER_REVISION,
@@ -229,10 +246,12 @@ def run_collect(args: argparse.Namespace) -> None:
     metadata = {
         "scenario": scenario.name,
         "collection": collection,
-        "event_count": args.event_count,
+        "event_count": trace_store.event_count,
         "budgets": list(args.budgets),
-        "conditions": list(args.conditions),
+        "conditions": list(trace_store.conditions),
         "seed_start": args.seed_start,
+        "trace_store": str(trace_store.root),
+        "trace_store_manifest_sha256": trace_store.manifest_sha256,
         "binding_revision": BINDING_REVISION,
         "interpreter_revision": INTERPRETER_REVISION,
         "binding_build_profile": BINDING_BUILD_PROFILE,
@@ -250,24 +269,6 @@ def run_collect(args: argparse.Namespace) -> None:
     )
     _write_collection_summaries(sample_metadata, args.output / "dataset")
     print(f"Learning dataset complete: {args.output / 'dataset'}")
-
-
-def _load_or_generate_trace(
-    config: RandomWaypointConfig,
-    directory: Path,
-) -> RandomWaypointTrace:
-    trace_path = directory / "trace.csv"
-    metadata_path = directory / "metadata.json"
-    if trace_path.exists() != metadata_path.exists():
-        raise ValueError(f"incomplete random-waypoint trace artifact: {directory}")
-    if trace_path.exists():
-        trace = load_random_waypoint_trace(directory)
-        if trace.metadata.generator_config != asdict(config):
-            raise ValueError(f"random-waypoint trace configuration differs: {directory}")
-        return trace
-    trace = generate_random_waypoint_trace(config)
-    write_random_waypoint_trace(trace, directory)
-    return trace
 
 
 def _validate_shard_manifest(

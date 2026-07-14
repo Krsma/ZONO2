@@ -104,13 +104,45 @@ def test_evaluate_command_defaults_to_all_fixed_traces_and_exact_lengths(tmp_pat
     assert args.horizon == 1
 
 
+def test_generate_command_defaults_to_nominal_random_waypoints(tmp_path):
+    args = build_parser().parse_args([
+        "generate",
+        "--output", str(tmp_path / "traces"),
+        "--event-count", "500",
+        "--seed-count", "40",
+    ])
+
+    assert args.conditions == ("random_waypoint",)
+    assert args.event_count == 500
+    assert args.seed_start == 0
+    assert args.seed_count == 40
+
+
 def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):
     monkeypatch.setattr(learning_cli, "default_action_catalog", lambda _names: object())
     trace = SimpleNamespace(
         events=(object(), object()),
         metadata=SimpleNamespace(trace_sha256="trace-hash"),
     )
-    monkeypatch.setattr(learning_cli, "_load_or_generate_trace", lambda *_args: trace)
+    stored_trace = SimpleNamespace(
+        trace_id="random_waypoint:seed-0",
+        condition="random_waypoint",
+        seed=0,
+        relative_path="random_waypoint:seed-0",
+        trace=trace,
+    )
+    trace_store = SimpleNamespace(
+        root=tmp_path / "traces",
+        event_count=2,
+        conditions=("random_waypoint",),
+        manifest_sha256="store-hash",
+        traces_for_seed=lambda seed: (stored_trace,) if seed == 0 else (),
+    )
+    monkeypatch.setattr(
+        learning_cli,
+        "load_random_waypoint_trace_store",
+        lambda _path: trace_store,
+    )
     calls = []
 
     def collect(**kwargs):
@@ -123,10 +155,9 @@ def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):
     monkeypatch.setattr(learning_cli, "collect_teacher_episode", collect)
     args = Namespace(
         output=tmp_path,
-        event_count=2,
+        trace_store=tmp_path / "traces",
         budgets=(40,),
         candidates=("girard", "scott"),
-        conditions=("random_waypoint",),
         train_seeds=1,
         validation_seeds=0,
         test_seeds=0,
@@ -142,6 +173,7 @@ def test_collection_reuses_validated_trace_budget_shards(tmp_path, monkeypatch):
     dataset, _, manifest = load_ranking_dataset(tmp_path / "dataset")
     assert dataset.num_samples == 1
     assert manifest["shard_count"] == 1
+    assert manifest["trace_store_manifest_sha256"] == "store-hash"
 
 
 def _collected_sample(
