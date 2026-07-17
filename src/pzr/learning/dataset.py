@@ -8,6 +8,8 @@ from typing import Sequence
 import numpy as np
 from numpy.typing import NDArray
 
+from pzr.learning.targets import tolerant_best_mask
+
 
 @dataclass(frozen=True)
 class RankingDataset:
@@ -59,6 +61,10 @@ class RankingDataset:
             costs.shape[0] and np.any(~np.any(tie_mask, axis=1))
         ):
             raise ValueError("tie mask must select at least one feasible candidate")
+        if costs.shape[0] and not np.array_equal(
+            tie_mask, tolerant_best_mask(costs, feasible),
+        ):
+            raise ValueError("tie mask does not follow the ranking target tolerance")
         features.setflags(write=False)
         costs.setflags(write=False)
         feasible.setflags(write=False)

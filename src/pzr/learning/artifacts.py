@@ -10,9 +10,10 @@ import numpy as np
 import pandas as pd
 
 from pzr.learning.dataset import RankingDataset
+from pzr.learning.targets import TARGET_CONTRACT
 
 
-RANKING_DATASET_SCHEMA = "pzr.ranking-dataset.v1"
+RANKING_DATASET_SCHEMA = "pzr.ranking-dataset.v2"
 CANDIDATE_COST_COLUMNS = (
     "sample_id",
     "candidate",
@@ -51,6 +52,7 @@ def write_ranking_dataset(
         "num_samples": dataset.num_samples,
         "candidate_names": list(dataset.candidate_names),
         "feature_names": list(dataset.feature_names),
+        "target_contract": TARGET_CONTRACT,
         "splits": {
             split: dataset.splits.count(split)
             for split in sorted(set(dataset.splits))
@@ -69,6 +71,8 @@ def load_ranking_dataset(
     manifest = json.loads((directory / "manifest.json").read_text())
     if manifest.get("schema") != RANKING_DATASET_SCHEMA:
         raise ValueError("unsupported ranking dataset schema")
+    if manifest.get("target_contract") != TARGET_CONTRACT:
+        raise ValueError("ranking dataset target contract differs")
     with np.load(directory / "samples.npz", allow_pickle=False) as arrays:
         dataset = RankingDataset(
             features=arrays["features"],

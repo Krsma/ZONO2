@@ -15,6 +15,13 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
 from pzr.learning.dataset import RankingDataset
+from pzr.learning.targets import (
+    ABSOLUTE_TOLERANCE,
+    RELATIVE_TOLERANCE,
+    TARGET_CONTRACT,
+    rankable_state_mask,
+    tolerant_best_mask,
+)
 
 
 @dataclass(frozen=True)
@@ -108,6 +115,8 @@ class RankingMetrics:
     mean_chosen_regret: float
     max_chosen_regret: float
     feasible_selection_rate: float
+    rankable_states: int
+    skipped_tie_states: int
 
 
 @dataclass(frozen=True)
@@ -156,21 +165,24 @@ class RankingPolicy:
         directory.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), directory / "weights.pt")
         payload = {
-            "schema": "pzr.reducer-ranker.v1",
+            "schema": "pzr.reducer-ranker.v2",
             "feature_schema": asdict(self.feature_schema),
             "candidate_names": list(self.candidate_names),
             "hidden_sizes": list(self.model.hidden_sizes),
             "normalizer_mean": self.normalizer.mean.tolist(),
             "normalizer_std": self.normalizer.std.tolist(),
             "torch_version": torch.__version__,
+            "target_contract": TARGET_CONTRACT,
         }
         (directory / "model.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
 
     @classmethod
     def load(cls, directory: Path) -> "RankingPolicy":
         payload = json.loads((directory / "model.json").read_text())
-        if payload.get("schema") != "pzr.reducer-ranker.v1":
+        if payload.get("schema") != "pzr.reducer-ranker.v2":
             raise ValueError("unsupported reducer ranker schema")
+        if payload.get("target_contract") != TARGET_CONTRACT:
+            raise ValueError("reducer ranker target contract differs")
         schema_payload = payload["feature_schema"]
         schema = FeatureSchema(
             name=str(schema_payload["name"]),
@@ -198,30 +210,27 @@ def cost_sensitive_pairwise_loss(
     scores: Tensor,
     teacher_costs: Tensor,
     feasible: Tensor,
-    *,
-    gap_cap: float = 10.0,
 ) -> Tensor:
-    """Return weighted pairwise loss with explicit infeasibility ordering."""
+    """Average independently normalized pairwise softplus losses over states."""
     if scores.shape != teacher_costs.shape or feasible.shape != scores.shape:
         raise ValueError("score, cost, and feasibility tensors must align")
     safe_costs = torch.where(feasible, teacher_costs, torch.zeros_like(teacher_costs))
-    positive_inf = torch.full_like(safe_costs, float("inf"))
-    best = torch.where(feasible, safe_costs, positive_inf).amin(dim=1)
-    scale = torch.maximum(best.abs(), torch.ones_like(best))
-    tolerance = torch.maximum(
-        torch.full_like(best, 1e-9),
-        best.abs() * 1e-9,
-    )
     cost_i = safe_costs.unsqueeze(2)
     cost_j = safe_costs.unsqueeze(1)
     feasible_i = feasible.unsqueeze(2)
     feasible_j = feasible.unsqueeze(1)
     gap = cost_j - cost_i
-    ranked = feasible_i & feasible_j & (gap > tolerance[:, None, None])
+    tolerance = torch.maximum(
+        torch.full_like(gap, ABSOLUTE_TOLERANCE),
+        RELATIVE_TOLERANCE * torch.maximum(cost_i.abs(), cost_j.abs()),
+    )
+    ranked = feasible_i & feasible_j & (gap > tolerance)
     feasible_over_infeasible = feasible_i & ~feasible_j
+    meaningful_gaps = torch.where(ranked, gap, torch.zeros_like(gap))
+    largest_gap = meaningful_gaps.amax(dim=(1, 2), keepdim=True)
     weights = torch.where(
-        ranked,
-        torch.clamp(gap / scale[:, None, None], max=gap_cap),
+        largest_gap > 0.0,
+        meaningful_gaps / torch.clamp_min(largest_gap, ABSOLUTE_TOLERANCE),
         torch.zeros_like(gap),
     )
     weights = torch.where(
@@ -230,10 +239,13 @@ def cost_sensitive_pairwise_loss(
         weights,
     )
     score_margin = scores.unsqueeze(2) - scores.unsqueeze(1)
-    total_weight = weights.sum()
-    if not bool(total_weight > 0):
+    state_weight = weights.sum(dim=(1, 2))
+    rankable = state_weight > 0.0
+    if not bool(torch.any(rankable)):
         return scores.sum() * 0.0
-    return (weights * F.softplus(score_margin)).sum() / total_weight
+    state_loss = (weights * F.softplus(score_margin)).sum(dim=(1, 2))
+    state_loss = state_loss[rankable] / state_weight[rankable]
+    return state_loss.mean()
 
 
 def train_ranking_policy(
@@ -343,8 +355,7 @@ def evaluate_ranking(policy: RankingPolicy, dataset: RankingDataset) -> RankingM
     chosen_cost = dataset.teacher_costs[rows, chosen]
     scale = np.maximum(np.abs(best), 1.0)
     regret = np.where(selected_feasible, np.maximum((chosen_cost - best) / scale, 0.0), 10.0)
-    tolerance = np.maximum(1e-9, np.abs(best) * 1e-9)
-    top1 = selected_feasible & (chosen_cost <= best + tolerance)
+    top1 = tolerant_best_mask(dataset.teacher_costs, dataset.feasible)[rows, chosen]
     correct = total = 0
     for row in range(dataset.num_samples):
         for left in range(dataset.num_candidates):
@@ -352,15 +363,33 @@ def evaluate_ranking(policy: RankingPolicy, dataset: RankingDataset) -> RankingM
                 if not dataset.feasible[row, left] or not dataset.feasible[row, right]:
                     continue
                 gap = dataset.teacher_costs[row, right] - dataset.teacher_costs[row, left]
-                if abs(gap) <= tolerance[row]:
+                tolerance = max(
+                    ABSOLUTE_TOLERANCE,
+                    RELATIVE_TOLERANCE * max(
+                        abs(dataset.teacher_costs[row, left]),
+                        abs(dataset.teacher_costs[row, right]),
+                    ),
+                )
+                if abs(gap) <= tolerance:
                     continue
                 predicted = scores[row, right] - scores[row, left]
                 correct += int(np.sign(gap) == np.sign(predicted))
                 total += 1
+        for left in range(dataset.num_candidates):
+            for right in range(left + 1, dataset.num_candidates):
+                if dataset.feasible[row, left] == dataset.feasible[row, right]:
+                    continue
+                better = left if dataset.feasible[row, left] else right
+                worse = right if dataset.feasible[row, left] else left
+                correct += int(scores[row, better] < scores[row, worse])
+                total += 1
+    rankable = rankable_state_mask(dataset.teacher_costs, dataset.feasible)
     return RankingMetrics(
         pairwise_accuracy=float(correct / total) if total else 1.0,
         top1_accuracy=float(np.mean(top1)),
         mean_chosen_regret=float(np.mean(regret)),
         max_chosen_regret=float(np.max(regret)),
         feasible_selection_rate=float(np.mean(selected_feasible)),
+        rankable_states=int(np.count_nonzero(rankable)),
+        skipped_tie_states=int(np.count_nonzero(~rankable)),
     )

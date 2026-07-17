@@ -42,6 +42,7 @@ def test_ranking_dataset_artifact_round_trip_is_non_empty(tmp_path):
     )
     assert tuple(metadata["sample_id"]) == loaded.sample_ids
     assert manifest["teacher"] == "full_width"
+    assert manifest["target_contract"]["schema"] == "pzr.reducer-ranking-target.v2"
     for name in ("samples.npz", "samples.csv", "candidate_costs.csv", "manifest.json"):
         assert (tmp_path / name).stat().st_size > 0
 

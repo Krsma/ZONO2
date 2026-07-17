@@ -12,6 +12,7 @@ import pandas as pd
 
 from pzr.learning.artifacts import write_ranking_dataset
 from pzr.learning.dataset import RankingDataset
+from pzr.learning.targets import tolerant_best_mask
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
 from pzr.rtlola.features import (
@@ -101,7 +102,7 @@ def collect_teacher_episode(
             costs, feasible = _aligned_root_costs(
                 decision.root_evaluations, candidate_names,
             )
-            tie_mask = _tie_mask(costs, feasible)
+            tie_mask = tolerant_best_mask(costs, feasible)
             behavior_name = "teacher" if behavior_policy is None else "learned"
             sample_id = (
                 f"{trace_id}:{behavior_name}:budget-{budget}:step-{step}"
@@ -257,9 +258,3 @@ def _aligned_root_costs(
         for index, name in enumerate(candidate_names)
     ])
     return costs, feasible
-
-
-def _tie_mask(costs: np.ndarray, feasible: np.ndarray) -> np.ndarray:
-    best = float(np.min(costs[feasible]))
-    tolerance = max(1e-9, abs(best) * 1e-9)
-    return feasible & (costs <= best + tolerance)
