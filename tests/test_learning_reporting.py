@@ -37,12 +37,15 @@ def test_learning_plots_are_non_empty(tmp_path):
         for step in range(2)
     ])
 
-    write_learning_plots(timeseries, summary, tmp_path)
+    write_learning_plots(
+        timeseries, summary, tmp_path, learned_methods=("learned_direct",),
+    )
 
     assert {path.name for path in tmp_path.glob("*.png")} == {
         "metrics_vs_budget.png",
         "generalization_by_trace.png",
-        "candidate_selection.png",
-        "learned_loss_over_time.png",
+        "stage_ablation.png",
+        "candidate_composition_learned_direct.png",
+        "loss_over_time_learned_direct.png",
     }
     assert all(path.stat().st_size > 0 for path in tmp_path.glob("*.png"))

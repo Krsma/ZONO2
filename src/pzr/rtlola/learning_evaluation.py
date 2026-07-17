@@ -8,6 +8,7 @@ import json
 from multiprocessing import get_context
 from pathlib import Path
 import re
+from typing import Mapping
 
 import numpy as np
 import pandas as pd
@@ -31,7 +32,7 @@ from pzr.rtlola.learned_policy import RtlolaRankingPolicy
 from pzr.rtlola.robot_arm import ROBOT_ARM_TRACE_ROWS
 
 
-LEARNING_EVALUATION_SCHEMA = "pzr.learning-evaluation.v2"
+LEARNING_EVALUATION_SCHEMA = "pzr.learning-evaluation.v3"
 COMPARISON_METRICS = (
     "fpr",
     "fnr",
@@ -48,7 +49,7 @@ COMPARISON_METRICS = (
 @dataclass(frozen=True)
 class FixedLearningEvaluationConfig:
     output: Path
-    model_name: str
+    model_names: tuple[str, ...]
     trace_kinds: tuple[str, ...]
     budgets: tuple[int, ...]
     baselines: tuple[str, ...]
@@ -58,10 +59,14 @@ class FixedLearningEvaluationConfig:
     beam_width: int = 4
 
     def __post_init__(self) -> None:
-        if not re.fullmatch(r"[A-Za-z0-9_.-]+", self.model_name):
-            raise ValueError("model name must be filesystem-safe")
-        if self.model_name in self.baselines:
-            raise ValueError("learned model name collides with a baseline")
+        if not self.model_names or any(
+            not re.fullmatch(r"[A-Za-z0-9_.-]+", name) for name in self.model_names
+        ):
+            raise ValueError("model names must be non-empty and filesystem-safe")
+        if len(set(self.model_names)) != len(self.model_names):
+            raise ValueError("learned model names must be unique")
+        if set(self.model_names) & set(self.baselines):
+            raise ValueError("learned model names collide with baselines")
         if not self.trace_kinds or not self.budgets or not self.baselines:
             raise ValueError("evaluation traces, budgets, and baselines must be non-empty")
         if len(set(self.baselines)) != len(self.baselines):
@@ -72,18 +77,24 @@ class FixedLearningEvaluationConfig:
 
 def run_fixed_learning_evaluation(
     config: FixedLearningEvaluationConfig,
-    policy: RtlolaRankingPolicy,
+    policies: Mapping[str, RtlolaRankingPolicy],
     *,
-    model_sha256: str,
+    model_sha256: Mapping[str, str],
     source_sha256: str,
-    model_directory: Path | None = None,
+    model_directories: Mapping[str, Path] | None = None,
     workers: int = 1,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     """Run or resume every exact fixed-trace evaluation cell."""
     if workers < 1:
         raise ValueError("evaluation workers must be positive")
-    if workers > 1 and model_directory is None:
-        raise ValueError("parallel learned evaluation requires the model directory")
+    if set(policies) != set(config.model_names) or set(model_sha256) != set(
+        config.model_names
+    ):
+        raise ValueError("named learned policies, hashes, and configuration must align")
+    if model_directories is not None and set(model_directories) != set(config.model_names):
+        raise ValueError("named model directories and configuration must align")
+    if workers > 1 and model_directories is None:
+        raise ValueError("parallel learned evaluation requires model directories")
     experiment_fingerprint = _experiment_fingerprint(
         config, model_sha256=model_sha256, source_sha256=source_sha256,
     )
@@ -93,7 +104,7 @@ def run_fixed_learning_evaluation(
         if previous.get("experiment_fingerprint") != experiment_fingerprint:
             raise ValueError(f"stale learning evaluation output: {config.output}")
     config.output.mkdir(parents=True, exist_ok=True)
-    method_names = (*config.baselines, config.model_name)
+    method_names = (*config.baselines, *config.model_names)
     reference_caches = {}
     for trace_kind in config.trace_kinds:
         length = _trace_length(config, trace_kind)
@@ -121,7 +132,7 @@ def run_fixed_learning_evaluation(
                     length=length,
                     budget=budget,
                     method=method,
-                    model_sha256=model_sha256,
+                    model_sha256=model_sha256.get(method),
                     source_sha256=source_sha256,
                 )
                 cell_dir = (
@@ -133,9 +144,13 @@ def run_fixed_learning_evaluation(
                     identity=identity,
                     benchmark_config=cell_config,
                     method=method,
-                    learned_method=config.model_name,
+                    learned_methods=config.model_names,
                     expected_length=length,
-                    model_directory=model_directory,
+                    model_directory=(
+                        model_directories[method]
+                        if model_directories is not None and method in model_directories
+                        else None
+                    ),
                     candidate_names=config.candidate_names,
                 ))
     missing = [job for job in jobs if not (job.directory / "manifest.json").is_file()]
@@ -148,14 +163,15 @@ def run_fixed_learning_evaluation(
                 identity=job.identity,
                 benchmark_config=job.benchmark_config,
                 method=job.method,
-                learned_method=job.learned_method,
-                policy=policy,
+                learned_methods=job.learned_methods,
+                policy=policies.get(job.method),
                 expected_length=job.expected_length,
             )
     else:
         with ProcessPoolExecutor(
             max_workers=workers,
             mp_context=get_context("spawn"),
+            max_tasks_per_child=1,
         ) as executor:
             tuple(executor.map(_run_evaluation_cell_job, missing))
 
@@ -165,8 +181,8 @@ def run_fixed_learning_evaluation(
             identity=job.identity,
             benchmark_config=job.benchmark_config,
             method=job.method,
-            learned_method=job.learned_method,
-            policy=policy,
+            learned_methods=job.learned_methods,
+            policy=policies.get(job.method),
             expected_length=job.expected_length,
         )
         for job in jobs
@@ -185,8 +201,10 @@ def run_fixed_learning_evaluation(
         "budgets": list(config.budgets),
         "candidate_names": list(config.candidate_names),
         "baselines": list(config.baselines),
-        "model_name": config.model_name,
-        "model_sha256": model_sha256,
+        "models": {
+            name: {"sha256": model_sha256[name]}
+            for name in config.model_names
+        },
         "pzr_source_sha256": source_sha256,
         "experiment_fingerprint": experiment_fingerprint,
         "cell_count": len(completed_summaries),
@@ -206,7 +224,7 @@ class _EvaluationCellJob:
     identity: dict[str, object]
     benchmark_config: RtlolaBenchmarkConfig
     method: str
-    learned_method: str
+    learned_methods: tuple[str, ...]
     expected_length: int
     model_directory: Path | None
     candidate_names: tuple[str, ...]
@@ -214,7 +232,7 @@ class _EvaluationCellJob:
 
 def _run_evaluation_cell_job(job: _EvaluationCellJob) -> None:
     policy = None
-    if job.method == job.learned_method:
+    if job.method in job.learned_methods:
         if job.model_directory is None:
             raise ValueError("learned evaluation worker lacks a model directory")
         policy = RtlolaRankingPolicy(
@@ -226,7 +244,7 @@ def _run_evaluation_cell_job(job: _EvaluationCellJob) -> None:
         identity=job.identity,
         benchmark_config=job.benchmark_config,
         method=job.method,
-        learned_method=job.learned_method,
+        learned_methods=job.learned_methods,
         policy=policy,
         expected_length=job.expected_length,
     )
@@ -235,7 +253,7 @@ def _run_evaluation_cell_job(job: _EvaluationCellJob) -> None:
 def _experiment_fingerprint(
     config: FixedLearningEvaluationConfig,
     *,
-    model_sha256: str,
+    model_sha256: Mapping[str, str],
     source_sha256: str,
 ) -> str:
     payload = {
@@ -243,7 +261,7 @@ def _experiment_fingerprint(
             **asdict(config),
             "output": str(config.output.resolve()),
         },
-        "model_sha256": model_sha256,
+        "model_sha256": dict(sorted(model_sha256.items())),
         "pzr_source_sha256": source_sha256,
         "binding_revision": BINDING_REVISION,
         "interpreter_revision": INTERPRETER_REVISION,
@@ -294,7 +312,7 @@ def _cell_identity(
     length: int,
     budget: int,
     method: str,
-    model_sha256: str,
+    model_sha256: str | None,
     source_sha256: str,
 ) -> dict[str, object]:
     payload = {
@@ -307,7 +325,8 @@ def _cell_identity(
         "horizon": config.horizon,
         "beam_width": config.beam_width,
         "reference_mode": "exact",
-        "model_sha256": model_sha256 if method == config.model_name else None,
+        "exact_reference_contract": "trigger_booleans_and_logical_row_center_radius_v1",
+        "model_sha256": model_sha256 if method in config.model_names else None,
         "pzr_source_sha256": source_sha256,
         "binding_revision": BINDING_REVISION,
         "interpreter_revision": INTERPRETER_REVISION,
@@ -322,7 +341,7 @@ def _load_or_run_cell(
     identity: dict[str, object],
     benchmark_config: RtlolaBenchmarkConfig,
     method: str,
-    learned_method: str,
+    learned_methods: tuple[str, ...],
     policy: RtlolaRankingPolicy | None,
     expected_length: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
@@ -336,11 +355,11 @@ def _load_or_run_cell(
         _validate_cell(timeseries, summary, method, expected_length)
         return timeseries, summary
 
-    if method == learned_method:
+    if method in learned_methods:
         if policy is None:
             raise ValueError("learned evaluation cell lacks a ranking policy")
         result = run_direct_policy_benchmark(
-            benchmark_config, policy, method=learned_method,
+            benchmark_config, policy, method=method,
         )
     else:
         result = run_benchmark(benchmark_config)
@@ -410,12 +429,25 @@ def _write_evaluation_reports(
         micro_trigger_metrics(summary), config.output / "micro_trigger_metrics.csv",
     )
     comparisons = pd.concat([
-        comparison_to_baseline(summary, config.model_name, baseline)
+        comparison_to_baseline(summary, learned_method, baseline)
+        for learned_method in config.model_names
         for baseline in config.baselines
     ], ignore_index=True)
-    _write_csv_atomic(comparisons, config.output / "learned_comparisons.csv")
+    _write_csv_atomic(comparisons, config.output / "method_comparisons.csv")
+    static_methods = tuple(
+        method for method in config.baselines
+        if method in {"girard", "scott", "pca", "combastel"}
+    )
+    _write_csv_atomic(
+        best_static_metrics(summary, static_methods),
+        config.output / "best_static_metrics.csv",
+    )
+    _write_csv_atomic(
+        stage_ablation(summary, config.model_names),
+        config.output / "stage_ablation.csv",
+    )
     write_learning_plots(
-        timeseries, summary, config.output / "plots", learned_method=config.model_name,
+        timeseries, summary, config.output / "plots", learned_methods=config.model_names,
     )
 
 
@@ -529,6 +561,74 @@ def comparison_to_baseline(
                 ),
             })
     return pd.DataFrame(rows)
+
+
+def best_static_metrics(
+    summary: pd.DataFrame,
+    static_methods: tuple[str, ...],
+) -> pd.DataFrame:
+    """Select the lowest static method independently for every reported metric."""
+    if not static_methods:
+        raise ValueError("best-static reporting requires a static reducer")
+    rows = []
+    static = summary[summary["method"].isin(static_methods)]
+    for (trace_kind, budget), frame in static.groupby(["trace_kind", "budget"]):
+        ordered = frame.assign(
+            _method_order=frame["method"].map({
+                method: index for index, method in enumerate(static_methods)
+            }),
+        ).sort_values("_method_order")
+        if set(ordered["method"]) != set(static_methods):
+            raise ValueError("static evaluation cells do not align")
+        for metric in COMPARISON_METRICS:
+            values = ordered[metric].to_numpy(dtype=np.float64)
+            finite = np.isfinite(values)
+            if "approx_loss" in metric and not finite.all():
+                raise ValueError("best-static native loss contains non-finite values")
+            best_index = (
+                int(np.argmin(np.where(finite, values, np.inf)))
+                if finite.any() else None
+            )
+            rows.append({
+                "trace_kind": trace_kind,
+                "budget": int(budget),
+                "metric": metric,
+                "defined_static_count": int(np.count_nonzero(finite)),
+                "best_static_method": (
+                    str(ordered.iloc[best_index]["method"])
+                    if best_index is not None else None
+                ),
+                "best_static_value": (
+                    float(values[best_index]) if best_index is not None else float("nan")
+                ),
+            })
+    return pd.DataFrame(rows)
+
+
+def stage_ablation(
+    summary: pd.DataFrame,
+    learned_methods: tuple[str, ...],
+) -> pd.DataFrame:
+    """Compare consecutive learned stages and the first stage with the final one."""
+    pairs = list(zip(learned_methods[:-1], learned_methods[1:]))
+    if len(learned_methods) > 2:
+        pairs.append((learned_methods[0], learned_methods[-1]))
+    rows = []
+    for earlier, later in pairs:
+        comparison = comparison_to_baseline(summary, later, earlier).rename(columns={
+            "learned_method": "later_stage",
+            "baseline": "earlier_stage",
+            "learned_value": "later_value",
+            "baseline_value": "earlier_value",
+        })
+        rows.append(comparison)
+    columns = [
+        "trace_kind", "budget", "later_stage", "earlier_stage", "metric",
+        "later_value", "earlier_value", "difference", "ratio",
+    ]
+    return pd.concat(rows, ignore_index=True)[columns] if rows else pd.DataFrame(
+        columns=columns,
+    )
 
 
 def _write_csv_atomic(frame: pd.DataFrame, path: Path) -> None:

@@ -1,4 +1,5 @@
 from types import SimpleNamespace
+import json
 
 import pandas as pd
 import pytest
@@ -6,9 +7,15 @@ import pytest
 import pzr.rtlola.learning_evaluation as evaluation
 from pzr.rtlola.learning_evaluation import (
     FixedLearningEvaluationConfig,
+    best_static_metrics,
     comparison_to_baseline,
     run_fixed_learning_evaluation,
 )
+
+
+MODEL_NAMES = ("learned_base", "learned_dagger1", "learned_dagger2")
+MODEL_HASHES = {name: f"hash-{name}" for name in MODEL_NAMES}
+POLICIES = {name: object() for name in MODEL_NAMES}
 
 
 def _result(config, method):
@@ -70,7 +77,7 @@ def test_fixed_learning_evaluation_resumes_validated_cells(tmp_path, monkeypatch
     monkeypatch.setattr(evaluation, "run_direct_policy_benchmark", run_learned)
     config = FixedLearningEvaluationConfig(
         output=tmp_path,
-        model_name="learned_geometry15",
+        model_names=MODEL_NAMES,
         trace_kinds=("figure8",),
         budgets=(40,),
         baselines=("girard", "mpc_terminal_full_width"),
@@ -79,20 +86,32 @@ def test_fixed_learning_evaluation_resumes_validated_cells(tmp_path, monkeypatch
     )
 
     run_fixed_learning_evaluation(
-        config, object(), model_sha256="model", source_sha256="source",
+        config, POLICIES, model_sha256=MODEL_HASHES, source_sha256="source",
     )
     assert calls.count(("baseline", "girard")) == 1
     assert calls.count(("baseline", "mpc_terminal_full_width")) == 1
-    assert calls.count(("learned", "learned_geometry15")) == 1
+    for name in MODEL_NAMES:
+        assert calls.count(("learned", name)) == 1
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["cell_count"] == 5
+    learned_cell = json.loads(
+        (tmp_path / "cells/figure8/budget-40/learned_base/manifest.json").read_text()
+    )
+    static_cell = json.loads(
+        (tmp_path / "cells/figure8/budget-40/girard/manifest.json").read_text()
+    )
+    assert learned_cell["model_sha256"] == MODEL_HASHES["learned_base"]
+    assert static_cell["model_sha256"] is None
     calls.clear()
     run_fixed_learning_evaluation(
-        config, object(), model_sha256="model", source_sha256="source",
+        config, POLICIES, model_sha256=MODEL_HASHES, source_sha256="source",
     )
     assert calls == [("reference", "figure8")]
     for filename in (
         "timeseries.csv", "summary.csv", "candidate_selection.csv",
         "decision_accounting.csv", "macro_metrics.csv",
-        "micro_trigger_metrics.csv", "learned_comparisons.csv", "manifest.json",
+        "micro_trigger_metrics.csv", "method_comparisons.csv",
+        "best_static_metrics.csv", "stage_ablation.csv", "manifest.json",
     ):
         assert (tmp_path / filename).stat().st_size > 0
 
@@ -109,7 +128,7 @@ def test_fixed_learning_evaluation_rejects_stale_cell(tmp_path, monkeypatch):
     )
     config = FixedLearningEvaluationConfig(
         output=tmp_path,
-        model_name="learned_geometry15",
+        model_names=MODEL_NAMES,
         trace_kinds=("figure8",),
         budgets=(40,),
         baselines=("girard",),
@@ -117,12 +136,12 @@ def test_fixed_learning_evaluation_rejects_stale_cell(tmp_path, monkeypatch):
         length=2,
     )
     run_fixed_learning_evaluation(
-        config, object(), model_sha256="model", source_sha256="source",
+        config, POLICIES, model_sha256=MODEL_HASHES, source_sha256="source",
     )
 
     with pytest.raises(ValueError, match="stale"):
         run_fixed_learning_evaluation(
-            config, object(), model_sha256="model", source_sha256="changed",
+            config, POLICIES, model_sha256=MODEL_HASHES, source_sha256="changed",
         )
 
 
@@ -147,8 +166,9 @@ def test_fixed_learning_evaluation_prepares_references_before_parallel_cells(
     )
 
     class ImmediatePool:
-        def __init__(self, *, max_workers, mp_context):
+        def __init__(self, *, max_workers, mp_context, max_tasks_per_child):
             del mp_context
+            assert max_tasks_per_child == 1
             calls.append(("pool", max_workers))
 
         def __enter__(self):
@@ -163,13 +183,13 @@ def test_fixed_learning_evaluation_prepares_references_before_parallel_cells(
     monkeypatch.setattr(evaluation, "ProcessPoolExecutor", ImmediatePool)
 
     def run_job(job):
-        policy = object() if job.method == job.learned_method else None
+        policy = object() if job.method in job.learned_methods else None
         evaluation._load_or_run_cell(
             directory=job.directory,
             identity=job.identity,
             benchmark_config=job.benchmark_config,
             method=job.method,
-            learned_method=job.learned_method,
+            learned_methods=job.learned_methods,
             policy=policy,
             expected_length=job.expected_length,
         )
@@ -177,7 +197,7 @@ def test_fixed_learning_evaluation_prepares_references_before_parallel_cells(
     monkeypatch.setattr(evaluation, "_run_evaluation_cell_job", run_job)
     config = FixedLearningEvaluationConfig(
         output=tmp_path,
-        model_name="learned_geometry15",
+        model_names=MODEL_NAMES,
         trace_kinds=("figure8", "square"),
         budgets=(40,),
         baselines=("girard",),
@@ -187,16 +207,16 @@ def test_fixed_learning_evaluation_prepares_references_before_parallel_cells(
 
     _, summary = run_fixed_learning_evaluation(
         config,
-        object(),
-        model_sha256="model",
+        POLICIES,
+        model_sha256=MODEL_HASHES,
         source_sha256="source",
-        model_directory=tmp_path / "model",
+        model_directories={name: tmp_path / name for name in MODEL_NAMES},
         workers=2,
     )
 
     assert calls[:2] == [("reference", "figure8"), ("reference", "square")]
     assert calls[2] == ("pool", 2)
-    assert len(summary) == 4
+    assert len(summary) == 8
 
 
 def test_learned_comparison_requires_aligned_cells():
@@ -206,3 +226,73 @@ def test_learned_comparison_requires_aligned_cells():
     ])
     with pytest.raises(ValueError, match="do not align"):
         comparison_to_baseline(summary, "learned", "girard")
+
+
+def test_best_static_is_selected_independently_for_each_metric():
+    rows = []
+    for method, loss, width in (("girard", 1.0, 5.0), ("scott", 2.0, 3.0)):
+        row = {
+            "trace_kind": "figure8", "budget": 40, "method": method,
+            **{metric: 4.0 for metric in evaluation.COMPARISON_METRICS},
+        }
+        row["mean_approx_loss"] = loss
+        row["mean_state_width"] = width
+        rows.append(row)
+
+    result = best_static_metrics(pd.DataFrame(rows), ("girard", "scott"))
+
+    loss = result[result["metric"] == "mean_approx_loss"].iloc[0]
+    width = result[result["metric"] == "mean_state_width"].iloc[0]
+    assert loss["best_static_method"] == "girard"
+    assert width["best_static_method"] == "scott"
+
+
+def test_best_static_reports_undefined_trigger_metrics_without_dropping_cells():
+    rows = []
+    for method in ("girard", "scott"):
+        row = {
+            "trace_kind": "figure8", "budget": 40, "method": method,
+            **{metric: 1.0 for metric in evaluation.COMPARISON_METRICS},
+        }
+        row["fpr"] = float("nan")
+        rows.append(row)
+
+    result = best_static_metrics(pd.DataFrame(rows), ("girard", "scott"))
+
+    fpr = result[result["metric"] == "fpr"].iloc[0]
+    assert fpr["defined_static_count"] == 0
+    assert pd.isna(fpr["best_static_method"])
+    assert pd.isna(fpr["best_static_value"])
+
+
+def test_full_evaluation_matrix_contains_192_validated_cells(tmp_path, monkeypatch):
+    monkeypatch.setattr(evaluation, "prepare_reference_cache", lambda _config: None)
+    monkeypatch.setattr(
+        evaluation, "run_benchmark",
+        lambda config: _result(config, config.methods[0]),
+    )
+    monkeypatch.setattr(
+        evaluation, "run_direct_policy_benchmark",
+        lambda config, _policy, *, method: _result(config, method),
+    )
+    monkeypatch.setattr(evaluation, "write_learning_plots", lambda *_args, **_kwargs: None)
+    config = FixedLearningEvaluationConfig(
+        output=tmp_path,
+        model_names=MODEL_NAMES,
+        trace_kinds=(
+            "figure8", "figure8_drift", "random", "random_drift",
+            "square", "square_drift",
+        ),
+        budgets=(40, 80, 120, 180),
+        baselines=("girard", "scott", "pca", "combastel", "mpc_terminal_full_width"),
+        candidate_names=("girard", "scott", "pca", "combastel"),
+        length=1,
+    )
+
+    _, summary = run_fixed_learning_evaluation(
+        config, POLICIES, model_sha256=MODEL_HASHES, source_sha256="source",
+    )
+
+    assert len(summary) == 192
+    manifest = json.loads((tmp_path / "manifest.json").read_text())
+    assert manifest["cell_count"] == 192

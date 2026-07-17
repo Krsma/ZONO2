@@ -15,19 +15,25 @@ def write_learning_plots(
     summary: pd.DataFrame,
     output: Path,
     *,
-    learned_method: str = "learned_direct",
+    learned_methods: tuple[str, ...] = ("learned_direct",),
 ) -> None:
     if timeseries.empty or summary.empty:
         raise ValueError("learning plots require non-empty evaluation artifacts")
     output.mkdir(parents=True, exist_ok=True)
     _metric_budget_plot(summary, output / "metrics_vs_budget.png")
     _trace_generalization_plot(summary, output / "generalization_by_trace.png")
-    _candidate_selection_plot(
-        timeseries, output / "candidate_selection.png", learned_method,
-    )
-    _loss_over_time_plot(
-        timeseries, output / "learned_loss_over_time.png", learned_method,
-    )
+    _stage_ablation_plot(summary, output / "stage_ablation.png", learned_methods)
+    for learned_method in learned_methods:
+        _candidate_selection_plot(
+            timeseries,
+            output / f"candidate_composition_{learned_method}.png",
+            learned_method,
+        )
+        _loss_over_time_plot(
+            timeseries,
+            output / f"loss_over_time_{learned_method}.png",
+            learned_method,
+        )
 
 
 def _metric_budget_plot(summary: pd.DataFrame, path: Path) -> None:
@@ -94,5 +100,26 @@ def _loss_over_time_plot(
     axis.set_ylabel("binding-native approximation loss")
     axis.grid(alpha=0.25)
     axis.legend(fontsize=7, ncol=2)
+    figure.savefig(path, dpi=180)
+    plt.close(figure)
+
+
+def _stage_ablation_plot(
+    summary: pd.DataFrame,
+    path: Path,
+    learned_methods: tuple[str, ...],
+) -> None:
+    learned = summary[summary["method"].isin(learned_methods)]
+    grouped = learned.groupby(["method", "budget"], as_index=False)[
+        "mean_approx_loss"
+    ].mean()
+    figure, axis = plt.subplots(figsize=(8, 5), constrained_layout=True)
+    for method in learned_methods:
+        rows = grouped[grouped["method"] == method].sort_values("budget")
+        axis.plot(rows["budget"], rows["mean_approx_loss"], marker="o", label=method)
+    axis.set_xlabel("binding transform bound")
+    axis.set_ylabel("mean binding-native approximation loss")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=7)
     figure.savefig(path, dpi=180)
     plt.close(figure)
