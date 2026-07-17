@@ -13,7 +13,7 @@ from pzr.rtlola.learning_evaluation import (
 )
 
 
-MODEL_NAMES = ("learned_base", "learned_dagger1", "learned_dagger2")
+MODEL_NAMES = ("learned_pairwise_clean", "learned_soft_clean", "learned_soft_dart")
 MODEL_HASHES = {name: f"hash-{name}" for name in MODEL_NAMES}
 POLICIES = {name: object() for name in MODEL_NAMES}
 
@@ -95,12 +95,12 @@ def test_fixed_learning_evaluation_resumes_validated_cells(tmp_path, monkeypatch
     manifest = json.loads((tmp_path / "manifest.json").read_text())
     assert manifest["cell_count"] == 5
     learned_cell = json.loads(
-        (tmp_path / "cells/figure8/budget-40/learned_base/manifest.json").read_text()
+        (tmp_path / "cells/figure8/budget-40/learned_pairwise_clean/manifest.json").read_text()
     )
     static_cell = json.loads(
         (tmp_path / "cells/figure8/budget-40/girard/manifest.json").read_text()
     )
-    assert learned_cell["model_sha256"] == MODEL_HASHES["learned_base"]
+    assert learned_cell["model_sha256"] == MODEL_HASHES["learned_pairwise_clean"]
     assert static_cell["model_sha256"] is None
     calls.clear()
     run_fixed_learning_evaluation(
@@ -109,9 +109,10 @@ def test_fixed_learning_evaluation_resumes_validated_cells(tmp_path, monkeypatch
     assert calls == [("reference", "figure8")]
     for filename in (
         "timeseries.csv", "summary.csv", "candidate_selection.csv",
-        "decision_accounting.csv", "macro_metrics.csv",
+        "decision_accounting.csv", "macro_metrics.csv", "macro_loss_metrics.csv",
+        "macro_width_metrics.csv", "macro_runtime_metrics.csv",
         "micro_trigger_metrics.csv", "method_comparisons.csv",
-        "best_static_metrics.csv", "stage_ablation.csv", "manifest.json",
+        "best_static_metrics.csv", "objective_data_ablation.csv", "manifest.json",
     ):
         assert (tmp_path / filename).stat().st_size > 0
 

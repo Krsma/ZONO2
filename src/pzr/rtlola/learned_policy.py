@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import numpy as np
 
-from pzr.learning.ranker import RankingPolicy
+from pzr.learning.ranker import ReducerPolicy
 from pzr.rtlola.actions import RtlolaActionCatalog
 from pzr.rtlola.engine import (
     RtlolaBindingError,
@@ -16,12 +16,12 @@ from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA, extract_ranking_feat
 from pzr.rtlola.search import RtlolaNoFeasibleAction, RtlolaSearchResult
 
 
-class RtlolaRankingPolicy:
+class RtlolaReducerPolicy:
     """Apply a fixed-catalog PyTorch ranking without inference-time rollouts."""
 
     def __init__(
         self,
-        policy: RankingPolicy,
+        policy: ReducerPolicy,
         catalog: RtlolaActionCatalog,
     ) -> None:
         expected = tuple(catalog.mpc_candidate_names)

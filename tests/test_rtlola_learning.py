@@ -4,15 +4,17 @@ import torch
 
 pytest.importorskip("rlola_python_binding")
 
-from pzr.learning.ranker import FeatureNormalizer, RankingPolicy, ReducerRanker
+from pzr.learning.dart import DartCalibration
+from pzr.learning.ranker import FeatureNormalizer, ReducerPolicy, ReducerScorer
+from pzr.learning.targets import PAIRWISE_OBJECTIVE_CONTRACT, tolerant_best_mask
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
     run_direct_policy_benchmark,
 )
 from pzr.rtlola.engine import RtlolaEngine
-from pzr.rtlola.learning_data import build_ranking_dataset, collect_teacher_episode
-from pzr.rtlola.learned_policy import RtlolaRankingPolicy
+from pzr.rtlola.learning_data import build_reducer_cost_dataset, collect_teacher_episode
+from pzr.rtlola.learned_policy import RtlolaReducerPolicy
 from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA
 from pzr.rtlola.omni import OMNI_EXPECTED_VERDICT_KEYS, OMNI_SPEC, generate_omni_events
 from pzr.rtlola.scenarios import scenario_by_name
@@ -33,7 +35,7 @@ def _overflow_state():
 
 
 def _direct_policy(candidate_names=("girard", "scott")):
-    model = ReducerRanker(RTL_RANKING_FEATURE_SCHEMA, candidate_names)
+    model = ReducerScorer(RTL_RANKING_FEATURE_SCHEMA, candidate_names)
     with torch.no_grad():
         for parameter in model.parameters():
             parameter.zero_()
@@ -43,7 +45,9 @@ def _direct_policy(candidate_names=("girard", "scott")):
         std=np.ones(len(RTL_RANKING_FEATURE_SCHEMA.feature_names), dtype=np.float32),
     )
     catalog = default_action_catalog(candidate_names)
-    return RtlolaRankingPolicy(RankingPolicy(model, normalizer), catalog)
+    return RtlolaReducerPolicy(
+        ReducerPolicy(model, normalizer, PAIRWISE_OBJECTIVE_CONTRACT), catalog,
+    )
 
 
 def test_full_width_teacher_scores_all_roots_without_mutating_live_state():
@@ -86,13 +90,13 @@ def test_teacher_collection_writes_aligned_binding_backed_samples():
         budget=10,
         candidate_names=("girard", "scott"),
     )
-    dataset, metadata = build_ranking_dataset(samples)
+    dataset, metadata = build_reducer_cost_dataset(samples)
 
     assert dataset.num_samples > 0
     assert dataset.candidate_names == ("girard", "scott")
     assert dataset.teacher_costs.shape == (dataset.num_samples, 2)
     assert np.all(np.any(dataset.feasible, axis=1))
-    assert np.all(np.sum(dataset.tie_mask, axis=1) >= 1)
+    assert np.all(np.sum(tolerant_best_mask(dataset.teacher_costs, dataset.feasible), axis=1) >= 1)
     assert set(metadata["teacher_action"]) <= {"girard", "scott", "interval"}
 
 
@@ -122,7 +126,7 @@ def test_direct_policy_features_do_not_depend_on_current_event_values():
             return np.asarray([0.0, 1.0], dtype=np.float32)
 
     ranker = RecordingPolicy()
-    policy = RtlolaRankingPolicy(
+    policy = RtlolaReducerPolicy(
         ranker, default_action_catalog(ranker.candidate_names),
     )
 
@@ -133,25 +137,34 @@ def test_direct_policy_features_do_not_depend_on_current_event_values():
     np.testing.assert_array_equal(ranker.features[0], ranker.features[1])
 
 
-def test_dagger_collection_labels_states_visited_by_learned_behavior():
+def test_dart_collection_executes_one_step_disturbances_under_teacher_control():
     events = generate_omni_events(16, seed=4)
+    calibration = DartCalibration(
+        candidate_names=("girard", "scott"),
+        budgets=(10,),
+        probabilities=np.asarray([[[0.0, 1.0], [1.0, 0.0]]]),
+        row_counts=np.asarray([[10, 10]]),
+        context={},
+    )
     samples = collect_teacher_episode(
         scenario=scenario_by_name("omni_robot"),
         events=events,
-        trace_id="omni-dagger-seed-4",
+        trace_id="omni-dart-seed-4",
         split="train",
         condition="omni",
         seed=4,
         budget=10,
         candidate_names=("girard", "scott"),
-        behavior_policy=_direct_policy(),
+        collection_mode="dart",
+        dart_calibration=calibration,
+        dart_calibration_sha256="calibration-hash",
+        disturbance_seed=7,
     )
 
     assert samples
-    assert {sample.behavior for sample in samples} == {"learned"}
-    assert {sample.behavior_action for sample in samples} <= {
-        "girard", "scott", "interval",
-    }
+    assert {sample.collection_mode for sample in samples} == {"dart"}
+    assert {sample.executed_action for sample in samples} <= {"girard", "scott", "interval"}
+    assert any(sample.disturbed for sample in samples)
 
 
 def test_direct_policy_benchmark_uses_standard_exact_metric_schema(tmp_path):

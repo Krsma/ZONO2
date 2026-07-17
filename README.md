@@ -11,7 +11,7 @@ scenario traces, bounded search, learning, metrics, and artifact generation.
   traces, native transform catalog, MPC search, benchmark runner, and CLI.
 - `../rlola-eval/`: upstream source of truth for the packaged robot-arm
   specification and recorded traces.
-- `src/pzr/learning/`: scenario-neutral cost-sensitive ranking model.
+- `src/pzr/learning/`: scenario-neutral reducer-cost distillation and DART calibration.
 - `rlolapythonbinding/`: pinned RTLola Python binding submodule.
 - `tests/`: pure unit tests and binding-backed semantic tests.
 - `tools/`: binding/MuJoCo environment setup and robot-arm smoke wrapper.
@@ -55,51 +55,56 @@ The Omni scenario provides the historically compatible `canonical` trace and
 calibrated `safe`, `x_violated`, and `y_violated` traces. Numeric public
 `position_x` and `position_y` bounds are included in its artifacts.
 
-Run a small staged current-state ranking smoke:
+Run a small clean soft-distillation smoke:
 
 ```bash
 pzr-learning generate --output /tmp/pzr-learning/traces --event-count 30 \
-  --conditions random_waypoint --seed-count 4
-pzr-learning collect --output /tmp/pzr-learning/base \
+  --conditions random_waypoint --seed-count 3
+pzr-learning collect --output /tmp/pzr-learning/clean \
   --trace-store /tmp/pzr-learning/traces --budgets 40,80 \
-  --train-seeds 2 --validation-seeds 1 --test-seeds 1
-pzr-learning train --dataset base=/tmp/pzr-learning/base/dataset \
-  --output /tmp/pzr-learning/model
+  --train-seeds 2 --validation-seeds 1 --test-seeds 0 \
+  --collection-mode teacher
+pzr-learning train --dataset clean=/tmp/pzr-learning/clean/dataset \
+  --output /tmp/pzr-learning/model-soft-clean --objective soft-kl \
+  --temperature-grid 0.1,0.2 --epochs 2
 ```
 
-Run the resumable two-round Geometry15 experiment with:
+Run the resumable Geometry15 soft-DART experiment with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-balanced-v2-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-soft-dart-v3-7371495-b4cfbf4-e6ecd0b \
   PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
   tools/run_rtlola_learning_full.sh
 ```
 
-The corrected run generates 48 fresh traces: base train/validation seeds
-0--11/12--15, DAgger-1 seeds 16--27/28--31, and DAgger-2 seeds
-32--43/44--47. Collection uses ten spawned workers; evaluation uses four and
+The run generates 48 fresh traces: clean teacher train/validation seeds
+0--19/20--25 and frozen discrete-DART train/validation seeds 26--41/42--47.
+The clean soft model supplies a held-out categorical confusion kernel; each
+disturbance lasts one reducer decision before the teacher retakes control.
+Collection uses ten spawned workers; evaluation uses four and
 recycles each worker after one cell. BLAS, OpenMP, MKL, and NumExpr remain at
 one native thread per worker. Set both worker variables to one for debugging.
 Set `PZR_TRACE_STORE` to reuse an immutable validated trace store with a fresh
 experiment output directory after a source change.
 
 The final exact evaluation has 192 cells: six full traces, four budgets, three
-learned stages, four static reducers, and the two-event full-width MPC teacher.
+learned ablations, four static reducers, and the two-event full-width MPC teacher.
 No corrected result is complete until all 192 cells validate.
 
 Use the same staged pipeline at smoke scale with:
 
 ```bash
-PZR_OUT_DIR=/tmp/pzr-learning-balanced-smoke \
+PZR_OUT_DIR=/tmp/pzr-learning-soft-dart-smoke \
 PZR_EVENT_COUNT=20 PZR_BUDGETS=40 PZR_TRACE_KINDS=figure8 \
-PZR_BASE_TRAIN_SEEDS=2 PZR_BASE_VALIDATION_SEEDS=1 \
-PZR_DAGGER_TRAIN_SEEDS=2 PZR_DAGGER_VALIDATION_SEEDS=1 \
+PZR_CLEAN_TRAIN_SEEDS=2 PZR_CLEAN_VALIDATION_SEEDS=1 \
+PZR_DART_TRAIN_SEEDS=2 PZR_DART_VALIDATION_SEEDS=1 \
+PZR_SOFT_TEMPERATURES=0.1,0.2 PZR_EPOCHS=2 PZR_PATIENCE=2 \
 PZR_COLLECTION_WORKERS=2 PZR_EVALUATION_WORKERS=2 \
 PZR_EVAL_LENGTH=20 tools/run_rtlola_learning_full.sh
 ```
 
-See `science/LEARNING_PIPELINE.md` for the feature contract, seed schedule,
-teacher semantics, aggregation rounds, exact evaluation, and artifact schemas.
+See `science/LEARNING_PIPELINE.md` for the feature contract, soft target,
+discrete-DART calibration, seed schedule, exact evaluation, and artifact schemas.
 Learning runs are intentionally separate from `pzr-benchmark`.
 
 Prepare or resume the full FPR-first robot-arm sweep:
@@ -192,10 +197,11 @@ transform bound. `interval` is an emergency fallback.
   predicted actions.
 - The benchmark reference mode controls offline metrics and caching only;
   binding-loss MPC always constructs its own unreduced horizon rollout.
-- Learned inference uses 15 aggregate current-zonotope/budget features, ranks
+- Learned inference uses 15 aggregate current-zonotope/budget features, scores
   native transforms once, and directly tries them through the binding. It has
   no future-event input or inference-time rollout and never writes a matrix.
-- `none` and fallback actions are excluded from learned targets.
+- Soft targets are normalized from the complete feasible teacher-cost vector;
+  `none` and fallback actions are excluded.
 - Robot-arm and Omni constant calibration generators are kept outside dynamic
   reduction and protected by binding-backed regression tests.
 - Robot-arm trigger labels are the sparse binding keys `Trigger#0` through
@@ -223,7 +229,7 @@ Each benchmark run writes `timeseries.csv`, `summary.csv`, `aggregate.csv`, and
 `run_failures.csv` below the scenario directory, plus `config.yaml`,
 trigger-confusion data, and runtime/loss figures. Incomplete runs are recorded
 in the failure table and excluded from metrics. Learned runs also write policy,
-candidate-cost, training, ranking, metadata, and held-out evaluation files
+candidate-cost, soft-target diagnostics, DART calibration, metadata, and held-out evaluation files
 under `learning/<scenario>/`. The staged pipeline instead writes versioned
 datasets, explicit PyTorch model directories, and generalization evaluation
 artifacts at the user-provided paths.

@@ -1,11 +1,11 @@
-"""PyTorch cost-sensitive reducer ranking."""
+"""PyTorch reducer scoring with pairwise and soft-distillation objectives."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-from typing import Sequence
+from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
@@ -14,14 +14,21 @@ from torch import Tensor, nn
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
-from pzr.learning.dataset import RankingDataset
+from pzr.learning.dataset import ReducerCostDataset
 from pzr.learning.targets import (
     ABSOLUTE_TOLERANCE,
+    PAIRWISE_OBJECTIVE_CONTRACT,
     RELATIVE_TOLERANCE,
-    TARGET_CONTRACT,
+    normalized_regrets,
     rankable_state_mask,
+    soft_objective_contract,
+    soft_teacher_distribution,
     tolerant_best_mask,
 )
+
+
+ObjectiveName = Literal["pairwise", "soft-kl"]
+MODEL_SCHEMA = "pzr.reducer-scorer.v3"
 
 
 @dataclass(frozen=True)
@@ -74,7 +81,7 @@ class FeatureNormalizer:
         return ((values - self.mean) / np.maximum(self.std, 1e-8)).astype(np.float32)
 
 
-class ReducerRanker(nn.Module):
+class ReducerScorer(nn.Module):
     """Fixed-catalog MLP returning one lower-is-better score per candidate."""
 
     def __init__(
@@ -109,34 +116,53 @@ class ReducerRanker(nn.Module):
 
 
 @dataclass(frozen=True)
-class RankingMetrics:
+class ReducerMetrics:
     pairwise_accuracy: float
     top1_accuracy: float
-    mean_chosen_regret: float
-    max_chosen_regret: float
+    mean_chosen_normalized_regret: float
+    max_chosen_normalized_regret: float
     feasible_selection_rate: float
+    infeasible_selection_count: int
+    valid_states: int
+    all_infeasible_states: int
     rankable_states: int
     skipped_tie_states: int
+    target_entropy: float
+    predicted_entropy: float
+    kl_divergence: float
+    infeasible_probability: float
 
 
 @dataclass(frozen=True)
-class RankingTrainingResult:
+class ReducerTrainingResult:
+    objective: str
     epochs: int
     best_epoch: int
     train_loss_history: tuple[float, ...]
     val_loss_history: tuple[float, ...]
-    train_metrics: RankingMetrics
-    val_metrics: RankingMetrics
+    train_kl_history: tuple[float, ...]
+    val_kl_history: tuple[float, ...]
+    train_feasibility_history: tuple[float, ...]
+    val_feasibility_history: tuple[float, ...]
+    train_metrics: ReducerMetrics
+    val_metrics: ReducerMetrics
 
 
-class RankingPolicy:
-    """Validated inference wrapper for a trained reducer ranker."""
+class ReducerPolicy:
+    """Validated direct-inference wrapper for a reducer scorer."""
 
-    def __init__(self, model: ReducerRanker, normalizer: FeatureNormalizer) -> None:
+    def __init__(
+        self,
+        model: ReducerScorer,
+        normalizer: FeatureNormalizer,
+        objective_contract: dict[str, object],
+    ) -> None:
         if normalizer.mean.size != len(model.feature_schema.feature_names):
             raise ValueError("model and normalizer feature dimensions differ")
+        _validate_objective_contract(objective_contract)
         self.model = model.cpu().eval()
         self.normalizer = normalizer
+        self.objective_contract = dict(objective_contract)
 
     @property
     def candidate_names(self) -> tuple[str, ...]:
@@ -151,8 +177,16 @@ class RankingPolicy:
         normalized = self.normalizer.transform(transformed)
         tensor = torch.as_tensor(normalized, dtype=torch.float32)
         with torch.no_grad():
-            result = self.model(tensor).cpu().numpy().astype(np.float32)
-        return result
+            return self.model(tensor).cpu().numpy().astype(np.float32)
+
+    def predict_probabilities(
+        self,
+        raw_features: NDArray[np.floating],
+    ) -> NDArray[np.float64]:
+        scores = np.asarray(self.predict_scores(raw_features), dtype=np.float64)
+        shifted = -scores - np.max(-scores, axis=-1, keepdims=True)
+        weights = np.exp(shifted)
+        return weights / np.sum(weights, axis=-1, keepdims=True)
 
     def rank_candidates(self, raw_features: NDArray[np.floating]) -> list[str]:
         scores = self.predict_scores(raw_features)
@@ -165,24 +199,24 @@ class RankingPolicy:
         directory.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), directory / "weights.pt")
         payload = {
-            "schema": "pzr.reducer-ranker.v2",
+            "schema": MODEL_SCHEMA,
             "feature_schema": asdict(self.feature_schema),
             "candidate_names": list(self.candidate_names),
             "hidden_sizes": list(self.model.hidden_sizes),
             "normalizer_mean": self.normalizer.mean.tolist(),
             "normalizer_std": self.normalizer.std.tolist(),
             "torch_version": torch.__version__,
-            "target_contract": TARGET_CONTRACT,
+            "objective_contract": self.objective_contract,
         }
         (directory / "model.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
 
     @classmethod
-    def load(cls, directory: Path) -> "RankingPolicy":
+    def load(cls, directory: Path) -> "ReducerPolicy":
         payload = json.loads((directory / "model.json").read_text())
-        if payload.get("schema") != "pzr.reducer-ranker.v2":
-            raise ValueError("unsupported reducer ranker schema")
-        if payload.get("target_contract") != TARGET_CONTRACT:
-            raise ValueError("reducer ranker target contract differs")
+        if payload.get("schema") != MODEL_SCHEMA:
+            raise ValueError("unsupported reducer scorer schema")
+        objective_contract = dict(payload["objective_contract"])
+        _validate_objective_contract(objective_contract)
         schema_payload = payload["feature_schema"]
         schema = FeatureSchema(
             name=str(schema_payload["name"]),
@@ -190,7 +224,7 @@ class RankingPolicy:
             feature_names=tuple(schema_payload["feature_names"]),
             log1p_features=tuple(schema_payload["log1p_features"]),
         )
-        model = ReducerRanker(
+        model = ReducerScorer(
             schema,
             tuple(payload["candidate_names"]),
             tuple(int(value) for value in payload["hidden_sizes"]),
@@ -203,6 +237,7 @@ class RankingPolicy:
                 mean=np.asarray(payload["normalizer_mean"], dtype=np.float32),
                 std=np.asarray(payload["normalizer_std"], dtype=np.float32),
             ),
+            objective_contract,
         )
 
 
@@ -233,25 +268,56 @@ def cost_sensitive_pairwise_loss(
         meaningful_gaps / torch.clamp_min(largest_gap, ABSOLUTE_TOLERANCE),
         torch.zeros_like(gap),
     )
-    weights = torch.where(
-        feasible_over_infeasible,
-        torch.ones_like(weights),
-        weights,
-    )
+    weights = torch.where(feasible_over_infeasible, torch.ones_like(weights), weights)
     score_margin = scores.unsqueeze(2) - scores.unsqueeze(1)
     state_weight = weights.sum(dim=(1, 2))
     rankable = state_weight > 0.0
     if not bool(torch.any(rankable)):
         return scores.sum() * 0.0
     state_loss = (weights * F.softplus(score_margin)).sum(dim=(1, 2))
-    state_loss = state_loss[rankable] / state_weight[rankable]
-    return state_loss.mean()
+    return (state_loss[rankable] / state_weight[rankable]).mean()
 
 
-def train_ranking_policy(
-    dataset: RankingDataset,
+def soft_distillation_loss(
+    scores: Tensor,
+    teacher_probabilities: Tensor,
+    feasible: Tensor,
+    *,
+    feasibility_penalty: float,
+) -> tuple[Tensor, Tensor, Tensor]:
+    """Return state-balanced total, KL, and infeasible-mass losses."""
+    if scores.shape != teacher_probabilities.shape or feasible.shape != scores.shape:
+        raise ValueError("score, target-probability, and feasibility tensors must align")
+    valid = feasible.any(dim=1)
+    if not bool(torch.any(valid)):
+        zero = scores.sum() * 0.0
+        return zero, zero, zero
+    log_probability = F.log_softmax(-scores, dim=1)
+    probability = torch.softmax(-scores, dim=1)
+    positive = teacher_probabilities > 0.0
+    log_teacher = torch.where(
+        positive,
+        torch.log(torch.clamp_min(teacher_probabilities, torch.finfo(scores.dtype).tiny)),
+        torch.zeros_like(teacher_probabilities),
+    )
+    state_kl = torch.where(
+        positive,
+        teacher_probabilities * (log_teacher - log_probability),
+        torch.zeros_like(scores),
+    ).sum(dim=1)
+    state_infeasible = torch.where(~feasible, probability, torch.zeros_like(probability)).sum(dim=1)
+    kl = state_kl[valid].mean()
+    infeasible_mass = state_infeasible[valid].mean()
+    return kl + feasibility_penalty * infeasible_mass, kl, infeasible_mass
+
+
+def train_reducer_policy(
+    dataset: ReducerCostDataset,
     feature_schema: FeatureSchema,
     *,
+    objective: ObjectiveName,
+    temperature: float | None = None,
+    feasibility_penalty: float = 1.0,
     hidden_sizes: tuple[int, ...] = (32, 32),
     epochs: int = 100,
     learning_rate: float = 1e-3,
@@ -259,29 +325,52 @@ def train_ranking_policy(
     batch_size: int = 256,
     patience: int = 10,
     seed: int = 42,
-) -> tuple[RankingPolicy, RankingTrainingResult]:
+) -> tuple[ReducerPolicy, ReducerTrainingResult]:
     if dataset.feature_names != feature_schema.feature_names:
         raise ValueError("dataset does not match feature schema")
+    if objective == "pairwise":
+        if temperature is not None:
+            raise ValueError("pairwise training does not accept a temperature")
+        objective_contract = dict(PAIRWISE_OBJECTIVE_CONTRACT)
+    elif objective == "soft-kl":
+        if temperature is None:
+            raise ValueError("soft-KL training requires a temperature")
+        objective_contract = soft_objective_contract(temperature, feasibility_penalty)
+    else:
+        raise ValueError(f"unsupported training objective: {objective}")
     train_indices = dataset.indices_for_split("train")
     val_indices = dataset.indices_for_split("validation")
     if train_indices.size == 0 or val_indices.size == 0:
         raise ValueError("training and validation splits must both be non-empty")
     if epochs < 1 or batch_size < 1 or patience < 1:
         raise ValueError("epochs, batch size, and patience must be positive")
+    if objective == "soft-kl" and (
+        not np.any(np.any(dataset.feasible[train_indices], axis=1))
+        or not np.any(np.any(dataset.feasible[val_indices], axis=1))
+    ):
+        raise ValueError("soft-KL training and validation each need a feasible state")
+    if objective == "pairwise" and (
+        not np.any(rankable_state_mask(dataset.teacher_costs[train_indices], dataset.feasible[train_indices]))
+        or not np.any(rankable_state_mask(dataset.teacher_costs[val_indices], dataset.feasible[val_indices]))
+    ):
+        raise ValueError("pairwise training and validation each need a rankable state")
 
     np.random.seed(seed)
     torch.manual_seed(seed)
     torch.use_deterministic_algorithms(True)
     transformed = feature_schema.transform(dataset.features)
     normalizer = FeatureNormalizer.fit(transformed[train_indices])
-    normalized = normalizer.transform(transformed)
-    features = torch.as_tensor(normalized, dtype=torch.float32)
+    features = torch.as_tensor(normalizer.transform(transformed), dtype=torch.float32)
     costs = torch.tensor(dataset.teacher_costs, dtype=torch.float64)
     feasible = torch.tensor(dataset.feasible, dtype=torch.bool)
-    model = ReducerRanker(feature_schema, dataset.candidate_names, hidden_sizes)
-    optimizer = torch.optim.AdamW(
-        model.parameters(), lr=learning_rate, weight_decay=weight_decay,
-    )
+    teacher_probabilities = None
+    if objective == "soft-kl":
+        teacher_probabilities = torch.tensor(
+            soft_teacher_distribution(dataset.teacher_costs, dataset.feasible, float(temperature)),
+            dtype=torch.float64,
+        )
+    model = ReducerScorer(feature_schema, dataset.candidate_names, hidden_sizes)
+    optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     generator = torch.Generator().manual_seed(seed)
     loader = DataLoader(
         TensorDataset(torch.as_tensor(train_indices, dtype=torch.int64)),
@@ -295,35 +384,48 @@ def train_ranking_policy(
     remaining_patience = patience
     train_history: list[float] = []
     val_history: list[float] = []
+    train_kl_history: list[float] = []
+    val_kl_history: list[float] = []
+    train_feasibility_history: list[float] = []
+    val_feasibility_history: list[float] = []
+
+    def loss_for(indices: Tensor) -> tuple[Tensor, Tensor, Tensor]:
+        scores = model(features[indices]).to(torch.float64)
+        if objective == "pairwise":
+            total = cost_sensitive_pairwise_loss(scores, costs[indices], feasible[indices])
+            zero = total.detach() * 0.0
+            return total, zero, zero
+        assert teacher_probabilities is not None
+        return soft_distillation_loss(
+            scores,
+            teacher_probabilities[indices],
+            feasible[indices],
+            feasibility_penalty=feasibility_penalty,
+        )
+
     for epoch in range(epochs):
         model.train()
-        batch_losses = []
+        batch_values: list[tuple[float, float, float]] = []
         for (indices,) in loader:
             optimizer.zero_grad(set_to_none=True)
-            loss = cost_sensitive_pairwise_loss(
-                model(features[indices]).to(torch.float64),
-                costs[indices],
-                feasible[indices],
-            )
-            loss.backward()
+            total, kl, infeasible_mass = loss_for(indices)
+            total.backward()
             optimizer.step()
-            batch_losses.append(float(loss.detach()))
-        train_history.append(float(np.mean(batch_losses)))
+            batch_values.append((float(total.detach()), float(kl.detach()), float(infeasible_mass.detach())))
+        train_history.append(float(np.mean([value[0] for value in batch_values])))
+        train_kl_history.append(float(np.mean([value[1] for value in batch_values])))
+        train_feasibility_history.append(float(np.mean([value[2] for value in batch_values])))
         model.eval()
         with torch.no_grad():
-            val_loss = float(cost_sensitive_pairwise_loss(
-                model(features[val_indices]).to(torch.float64),
-                costs[val_indices],
-                feasible[val_indices],
-            ))
+            val_total, val_kl, val_feasibility = loss_for(torch.as_tensor(val_indices))
+        val_loss = float(val_total)
         val_history.append(val_loss)
+        val_kl_history.append(float(val_kl))
+        val_feasibility_history.append(float(val_feasibility))
         if val_loss < best_loss - 1e-12:
             best_loss = val_loss
             best_epoch = epoch
-            best_state = {
-                name: value.detach().cpu().clone()
-                for name, value in model.state_dict().items()
-            }
+            best_state = {name: value.detach().cpu().clone() for name, value in model.state_dict().items()}
             remaining_patience = patience
         else:
             remaining_patience -= 1
@@ -331,65 +433,105 @@ def train_ranking_policy(
                 break
     assert best_state is not None
     model.load_state_dict(best_state)
-    policy = RankingPolicy(model, normalizer)
-    return policy, RankingTrainingResult(
+    policy = ReducerPolicy(model, normalizer, objective_contract)
+    return policy, ReducerTrainingResult(
+        objective=objective,
         epochs=len(train_history),
         best_epoch=best_epoch,
         train_loss_history=tuple(train_history),
         val_loss_history=tuple(val_history),
-        train_metrics=evaluate_ranking(policy, dataset.subset(train_indices)),
-        val_metrics=evaluate_ranking(policy, dataset.subset(val_indices)),
+        train_kl_history=tuple(train_kl_history),
+        val_kl_history=tuple(val_kl_history),
+        train_feasibility_history=tuple(train_feasibility_history),
+        val_feasibility_history=tuple(val_feasibility_history),
+        train_metrics=evaluate_reducer(policy, dataset.subset(train_indices)),
+        val_metrics=evaluate_reducer(policy, dataset.subset(val_indices)),
     )
 
 
-def evaluate_ranking(policy: RankingPolicy, dataset: RankingDataset) -> RankingMetrics:
+def evaluate_reducer(policy: ReducerPolicy, dataset: ReducerCostDataset) -> ReducerMetrics:
     if dataset.candidate_names != policy.candidate_names:
         raise ValueError("dataset and policy candidate catalogs differ")
     if dataset.feature_names != policy.feature_schema.feature_names:
         raise ValueError("dataset and policy feature schemas differ")
     scores = np.asarray(policy.predict_scores(dataset.features), dtype=np.float64)
+    probabilities = np.asarray(policy.predict_probabilities(dataset.features), dtype=np.float64)
     chosen = np.argmin(scores, axis=1)
     rows = np.arange(dataset.num_samples)
+    valid = np.any(dataset.feasible, axis=1)
     selected_feasible = dataset.feasible[rows, chosen]
-    best = np.nanmin(dataset.teacher_costs, axis=1)
-    chosen_cost = dataset.teacher_costs[rows, chosen]
-    scale = np.maximum(np.abs(best), 1.0)
-    regret = np.where(selected_feasible, np.maximum((chosen_cost - best) / scale, 0.0), 10.0)
-    top1 = tolerant_best_mask(dataset.teacher_costs, dataset.feasible)[rows, chosen]
+    regrets = normalized_regrets(dataset.teacher_costs, dataset.feasible)
+    selected_regret = np.where(selected_feasible, regrets[rows, chosen], 1.0)
+    top1_mask = tolerant_best_mask(dataset.teacher_costs, dataset.feasible)
+    top1 = top1_mask[rows, chosen]
     correct = total = 0
     for row in range(dataset.num_samples):
         for left in range(dataset.num_candidates):
             for right in range(left + 1, dataset.num_candidates):
-                if not dataset.feasible[row, left] or not dataset.feasible[row, right]:
-                    continue
-                gap = dataset.teacher_costs[row, right] - dataset.teacher_costs[row, left]
-                tolerance = max(
-                    ABSOLUTE_TOLERANCE,
-                    RELATIVE_TOLERANCE * max(
-                        abs(dataset.teacher_costs[row, left]),
-                        abs(dataset.teacher_costs[row, right]),
-                    ),
-                )
-                if abs(gap) <= tolerance:
-                    continue
-                predicted = scores[row, right] - scores[row, left]
-                correct += int(np.sign(gap) == np.sign(predicted))
-                total += 1
-        for left in range(dataset.num_candidates):
-            for right in range(left + 1, dataset.num_candidates):
-                if dataset.feasible[row, left] == dataset.feasible[row, right]:
-                    continue
-                better = left if dataset.feasible[row, left] else right
-                worse = right if dataset.feasible[row, left] else left
-                correct += int(scores[row, better] < scores[row, worse])
-                total += 1
+                if dataset.feasible[row, left] and dataset.feasible[row, right]:
+                    gap = dataset.teacher_costs[row, right] - dataset.teacher_costs[row, left]
+                    tolerance = max(
+                        ABSOLUTE_TOLERANCE,
+                        RELATIVE_TOLERANCE * max(
+                            abs(dataset.teacher_costs[row, left]),
+                            abs(dataset.teacher_costs[row, right]),
+                        ),
+                    )
+                    if abs(gap) <= tolerance:
+                        continue
+                    predicted = scores[row, right] - scores[row, left]
+                    correct += int(np.sign(gap) == np.sign(predicted))
+                    total += 1
+                elif dataset.feasible[row, left] != dataset.feasible[row, right]:
+                    better = left if dataset.feasible[row, left] else right
+                    worse = right if dataset.feasible[row, left] else left
+                    correct += int(scores[row, better] < scores[row, worse])
+                    total += 1
     rankable = rankable_state_mask(dataset.teacher_costs, dataset.feasible)
-    return RankingMetrics(
+    target_entropy = predicted_entropy = kl_divergence = float("nan")
+    objective_schema = str(policy.objective_contract["schema"])
+    if objective_schema == "pzr.reducer-objective.soft-kl-v1" and np.any(valid):
+        teacher = soft_teacher_distribution(
+            dataset.teacher_costs,
+            dataset.feasible,
+            float(policy.objective_contract["temperature"]),
+        )
+        positive = teacher > 0.0
+        target_entropy = float(np.mean(-np.sum(np.where(positive, teacher * np.log(np.maximum(teacher, 1e-300)), 0.0), axis=1)[valid]))
+        kl_divergence = float(np.mean(np.sum(np.where(positive, teacher * (np.log(np.maximum(teacher, 1e-300)) - np.log(np.maximum(probabilities, 1e-300))), 0.0), axis=1)[valid]))
+    if np.any(valid):
+        predicted_entropy = float(np.mean(-np.sum(probabilities * np.log(np.maximum(probabilities, 1e-300)), axis=1)[valid]))
+    infeasible_probability = np.sum(np.where(~dataset.feasible, probabilities, 0.0), axis=1)
+    return ReducerMetrics(
         pairwise_accuracy=float(correct / total) if total else 1.0,
-        top1_accuracy=float(np.mean(top1)),
-        mean_chosen_regret=float(np.mean(regret)),
-        max_chosen_regret=float(np.max(regret)),
-        feasible_selection_rate=float(np.mean(selected_feasible)),
+        top1_accuracy=float(np.mean(top1[valid])) if np.any(valid) else float("nan"),
+        mean_chosen_normalized_regret=float(np.mean(selected_regret[valid])) if np.any(valid) else float("nan"),
+        max_chosen_normalized_regret=float(np.max(selected_regret[valid])) if np.any(valid) else float("nan"),
+        feasible_selection_rate=float(np.mean(selected_feasible[valid])) if np.any(valid) else float("nan"),
+        infeasible_selection_count=int(np.count_nonzero(valid & ~selected_feasible)),
+        valid_states=int(np.count_nonzero(valid)),
+        all_infeasible_states=int(np.count_nonzero(~valid)),
         rankable_states=int(np.count_nonzero(rankable)),
-        skipped_tie_states=int(np.count_nonzero(~rankable)),
+        skipped_tie_states=int(np.count_nonzero(valid & ~rankable)),
+        target_entropy=target_entropy,
+        predicted_entropy=predicted_entropy,
+        kl_divergence=kl_divergence,
+        infeasible_probability=float(np.mean(infeasible_probability[valid])) if np.any(valid) else float("nan"),
     )
+
+
+def _validate_objective_contract(contract: dict[str, object]) -> None:
+    schema = contract.get("schema")
+    if schema == PAIRWISE_OBJECTIVE_CONTRACT["schema"]:
+        if contract != PAIRWISE_OBJECTIVE_CONTRACT:
+            raise ValueError("pairwise objective contract differs")
+        return
+    if schema == "pzr.reducer-objective.soft-kl-v1":
+        expected = soft_objective_contract(
+            float(contract["temperature"]),
+            float(contract["feasibility_penalty"]),
+        )
+        if contract != expected:
+            raise ValueError("soft-KL objective contract differs")
+        return
+    raise ValueError("unsupported reducer objective contract")

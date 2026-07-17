@@ -1,42 +1,31 @@
-"""RTLola teacher collection and ranking-dataset assembly."""
+"""Teacher and one-step discrete-DART reducer-cost collection."""
 
 from __future__ import annotations
 
 from dataclasses import dataclass
 import json
 from pathlib import Path
-from typing import Mapping, Protocol, Sequence
+from typing import Literal, Mapping, Sequence
 
 import numpy as np
 import pandas as pd
 
-from pzr.learning.artifacts import write_ranking_dataset
-from pzr.learning.dataset import RankingDataset
-from pzr.learning.targets import tolerant_best_mask
+from pzr.learning.artifacts import write_reducer_cost_dataset
+from pzr.learning.dart import DartCalibration
+from pzr.learning.dataset import ReducerCostDataset
+from pzr.learning.targets import normalized_regrets
 from pzr.rtlola.actions import default_action_catalog
-from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent, RtlolaStateRef
-from pzr.rtlola.features import (
-    RTL_RANKING_FEATURE_NAMES,
-    extract_ranking_features,
-)
+from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent
+from pzr.rtlola.features import RTL_RANKING_FEATURE_NAMES, extract_ranking_features
 from pzr.rtlola.scenarios import RtlolaScenario
-from pzr.rtlola.search import RtlolaSearchResult, full_width_terminal_search
+from pzr.rtlola.search import full_width_terminal_search
 
 
-class BehaviorPolicy(Protocol):
-    """Minimal direct-policy interface used for state aggregation."""
-
-    def choose(
-        self,
-        engine: RtlolaEngine,
-        state: RtlolaStateRef,
-        event: RtlolaEvent,
-        budget: int,
-    ) -> RtlolaSearchResult: ...
+CollectionMode = Literal["teacher", "dart"]
 
 
 @dataclass(frozen=True)
-class CollectedRankingSample:
+class CollectedReducerCostSample:
     sample_id: str
     trace_id: str
     split: str
@@ -48,17 +37,19 @@ class CollectedRankingSample:
     candidate_names: tuple[str, ...]
     teacher_costs: tuple[float, ...]
     feasible: tuple[bool, ...]
-    tie_mask: tuple[bool, ...]
     teacher_action: str
     teacher_sequence: tuple[str, ...]
-    behavior: str
-    behavior_action: str
+    collection_mode: str
+    executed_action: str
+    disturbed: bool
+    disturbance_probability: float
+    infeasible_probability_redirected: float
+    sampled_normalized_regret: float
+    dart_calibration_sha256: str | None
     evaluated_leaves: int
     teacher_reducer_failure_count: int
     teacher_infeasible_candidate_count: int
-    behavior_reducer_failure_count: int
-    behavior_infeasible_candidate_count: int
-    behavior_fallback_used: bool
+    execution_fallback_used: bool
 
 
 def collect_teacher_episode(
@@ -71,12 +62,25 @@ def collect_teacher_episode(
     seed: int,
     budget: int,
     candidate_names: tuple[str, ...],
-    behavior_policy: BehaviorPolicy | None = None,
-) -> tuple[CollectedRankingSample, ...]:
-    """Label every over-bound state while following teacher or learned behavior."""
+    collection_mode: CollectionMode = "teacher",
+    dart_calibration: DartCalibration | None = None,
+    dart_calibration_sha256: str | None = None,
+    disturbance_seed: int = 0,
+) -> tuple[CollectedReducerCostSample, ...]:
+    """Label over-bound states and return control to the teacher after each action."""
     if len(events) < 2:
         raise ValueError("two-event teacher collection requires at least two events")
+    if collection_mode not in ("teacher", "dart"):
+        raise ValueError(f"unsupported collection mode: {collection_mode}")
+    if collection_mode == "dart" and dart_calibration is None:
+        raise ValueError("DART collection requires a calibration")
+    if collection_mode == "teacher" and dart_calibration is not None:
+        raise ValueError("teacher collection does not accept a DART calibration")
+    if disturbance_seed < 0:
+        raise ValueError("disturbance seed must be non-negative")
     catalog = default_action_catalog(candidate_names)
+    if dart_calibration is not None and dart_calibration.candidate_names != candidate_names:
+        raise ValueError("DART calibration candidate catalog differs")
     engine = RtlolaEngine(
         scenario.spec,
         event_arity=scenario.event_arity,
@@ -99,20 +103,42 @@ def collect_teacher_episode(
                 fallback=catalog.fallback,
                 none_action=catalog.no_op,
             )
-            costs, feasible = _aligned_root_costs(
-                decision.root_evaluations, candidate_names,
+            costs, feasible = _aligned_root_costs(decision.root_evaluations, candidate_names)
+            teacher_action = decision.first_action.name
+            executed_action = teacher_action
+            disturbed = False
+            disturbance_probability = 0.0
+            redirected = 0.0
+            sampled_regret = float("nan")
+            if (
+                collection_mode == "dart"
+                and dart_calibration is not None
+                and teacher_action in candidate_names
+                and np.any(feasible)
+            ):
+                teacher_index = candidate_names.index(teacher_action)
+                raw_distribution = dart_calibration.probabilities[
+                    dart_calibration.budgets.index(budget), teacher_index,
+                ]
+                redirected = float(np.sum(raw_distribution[~feasible]))
+                distribution = dart_calibration.collection_distribution(
+                    budget, teacher_action, feasible,
+                )
+                disturbance_probability = float(1.0 - distribution[teacher_index])
+                rng = np.random.default_rng(np.random.SeedSequence([
+                    disturbance_seed, seed, budget, step,
+                ]))
+                selected = int(rng.choice(len(candidate_names), p=distribution))
+                executed_action = candidate_names[selected]
+                disturbed = selected != teacher_index
+                sampled_regret = float(normalized_regrets(costs, feasible)[selected])
+            action = (
+                catalog.by_name[executed_action]
+                if executed_action in candidate_names
+                else decision.first_action
             )
-            tie_mask = tolerant_best_mask(costs, feasible)
-            behavior_name = "teacher" if behavior_policy is None else "learned"
-            sample_id = (
-                f"{trace_id}:{behavior_name}:budget-{budget}:step-{step}"
-            )
-            behavior_decision = (
-                decision
-                if behavior_policy is None
-                else behavior_policy.choose(engine, state, event, budget)
-            )
-            samples.append(CollectedRankingSample(
+            sample_id = f"{trace_id}:{collection_mode}:budget-{budget}:step-{step}"
+            samples.append(CollectedReducerCostSample(
                 sample_id=sample_id,
                 trace_id=trace_id,
                 split=split,
@@ -124,34 +150,33 @@ def collect_teacher_episode(
                 candidate_names=candidate_names,
                 teacher_costs=tuple(float(value) for value in costs),
                 feasible=tuple(bool(value) for value in feasible),
-                tie_mask=tuple(bool(value) for value in tie_mask),
-                teacher_action=decision.first_action.name,
+                teacher_action=teacher_action,
                 teacher_sequence=decision.predicted_sequence,
-                behavior=behavior_name,
-                behavior_action=behavior_decision.first_action.name,
+                collection_mode=collection_mode,
+                executed_action=executed_action,
+                disturbed=disturbed,
+                disturbance_probability=disturbance_probability,
+                infeasible_probability_redirected=redirected,
+                sampled_normalized_regret=sampled_regret,
+                dart_calibration_sha256=dart_calibration_sha256,
                 evaluated_leaves=decision.evaluated_leaves,
                 teacher_reducer_failure_count=decision.reducer_failure_count,
                 teacher_infeasible_candidate_count=decision.infeasible_candidate_count,
-                behavior_reducer_failure_count=behavior_decision.reducer_failure_count,
-                behavior_infeasible_candidate_count=(
-                    behavior_decision.infeasible_candidate_count
-                ),
-                behavior_fallback_used=behavior_decision.fallback_used,
+                execution_fallback_used=executed_action not in candidate_names,
             ))
-            action = behavior_decision.first_action
         engine.live_step(event, action, budget, step=step + 1)
     return tuple(samples)
 
 
-def build_ranking_dataset(
-    samples: Sequence[CollectedRankingSample],
+def build_reducer_cost_dataset(
+    samples: Sequence[CollectedReducerCostSample],
     *,
     candidate_names: tuple[str, ...] | None = None,
-) -> tuple[RankingDataset, pd.DataFrame]:
+) -> tuple[ReducerCostDataset, pd.DataFrame]:
     if not samples:
         if candidate_names is None:
             raise ValueError("empty collection requires an explicit candidate catalog")
-        return _empty_ranking_dataset(candidate_names)
+        return _empty_reducer_cost_dataset(candidate_names)
     sample_candidate_names = samples[0].candidate_names
     if candidate_names is not None and candidate_names != sample_candidate_names:
         raise ValueError("explicit candidate catalog differs from collected samples")
@@ -159,86 +184,81 @@ def build_ranking_dataset(
     for sample in samples:
         if sample.candidate_names != candidate_names:
             raise ValueError("collected samples use different candidate catalogs")
-    dataset = RankingDataset(
+    dataset = ReducerCostDataset(
         features=np.stack([sample.features for sample in samples]).astype(np.float32),
-        teacher_costs=np.asarray(
-            [sample.teacher_costs for sample in samples], dtype=np.float64,
-        ),
-        feasible=np.asarray(
-            [sample.feasible for sample in samples], dtype=np.bool_,
-        ),
-        tie_mask=np.asarray(
-            [sample.tie_mask for sample in samples], dtype=np.bool_,
-        ),
+        teacher_costs=np.asarray([sample.teacher_costs for sample in samples], dtype=np.float64),
+        feasible=np.asarray([sample.feasible for sample in samples], dtype=np.bool_),
         candidate_names=candidate_names,
         feature_names=RTL_RANKING_FEATURE_NAMES,
         splits=tuple(sample.split for sample in samples),
         sample_ids=tuple(sample.sample_id for sample in samples),
     )
-    metadata = pd.DataFrame([
-        {
-            "sample_id": sample.sample_id,
-            "trace_id": sample.trace_id,
-            "split": sample.split,
-            "condition": sample.condition,
-            "seed": sample.seed,
-            "budget": sample.budget,
-            "step": sample.step,
-            "teacher_action": sample.teacher_action,
-            "teacher_sequence": json.dumps(sample.teacher_sequence),
-            "behavior": sample.behavior,
-            "behavior_action": sample.behavior_action,
-            "evaluated_leaves": sample.evaluated_leaves,
-            "teacher_reducer_failure_count": sample.teacher_reducer_failure_count,
-            "teacher_infeasible_candidate_count": (
-                sample.teacher_infeasible_candidate_count
-            ),
-            "behavior_reducer_failure_count": sample.behavior_reducer_failure_count,
-            "behavior_infeasible_candidate_count": (
-                sample.behavior_infeasible_candidate_count
-            ),
-            "behavior_fallback_used": sample.behavior_fallback_used,
-        }
-        for sample in samples
-    ])
+    metadata = pd.DataFrame([_sample_metadata(sample) for sample in samples])
     return dataset, metadata
 
 
-def _empty_ranking_dataset(
+def _sample_metadata(sample: CollectedReducerCostSample) -> dict[str, object]:
+    return {
+        "sample_id": sample.sample_id,
+        "trace_id": sample.trace_id,
+        "split": sample.split,
+        "condition": sample.condition,
+        "seed": sample.seed,
+        "budget": sample.budget,
+        "step": sample.step,
+        "teacher_action": sample.teacher_action,
+        "teacher_sequence": json.dumps(sample.teacher_sequence),
+        "collection_mode": sample.collection_mode,
+        "executed_action": sample.executed_action,
+        "disturbed": sample.disturbed,
+        "disturbance_probability": sample.disturbance_probability,
+        "infeasible_probability_redirected": sample.infeasible_probability_redirected,
+        "sampled_normalized_regret": sample.sampled_normalized_regret,
+        "dart_calibration_sha256": sample.dart_calibration_sha256,
+        "evaluated_leaves": sample.evaluated_leaves,
+        "teacher_reducer_failure_count": sample.teacher_reducer_failure_count,
+        "teacher_infeasible_candidate_count": sample.teacher_infeasible_candidate_count,
+        "execution_fallback_used": sample.execution_fallback_used,
+    }
+
+
+def _empty_reducer_cost_dataset(
     candidate_names: tuple[str, ...],
-) -> tuple[RankingDataset, pd.DataFrame]:
+) -> tuple[ReducerCostDataset, pd.DataFrame]:
     candidate_count = len(candidate_names)
-    dataset = RankingDataset(
+    dataset = ReducerCostDataset(
         features=np.empty((0, len(RTL_RANKING_FEATURE_NAMES)), dtype=np.float32),
         teacher_costs=np.empty((0, candidate_count), dtype=np.float64),
         feasible=np.empty((0, candidate_count), dtype=np.bool_),
-        tie_mask=np.empty((0, candidate_count), dtype=np.bool_),
         candidate_names=candidate_names,
         feature_names=RTL_RANKING_FEATURE_NAMES,
         splits=(),
         sample_ids=(),
     )
-    return dataset, pd.DataFrame(columns=(
+    return dataset, pd.DataFrame(columns=tuple(_sample_metadata_columns()))
+
+
+def _sample_metadata_columns() -> tuple[str, ...]:
+    return (
         "sample_id", "trace_id", "split", "condition", "seed", "budget",
-        "step", "teacher_action", "teacher_sequence", "behavior",
-        "behavior_action", "evaluated_leaves",
+        "step", "teacher_action", "teacher_sequence", "collection_mode",
+        "executed_action", "disturbed", "disturbance_probability",
+        "infeasible_probability_redirected", "sampled_normalized_regret",
+        "dart_calibration_sha256", "evaluated_leaves",
         "teacher_reducer_failure_count", "teacher_infeasible_candidate_count",
-        "behavior_reducer_failure_count", "behavior_infeasible_candidate_count",
-        "behavior_fallback_used",
-    ))
+        "execution_fallback_used",
+    )
 
 
 def write_collected_dataset(
-    samples: Sequence[CollectedRankingSample],
+    samples: Sequence[CollectedReducerCostSample],
     directory: Path,
     metadata: Mapping[str, object],
     *,
     candidate_names: tuple[str, ...] | None = None,
-) -> RankingDataset:
-    dataset, sample_metadata = build_ranking_dataset(
-        samples, candidate_names=candidate_names,
-    )
-    write_ranking_dataset(dataset, directory, sample_metadata, metadata)
+) -> ReducerCostDataset:
+    dataset, sample_metadata = build_reducer_cost_dataset(samples, candidate_names=candidate_names)
+    write_reducer_cost_dataset(dataset, directory, sample_metadata, metadata)
     return dataset
 
 

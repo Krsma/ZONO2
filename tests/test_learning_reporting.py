@@ -44,7 +44,7 @@ def test_learning_plots_are_non_empty(tmp_path):
     assert {path.name for path in tmp_path.glob("*.png")} == {
         "metrics_vs_budget.png",
         "generalization_by_trace.png",
-        "stage_ablation.png",
+        "objective_data_ablation.png",
         "candidate_composition_learned_direct.png",
         "loss_over_time_learned_direct.png",
     }

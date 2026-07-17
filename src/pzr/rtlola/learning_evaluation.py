@@ -14,7 +14,7 @@ import numpy as np
 import pandas as pd
 
 from pzr.learning.provenance import payload_sha256
-from pzr.learning.ranker import RankingPolicy
+from pzr.learning.ranker import ReducerPolicy
 from pzr.learning.reporting import write_learning_plots
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.binding import (
@@ -28,7 +28,7 @@ from pzr.rtlola.benchmark import (
     run_benchmark,
     run_direct_policy_benchmark,
 )
-from pzr.rtlola.learned_policy import RtlolaRankingPolicy
+from pzr.rtlola.learned_policy import RtlolaReducerPolicy
 from pzr.rtlola.robot_arm import ROBOT_ARM_TRACE_ROWS
 
 
@@ -77,7 +77,7 @@ class FixedLearningEvaluationConfig:
 
 def run_fixed_learning_evaluation(
     config: FixedLearningEvaluationConfig,
-    policies: Mapping[str, RtlolaRankingPolicy],
+    policies: Mapping[str, RtlolaReducerPolicy],
     *,
     model_sha256: Mapping[str, str],
     source_sha256: str,
@@ -235,8 +235,8 @@ def _run_evaluation_cell_job(job: _EvaluationCellJob) -> None:
     if job.method in job.learned_methods:
         if job.model_directory is None:
             raise ValueError("learned evaluation worker lacks a model directory")
-        policy = RtlolaRankingPolicy(
-            RankingPolicy.load(job.model_directory),
+        policy = RtlolaReducerPolicy(
+            ReducerPolicy.load(job.model_directory),
             default_action_catalog(job.candidate_names),
         )
     _load_or_run_cell(
@@ -342,7 +342,7 @@ def _load_or_run_cell(
     benchmark_config: RtlolaBenchmarkConfig,
     method: str,
     learned_methods: tuple[str, ...],
-    policy: RtlolaRankingPolicy | None,
+    policy: RtlolaReducerPolicy | None,
     expected_length: int,
 ) -> tuple[pd.DataFrame, pd.DataFrame]:
     manifest_path = directory / "manifest.json"
@@ -422,8 +422,25 @@ def _write_evaluation_reports(
     _write_csv_atomic(
         decision_accounting(timeseries), config.output / "decision_accounting.csv",
     )
+    macro = macro_metrics(summary)
+    _write_csv_atomic(macro, config.output / "macro_metrics.csv")
     _write_csv_atomic(
-        macro_metrics(summary), config.output / "macro_metrics.csv",
+        macro[[
+            "method", "budget", "aggregation", "mean_approx_loss",
+            "final_approx_loss", "max_approx_loss", "sum_approx_loss",
+        ]],
+        config.output / "macro_loss_metrics.csv",
+    )
+    _write_csv_atomic(
+        macro[[
+            "method", "budget", "aggregation", "mean_state_width",
+            "max_state_width",
+        ]],
+        config.output / "macro_width_metrics.csv",
+    )
+    _write_csv_atomic(
+        macro[["method", "budget", "aggregation", "total_time_ms"]],
+        config.output / "macro_runtime_metrics.csv",
     )
     _write_csv_atomic(
         micro_trigger_metrics(summary), config.output / "micro_trigger_metrics.csv",
@@ -443,8 +460,8 @@ def _write_evaluation_reports(
         config.output / "best_static_metrics.csv",
     )
     _write_csv_atomic(
-        stage_ablation(summary, config.model_names),
-        config.output / "stage_ablation.csv",
+        objective_data_ablation(summary, config.model_names),
+        config.output / "objective_data_ablation.csv",
     )
     write_learning_plots(
         timeseries, summary, config.output / "plots", learned_methods=config.model_names,
@@ -605,11 +622,11 @@ def best_static_metrics(
     return pd.DataFrame(rows)
 
 
-def stage_ablation(
+def objective_data_ablation(
     summary: pd.DataFrame,
     learned_methods: tuple[str, ...],
 ) -> pd.DataFrame:
-    """Compare consecutive learned stages and the first stage with the final one."""
+    """Compare the clean objective and disturbed-data learned ablations."""
     pairs = list(zip(learned_methods[:-1], learned_methods[1:]))
     if len(learned_methods) > 2:
         pairs.append((learned_methods[0], learned_methods[-1]))

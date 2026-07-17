@@ -6,7 +6,7 @@ This Python 3.11 research package is RTLola-centered:
 
 - `src/pzr/rtlola/`: specifications, trace adapters, binding wrapper, native
   transform catalog, search, benchmark execution, reporting, and CLI.
-- `src/pzr/learning/`: generic cost-sensitive ranking data/model/training code.
+- `src/pzr/learning/`: reducer-cost datasets, soft distillation, and DART calibration.
 - `rlolapythonbinding/`: pinned binding submodule.
 - `tests/`: pure tests plus binding-backed semantic contracts.
 - `tools/`: reproducible environment setup and robot-arm smoke execution.
@@ -44,9 +44,10 @@ pzr-learning generate --output /tmp/pzr-learning/traces --event-count 10 \
 pzr-learning collect --output /tmp/pzr-learning \
   --trace-store /tmp/pzr-learning/traces \
   --budgets 10 --candidates girard,scott --train-seeds 1 \
-  --validation-seeds 1 --test-seeds 1
-pzr-learning train --dataset base=/tmp/pzr-learning/dataset \
-  --output /tmp/pzr-learning-model --epochs 2
+  --validation-seeds 1 --test-seeds 0 --collection-mode teacher
+pzr-learning train --dataset clean=/tmp/pzr-learning/dataset \
+  --output /tmp/pzr-learning-model --objective soft-kl \
+  --temperature-grid 0.1,0.2 --epochs 2
 ```
 
 ## Current RTLola Experiment Configuration
@@ -73,8 +74,8 @@ the binding-native transforms, counters, and approximation loss. PZR reports
 the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
-The last recorded full release-binding validation after the corrected balanced
-learning integration was 105 passing tests with no skips.
+The last recorded full release-binding validation after the soft-DART
+integration was 111 passing tests with no skips.
 
 The authoritative trace kinds and full lengths are:
 
@@ -158,12 +159,14 @@ the original 12 budget/current-zonotope aggregates plus row-width
 concentration, active-generator norm variation, and mean normalized off-axis
 generator mass. It is strictly pre-event and does not use stream values,
 history, spectral statistics, or an inference-time preview rollout. The
-current corrected experiment pre-generates 48 independent 500-event nominal
-random-waypoint traces: base train/validation seeds 0--11/12--15, DAgger-1
-train/validation seeds 16--27/28--31, and DAgger-2 train/validation seeds
-32--43/44--47. Each DAgger validation split follows the same frozen learned
-behavior as its training split but remains absent from training. Its fixed-trace
-comparison evaluates `learned_base`, `learned_dagger1`, and `learned_dagger2`
+current experiment pre-generates 48 independent 500-event nominal
+random-waypoint traces. Clean teacher train/validation seeds are 0--19/20--25;
+discrete-DART train/validation seeds are 26--41/42--47. The DART kernel is a
+teacher-action-conditioned categorical confusion matrix fitted from the frozen
+soft-clean model on clean validation states. A sampled feasible disturbance
+lasts one decision, after which the teacher recomputes its cost vector. Its
+fixed-trace comparison evaluates `learned_pairwise_clean`, `learned_soft_clean`,
+and `learned_soft_dart`
 against Girard, Scott, PCA, Combastel, and the two-event
 `mpc_terminal_full_width` teacher: 192 cells in total.
 The six fixed evaluation traces always retain their full authoritative lengths.
@@ -171,14 +174,14 @@ Teacher shards use ten spawned workers. Post-reference evaluation cells use
 four spawned workers with `max_tasks_per_child=1`; each worker owns its monitor
 and planner. BLAS, OpenMP, MKL, and NumExpr remain limited to one thread per worker.
 
-Ranking uses the version-2 per-state objective. A feasible pair is meaningful
-when its gap exceeds `max(1e-15, 1e-9 * max(abs(cost_i), abs(cost_j)))`.
-Meaningful gaps are normalized by the largest meaningful feasible gap in that
-state, feasible-over-infeasible pairs have unit weight, each state is normalized
-by its own pair-weight sum, and rankable states are averaged equally. Tie masks,
-training, and metrics use the same tolerance. All-tie states without an
-infeasible candidate are skipped and reported. Scores are lower-is-better
-rankings, not calibrated regrets.
+The primary objective is state-balanced soft action-value distillation. Feasible
+cost gaps within `max(1e-15, 1e-9 * max(abs(cost_i), abs(cost_j)))` are ties;
+remaining gaps are divided by the largest meaningful gap in the state and
+converted to `softmax(-regret / temperature)`. Infeasible target probability is
+zero, and training adds the student probability mass on infeasible actions as a
+penalty. Clean validation selects one temperature, which is reused by the
+soft-DART model. The corrected pairwise loss remains only as the clean-data
+ablation. Scores are lower-is-better and are not calibrated regrets.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the

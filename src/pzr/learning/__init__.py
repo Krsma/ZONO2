@@ -1,35 +1,37 @@
-"""Scenario-neutral learned ranking models."""
+"""Scenario-neutral reducer-cost learning models."""
 
 from pzr.learning.artifacts import (
-    RANKING_DATASET_SCHEMA,
-    load_ranking_dataset,
-    write_ranking_dataset,
+    REDUCER_COST_DATASET_SCHEMA,
+    load_reducer_cost_dataset,
+    write_reducer_cost_dataset,
 )
-from pzr.learning.dataset import RankingDataset
+from pzr.learning.dataset import ReducerCostDataset
 from pzr.learning.ranker import (
     FeatureNormalizer,
     FeatureSchema,
-    RankingMetrics,
-    RankingPolicy,
-    RankingTrainingResult,
-    ReducerRanker,
+    ReducerMetrics,
+    ReducerPolicy,
+    ReducerScorer,
+    ReducerTrainingResult,
     cost_sensitive_pairwise_loss,
-    evaluate_ranking,
-    train_ranking_policy,
+    evaluate_reducer,
+    soft_distillation_loss,
+    train_reducer_policy,
 )
 
 __all__ = [
     "FeatureNormalizer",
     "FeatureSchema",
-    "RankingDataset",
-    "RankingMetrics",
-    "RankingPolicy",
-    "RankingTrainingResult",
-    "RANKING_DATASET_SCHEMA",
-    "ReducerRanker",
+    "REDUCER_COST_DATASET_SCHEMA",
+    "ReducerCostDataset",
+    "ReducerMetrics",
+    "ReducerPolicy",
+    "ReducerScorer",
+    "ReducerTrainingResult",
     "cost_sensitive_pairwise_loss",
-    "evaluate_ranking",
-    "load_ranking_dataset",
-    "train_ranking_policy",
-    "write_ranking_dataset",
+    "evaluate_reducer",
+    "load_reducer_cost_dataset",
+    "soft_distillation_loss",
+    "train_reducer_policy",
+    "write_reducer_cost_dataset",
 ]

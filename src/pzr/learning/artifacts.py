@@ -1,4 +1,4 @@
-"""Versioned, inspectable ranking-dataset artifacts."""
+"""Versioned, inspectable reducer-cost dataset artifacts."""
 
 from __future__ import annotations
 
@@ -9,22 +9,18 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
-from pzr.learning.dataset import RankingDataset
-from pzr.learning.targets import TARGET_CONTRACT
+from pzr.learning.dataset import ReducerCostDataset
+from pzr.learning.targets import COST_CONTRACT
 
 
-RANKING_DATASET_SCHEMA = "pzr.ranking-dataset.v2"
+REDUCER_COST_DATASET_SCHEMA = "pzr.reducer-cost-dataset.v3"
 CANDIDATE_COST_COLUMNS = (
-    "sample_id",
-    "candidate",
-    "candidate_index",
-    "feasible",
-    "teacher_cost",
+    "sample_id", "candidate", "candidate_index", "feasible", "teacher_cost",
 )
 
 
-def write_ranking_dataset(
-    dataset: RankingDataset,
+def write_reducer_cost_dataset(
+    dataset: ReducerCostDataset,
     directory: Path,
     sample_metadata: pd.DataFrame,
     metadata: Mapping[str, object],
@@ -40,7 +36,6 @@ def write_ranking_dataset(
             features=dataset.features,
             teacher_costs=dataset.teacher_costs,
             feasible=dataset.feasible,
-            tie_mask=dataset.tie_mask,
             splits=np.asarray(dataset.splits),
             sample_ids=np.asarray(dataset.sample_ids),
         )
@@ -48,44 +43,40 @@ def write_ranking_dataset(
     _write_csv_atomic(sample_metadata, directory / "samples.csv")
     _write_csv_atomic(_candidate_cost_frame(dataset), directory / "candidate_costs.csv")
     manifest = {
-        "schema": RANKING_DATASET_SCHEMA,
+        "schema": REDUCER_COST_DATASET_SCHEMA,
         "num_samples": dataset.num_samples,
         "candidate_names": list(dataset.candidate_names),
         "feature_names": list(dataset.feature_names),
-        "target_contract": TARGET_CONTRACT,
+        "cost_contract": COST_CONTRACT,
         "splits": {
             split: dataset.splits.count(split)
             for split in sorted(set(dataset.splits))
         },
         **dict(metadata),
     }
-    _write_text_atomic(
-        json.dumps(manifest, indent=2, sort_keys=True),
-        directory / "manifest.json",
-    )
+    _write_text_atomic(json.dumps(manifest, indent=2, sort_keys=True), directory / "manifest.json")
 
 
-def load_ranking_dataset(
+def load_reducer_cost_dataset(
     directory: Path,
-) -> tuple[RankingDataset, pd.DataFrame, dict[str, object]]:
+) -> tuple[ReducerCostDataset, pd.DataFrame, dict[str, object]]:
     manifest = json.loads((directory / "manifest.json").read_text())
-    if manifest.get("schema") != RANKING_DATASET_SCHEMA:
-        raise ValueError("unsupported ranking dataset schema")
-    if manifest.get("target_contract") != TARGET_CONTRACT:
-        raise ValueError("ranking dataset target contract differs")
+    if manifest.get("schema") != REDUCER_COST_DATASET_SCHEMA:
+        raise ValueError("unsupported reducer-cost dataset schema")
+    if manifest.get("cost_contract") != COST_CONTRACT:
+        raise ValueError("reducer-cost dataset contract differs")
     with np.load(directory / "samples.npz", allow_pickle=False) as arrays:
-        dataset = RankingDataset(
+        dataset = ReducerCostDataset(
             features=arrays["features"],
             teacher_costs=arrays["teacher_costs"],
             feasible=arrays["feasible"],
-            tie_mask=arrays["tie_mask"],
             candidate_names=tuple(manifest["candidate_names"]),
             feature_names=tuple(manifest["feature_names"]),
             splits=tuple(str(value) for value in arrays["splits"]),
             sample_ids=tuple(str(value) for value in arrays["sample_ids"]),
         )
     if dataset.num_samples != int(manifest["num_samples"]):
-        raise ValueError("ranking dataset manifest sample count differs")
+        raise ValueError("reducer-cost dataset manifest sample count differs")
     sample_metadata = pd.read_csv(directory / "samples.csv")
     _validate_sample_metadata(dataset, sample_metadata)
     expected_costs = _candidate_cost_frame(dataset)
@@ -97,7 +88,7 @@ def load_ranking_dataset(
     return dataset, sample_metadata, manifest
 
 
-def _candidate_cost_frame(dataset: RankingDataset) -> pd.DataFrame:
+def _candidate_cost_frame(dataset: ReducerCostDataset) -> pd.DataFrame:
     rows = []
     for sample, sample_id in enumerate(dataset.sample_ids):
         for candidate, name in enumerate(dataset.candidate_names):
@@ -111,10 +102,7 @@ def _candidate_cost_frame(dataset: RankingDataset) -> pd.DataFrame:
     return pd.DataFrame(rows, columns=CANDIDATE_COST_COLUMNS)
 
 
-def _validate_sample_metadata(
-    dataset: RankingDataset,
-    metadata: pd.DataFrame,
-) -> None:
+def _validate_sample_metadata(dataset: ReducerCostDataset, metadata: pd.DataFrame) -> None:
     required = {"sample_id", "split", "trace_id", "budget", "step"}
     if not required <= set(metadata.columns):
         raise ValueError(f"sample metadata lacks columns: {sorted(required - set(metadata))}")

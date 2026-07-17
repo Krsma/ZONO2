@@ -9,6 +9,73 @@ matplotlib.use("Agg")
 import matplotlib.pyplot as plt
 import pandas as pd
 
+from pzr.learning.ranker import ReducerTrainingResult
+
+
+def write_training_plots(
+    temperatures: pd.DataFrame,
+    result: ReducerTrainingResult,
+    output: Path,
+) -> None:
+    """Write selected-objective histories and temperature diagnostics."""
+    output.mkdir(parents=True, exist_ok=True)
+    figure, axis = plt.subplots(figsize=(8, 5), constrained_layout=True)
+    axis.plot(result.train_loss_history, label="train total")
+    axis.plot(result.val_loss_history, label="validation total")
+    if result.objective == "soft-kl":
+        axis.plot(result.train_kl_history, linestyle="--", label="train KL")
+        axis.plot(result.val_kl_history, linestyle="--", label="validation KL")
+        axis.plot(
+            result.val_feasibility_history,
+            linestyle=":",
+            label="validation infeasible mass",
+        )
+    axis.set_xlabel("epoch")
+    axis.set_ylabel("state-balanced objective")
+    axis.grid(alpha=0.25)
+    axis.legend(fontsize=8)
+    figure.savefig(output / "training_history.png", dpi=180)
+    plt.close(figure)
+
+    if temperatures["temperature"].notna().any():
+        ordered = temperatures.dropna(subset=["temperature"]).sort_values("temperature")
+        figure, axis = plt.subplots(figsize=(8, 5), constrained_layout=True)
+        axis.plot(
+            ordered["temperature"], ordered["mean_selected_normalized_regret"],
+            marker="o", label="mean selected regret",
+        )
+        axis.plot(
+            ordered["temperature"], ordered["max_selected_normalized_regret"],
+            marker="o", label="max selected regret",
+        )
+        selected = ordered[ordered["selected"]]
+        if not selected.empty:
+            axis.axvline(float(selected.iloc[0]["temperature"]), color="black", linestyle="--", label="selected")
+        axis.set_xscale("log")
+        axis.set_xlabel("soft-target temperature")
+        axis.set_ylabel("normalized regret")
+        axis.grid(alpha=0.25)
+        axis.legend(fontsize=8)
+        figure.savefig(output / "temperature_selection.png", dpi=180)
+        plt.close(figure)
+
+
+def write_dart_calibration_plot(diagnostics: pd.DataFrame, path: Path) -> None:
+    """Plot held-out exact disagreement by teacher action and budget."""
+    if diagnostics.empty:
+        raise ValueError("DART calibration plot requires diagnostics")
+    pivot = diagnostics.pivot(
+        index="teacher_action", columns="budget", values="disagreement_rate",
+    )
+    axis = pivot.plot(kind="bar", figsize=(9, 5))
+    axis.set_ylabel("held-out action disagreement")
+    axis.set_xlabel("teacher action")
+    axis.set_ylim(0.0, 1.0)
+    axis.grid(axis="y", alpha=0.25)
+    axis.figure.tight_layout()
+    axis.figure.savefig(path, dpi=180)
+    plt.close(axis.figure)
+
 
 def write_learning_plots(
     timeseries: pd.DataFrame,
@@ -22,7 +89,9 @@ def write_learning_plots(
     output.mkdir(parents=True, exist_ok=True)
     _metric_budget_plot(summary, output / "metrics_vs_budget.png")
     _trace_generalization_plot(summary, output / "generalization_by_trace.png")
-    _stage_ablation_plot(summary, output / "stage_ablation.png", learned_methods)
+    _objective_data_ablation_plot(
+        summary, output / "objective_data_ablation.png", learned_methods,
+    )
     for learned_method in learned_methods:
         _candidate_selection_plot(
             timeseries,
@@ -104,7 +173,7 @@ def _loss_over_time_plot(
     plt.close(figure)
 
 
-def _stage_ablation_plot(
+def _objective_data_ablation_plot(
     summary: pd.DataFrame,
     path: Path,
     learned_methods: tuple[str, ...],
