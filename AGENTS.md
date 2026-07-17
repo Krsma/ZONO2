@@ -45,7 +45,7 @@ pzr-learning collect --output /tmp/pzr-learning \
   --trace-store /tmp/pzr-learning/traces \
   --budgets 10 --candidates girard,scott --train-seeds 1 \
   --validation-seeds 1 --test-seeds 1
-pzr-learning train --dataset /tmp/pzr-learning/dataset \
+pzr-learning train --dataset base=/tmp/pzr-learning/dataset \
   --output /tmp/pzr-learning-model --epochs 2
 ```
 
@@ -73,8 +73,8 @@ the binding-native transforms, counters, and approximation loss. PZR reports
 the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
-The last recorded full release-binding validation after the parallel learning
-integration was 95 passing tests with no skips.
+The last recorded full release-binding validation after the corrected balanced
+learning integration was 105 passing tests with no skips.
 
 The authoritative trace kinds and full lengths are:
 
@@ -158,14 +158,27 @@ the original 12 budget/current-zonotope aggregates plus row-width
 concentration, active-generator norm variation, and mean normalized off-axis
 generator mass. It is strictly pre-event and does not use stream values,
 history, spectral statistics, or an inference-time preview rollout. The
-current experiment pre-generates forty independent 500-event nominal random-
-waypoint traces: twelve base-training seeds, four validation seeds, and two
-fresh twelve-seed DAgger rounds. Its fixed-trace comparison is Girard versus
-`learned_geometry15` versus the two-event `mpc_terminal_full_width` teacher.
+current corrected experiment pre-generates 48 independent 500-event nominal
+random-waypoint traces: base train/validation seeds 0--11/12--15, DAgger-1
+train/validation seeds 16--27/28--31, and DAgger-2 train/validation seeds
+32--43/44--47. Each DAgger validation split follows the same frozen learned
+behavior as its training split but remains absent from training. Its fixed-trace
+comparison evaluates `learned_base`, `learned_dagger1`, and `learned_dagger2`
+against Girard, Scott, PCA, Combastel, and the two-event
+`mpc_terminal_full_width` teacher: 192 cells in total.
 The six fixed evaluation traces always retain their full authoritative lengths.
-Teacher shards and post-reference evaluation cells use spawned worker
-processes, defaulting to `PZR_WORKERS=8`; each worker owns its monitor and
-planner. BLAS, OpenMP, MKL, and NumExpr remain limited to one thread per worker.
+Teacher shards use ten spawned workers. Post-reference evaluation cells use
+four spawned workers with `max_tasks_per_child=1`; each worker owns its monitor
+and planner. BLAS, OpenMP, MKL, and NumExpr remain limited to one thread per worker.
+
+Ranking uses the version-2 per-state objective. A feasible pair is meaningful
+when its gap exceeds `max(1e-15, 1e-9 * max(abs(cost_i), abs(cost_j)))`.
+Meaningful gaps are normalized by the largest meaningful feasible gap in that
+state, feasible-over-infeasible pairs have unit weight, each state is normalized
+by its own pair-weight sum, and rankable states are averaged equally. Tie masks,
+training, and metrics use the same tolerance. All-tie states without an
+infeasible candidate are skipped and reported. Scores are lower-is-better
+rankings, not calibrated regrets.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the

@@ -63,23 +63,40 @@ pzr-learning generate --output /tmp/pzr-learning/traces --event-count 30 \
 pzr-learning collect --output /tmp/pzr-learning/base \
   --trace-store /tmp/pzr-learning/traces --budgets 40,80 \
   --train-seeds 2 --validation-seeds 1 --test-seeds 1
-pzr-learning train --dataset /tmp/pzr-learning/base/dataset \
+pzr-learning train --dataset base=/tmp/pzr-learning/base/dataset \
   --output /tmp/pzr-learning/model
 ```
 
 Run the resumable two-round Geometry15 experiment with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-7371495-b4cfbf4-e6ecd0b \
-  PZR_WORKERS=8 \
+PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-balanced-v2-7371495-b4cfbf4-e6ecd0b \
+  PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
   tools/run_rtlola_learning_full.sh
 ```
 
-Collection shards and fixed-evaluation cells use isolated worker processes.
-The wrapper defaults to eight workers while keeping BLAS, OpenMP, and MKL at
-one native thread per worker. Set `PZR_WORKERS=1` for serial debugging.
+The corrected run generates 48 fresh traces: base train/validation seeds
+0--11/12--15, DAgger-1 seeds 16--27/28--31, and DAgger-2 seeds
+32--43/44--47. Collection uses ten spawned workers; evaluation uses four and
+recycles each worker after one cell. BLAS, OpenMP, MKL, and NumExpr remain at
+one native thread per worker. Set both worker variables to one for debugging.
 Set `PZR_TRACE_STORE` to reuse an immutable validated trace store with a fresh
 experiment output directory after a source change.
+
+The final exact evaluation has 192 cells: six full traces, four budgets, three
+learned stages, four static reducers, and the two-event full-width MPC teacher.
+No corrected result is complete until all 192 cells validate.
+
+Use the same staged pipeline at smoke scale with:
+
+```bash
+PZR_OUT_DIR=/tmp/pzr-learning-balanced-smoke \
+PZR_EVENT_COUNT=20 PZR_BUDGETS=40 PZR_TRACE_KINDS=figure8 \
+PZR_BASE_TRAIN_SEEDS=2 PZR_BASE_VALIDATION_SEEDS=1 \
+PZR_DAGGER_TRAIN_SEEDS=2 PZR_DAGGER_VALIDATION_SEEDS=1 \
+PZR_COLLECTION_WORKERS=2 PZR_EVALUATION_WORKERS=2 \
+PZR_EVAL_LENGTH=20 tools/run_rtlola_learning_full.sh
+```
 
 See `science/LEARNING_PIPELINE.md` for the feature contract, seed schedule,
 teacher semantics, aggregation rounds, exact evaluation, and artifact schemas.

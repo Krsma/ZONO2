@@ -44,9 +44,19 @@ The teacher exhaustively evaluates every configured first action and every
 required second action over the current and next event. Its terminal target is
 binding-native approximation loss against an ephemeral two-event `none`
 rollout. The full exact trajectory is never precomputed for teacher labels.
-Incomplete roots are masked infeasible; equal-cost best candidates are retained
-in an explicit tie mask. The 15-32-32-K ReLU model is trained with a
-cost-weighted pairwise ranking loss, where lower output scores are better.
+Incomplete roots are masked infeasible. For feasible candidates `i,j`, `i`
+ranks above `j` only when
+`cost_j - cost_i > max(1e-15, 1e-9 max(abs(cost_i), abs(cost_j)))`.
+Meaningful feasible gaps are divided by the largest meaningful feasible gap in
+that state; every feasible-over-infeasible ordering has weight one. Weighted
+pairwise softplus is divided by the pair-weight sum separately for each state,
+then rankable states are averaged equally. All-tie states with no infeasible
+candidate are skipped and reported. The tie mask, training objective, and
+ranking diagnostics use the same tolerance helper.
+
+The 15-32-32-K ReLU model emits lower-is-better ranking scores. They are not
+calibrated regrets. Dataset and training manifests persist the version-2 target
+schema, tolerances, reduction, pair weighting, and infeasible semantics.
 
 ## Data And Splits
 
@@ -59,10 +69,13 @@ condition, generator configuration, source revision, trace hash, and MuJoCo
 diagnostics.
 
 Splits are made by trajectory seed before budgets are expanded. All budgets for
-a trajectory remain in the same split. The Geometry15 experiment uses forty
-independent 500-event traces: seeds 0--11 train, seeds 12--15 validate early
-stopping, seeds 16--27 form the first DAgger round, and seeds 28--39 form the
-second. DAgger shards are training-only. The six packaged fixed traces retain
+a trajectory remain in the same split. The corrected Geometry15 experiment
+uses 48 fresh independent 500-event traces. Base training uses seeds 0--11 and
+validation uses 12--15. DAgger 1 uses train seeds 16--27 and validation seeds
+28--31 under the frozen corrected base policy. DAgger 2 uses train seeds 32--43
+and validation seeds 44--47 under the frozen corrected one-round policy. Every
+validation trajectory is absent from training while sharing its stage's
+behavior policy. The six packaged fixed traces retain
 their full authoritative lengths and form the final out-of-distribution
 evaluation rather than a generated test split.
 
@@ -78,8 +91,8 @@ consolidated training dataset must be non-empty.
 The complete resumable run is:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-7371495-b4cfbf4-e6ecd0b \
-  PZR_WORKERS=8 \
+PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-balanced-v2-7371495-b4cfbf4-e6ecd0b \
+  PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
   tools/run_rtlola_learning_full.sh
 ```
 
@@ -87,31 +100,45 @@ Trace generation writes one shared, resumable store of inspectable CSVs,
 per-trace metadata, hashes, and a versioned manifest. Collection consumes that
 store and writes aligned compressed arrays, sample rows, long-form candidate
 costs, and a versioned dataset manifest.
-Missing teacher shards execute in isolated worker processes and are reloaded
+Missing teacher shards execute in ten spawned worker processes and are reloaded
 in deterministic split/seed/budget order. Exact reference caches are prepared
-before missing evaluation cells execute in isolated workers. Worker count is
+before missing evaluation cells execute in four spawned workers, with one cell
+per worker lifetime. Worker count is
 an execution setting, not part of either scientific artifact identity; each
 worker constructs its own binding monitor and planner state. Native BLAS and
 OpenMP thread counts remain one to avoid oversubscription.
 `PZR_TRACE_STORE` may point at an existing validated trace store when a source
 change requires a fresh experiment output directory. Collection and evaluation
 artifacts remain source-fingerprinted and are never migrated implicitly.
-Training writes `weights.pt`, `model.json`, `training.json`, and grouped
-validation metrics. Evaluation runs Girard, `learned_geometry15`, and the
-teacher-matched `mpc_terminal_full_width` in fingerprinted trace/budget/method
-cells. It writes exact-metric time series, macro loss/width summaries,
-micro-pooled FPR/FNR, reduction-conditioned candidate composition, comparison
-tables, plots, reference caches, and a manifest. ONNX is not exported
+Training accepts repeated named inputs such as
+`--dataset base=/path --dataset dagger1=/path`, requires exact candidate,
+feature, and target alignment, and preserves names in provenance and
+diagnostics. Each model writes `weights.pt`, `model.json`, `training.json`,
+`validation_metrics.csv`, `dataset_diagnostics.csv`, and
+`candidate_diagnostics.csv`.
+
+Evaluation accepts repeated named models and runs `learned_base`,
+`learned_dagger1`, and `learned_dagger2` against Girard, Scott, PCA, Combastel,
+and `mpc_terminal_full_width`. Six traces by four budgets by eight methods is
+192 cells. Static cells run once, exact references are prepared once per trace,
+and learned cells carry only their relevant model hash. Reports include the
+complete time series and summary, macro and micro tables, decision accounting,
+`method_comparisons.csv`, independently selected `best_static_metrics.csv`,
+`stage_ablation.csv`, and stage-specific plots. ONNX is not exported
 automatically; an explicit export command may be added after the model contract
 stabilizes.
 
 ## Evaluation Contract
 
-Girard and full-width MPC use the same budget and trace as the learned policy.
+All four static reducers and full-width MPC use the same budget and trace as
+each learned policy.
 `none` is an exact diagnostic reference, not a learned candidate. Full-length
 tables report FPR, FNR, mean/final/max/summed native loss, state width, runtime,
 fallback and infeasible rates, and reducer selection. Ranking accuracy,
-feasible selection, and chosen regret are evaluated on the held-out validation
-seed. Automatic `none` steps are separated from action composition on
+feasible selection, and chosen regret are evaluated on held-out validation
+seeds grouped by named stage and budget. Objective contribution fractions make
+the effective per-stage state weight explicit; equally sized, similarly
+rankable stages should contribute about one third in the final model. Automatic
+`none` steps are separated from action composition on
 reduction-required steps. No prefix or timing smoke is a completed six-trace
-result.
+result, and corrected results must not be claimed before all 192 cells complete.
