@@ -8,15 +8,21 @@ from dataclasses import asdict, dataclass
 import json
 from multiprocessing import get_context
 from pathlib import Path
+import re
 from typing import Sequence
 
-import numpy as np
 import pandas as pd
 
 from pzr.learning.artifacts import load_ranking_dataset, write_ranking_dataset
 from pzr.learning.dataset import RankingDataset
+from pzr.learning.diagnostics import (
+    candidate_diagnostics,
+    dataset_diagnostics,
+    validation_metrics,
+)
 from pzr.learning.provenance import model_sha256, pzr_source_sha256, sha256_files
-from pzr.learning.ranker import RankingPolicy, evaluate_ranking, train_ranking_policy
+from pzr.learning.ranker import RankingPolicy, train_ranking_policy
+from pzr.learning.targets import TARGET_CONTRACT
 from pzr.rtlola.actions import MPC_ACTION_NAMES, default_action_catalog
 from pzr.rtlola.binding import (
     BINDING_BUILD_PROFILE,
@@ -57,6 +63,19 @@ def _csv_ints(value: str) -> tuple[int, ...]:
     return values
 
 
+@dataclass(frozen=True)
+class NamedPath:
+    name: str
+    path: Path
+
+
+def _named_path(value: str) -> NamedPath:
+    name, separator, raw_path = value.partition("=")
+    if not separator or not re.fullmatch(r"[A-Za-z0-9_.-]+", name) or not raw_path:
+        raise argparse.ArgumentTypeError("expected NAME=/path with a filesystem-safe name")
+    return NamedPath(name=name, path=Path(raw_path))
+
+
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Build RTLola learning artifacts")
     subparsers = parser.add_subparsers(dest="command", required=True)
@@ -87,7 +106,7 @@ def build_parser() -> argparse.ArgumentParser:
         help="Optional ranker used to visit states for one aggregation round",
     )
     train = subparsers.add_parser("train", help="Train a fixed-catalog PyTorch ranker")
-    train.add_argument("--dataset", type=Path, action="append", required=True)
+    train.add_argument("--dataset", type=_named_path, action="append", required=True)
     train.add_argument("--output", type=Path, required=True)
     train.add_argument("--epochs", type=int, default=100)
     train.add_argument("--batch-size", type=int, default=256)
@@ -98,8 +117,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate = subparsers.add_parser(
         "evaluate", help="Evaluate generalization on fixed robot-arm traces",
     )
-    evaluate.add_argument("--model", type=Path, required=True)
-    evaluate.add_argument("--model-name", default="learned_geometry15")
+    evaluate.add_argument("--model", type=_named_path, action="append", required=True)
     evaluate.add_argument("--output", type=Path, required=True)
     evaluate.add_argument("--budgets", type=_csv_ints, required=True)
     evaluate.add_argument("--candidates", type=_csv_strings, default=MPC_ACTION_NAMES)
@@ -107,7 +125,7 @@ def build_parser() -> argparse.ArgumentParser:
     evaluate.add_argument(
         "--baselines",
         type=_csv_strings,
-        default=("girard", "mpc_terminal_full_width"),
+        default=("girard", "scott", "pca", "combastel", "mpc_terminal_full_width"),
     )
     evaluate.add_argument(
         "--length", type=int, default=None,
@@ -164,9 +182,9 @@ def run_collect(args: argparse.Namespace) -> None:
     behavior = None
     behavior_model_sha256 = None
     if args.behavior_model is not None:
-        if args.validation_seeds or args.test_seeds:
+        if args.test_seeds:
             raise ValueError(
-                "learned-behavior aggregation must contain training trajectories only"
+                "learned-behavior aggregation supports held-out validation, not test shards"
             )
         behavior = RtlolaRankingPolicy(
             policy=_load_policy(args.behavior_model),
@@ -362,9 +380,19 @@ def _feature_schema_payload() -> dict[str, object]:
 
 
 def run_train(args: argparse.Namespace) -> None:
-    loaded = [load_ranking_dataset(path) for path in args.dataset]
+    inputs = tuple(args.dataset)
+    names = tuple(item.name for item in inputs)
+    if len(set(names)) != len(names):
+        raise ValueError("named training datasets must have unique names")
+    loaded = [load_ranking_dataset(item.path) for item in inputs]
+    _validate_named_datasets(inputs, loaded)
     dataset = RankingDataset.concatenate([item[0] for item in loaded])
-    sample_metadata = pd.concat([item[1] for item in loaded], ignore_index=True)
+    metadata_frames = []
+    for named_input, (_, metadata, _) in zip(inputs, loaded):
+        frame = metadata.copy()
+        frame.insert(0, "dataset_label", named_input.name)
+        metadata_frames.append(frame)
+    sample_metadata = pd.concat(metadata_frames, ignore_index=True)
     policy, result = train_ranking_policy(
         dataset,
         RTL_RANKING_FEATURE_SCHEMA,
@@ -378,25 +406,61 @@ def run_train(args: argparse.Namespace) -> None:
     args.output.mkdir(parents=True, exist_ok=True)
     policy.save(args.output)
     payload = {
-        "schema": "pzr.ranking-training.v1",
-        "datasets": [str(path) for path in args.dataset],
-        "dataset_sha256": [
-            sha256_files((path / "manifest.json", path / "samples.npz"))
-            for path in args.dataset
+        "schema": "pzr.ranking-training.v2",
+        "datasets": [
+            {
+                "name": item.name,
+                "path": str(item.path),
+                "sha256": sha256_files((
+                    item.path / "manifest.json",
+                    item.path / "samples.npz",
+                    item.path / "samples.csv",
+                    item.path / "candidate_costs.csv",
+                )),
+            }
+            for item in inputs
         ],
         "candidate_names": list(policy.candidate_names),
         "feature_schema": asdict(policy.feature_schema),
+        "target_contract": TARGET_CONTRACT,
         "training": asdict(result),
         "seed": args.seed,
+        "binding_revision": BINDING_REVISION,
+        "interpreter_revision": INTERPRETER_REVISION,
+        "binding_build_profile": BINDING_BUILD_PROFILE,
         "pzr_source_sha256": pzr_source_sha256(),
     }
     (args.output / "training.json").write_text(
         json.dumps(payload, indent=2, sort_keys=True),
     )
-    _validation_metric_frame(policy, dataset, sample_metadata).to_csv(
+    validation_metrics(policy, dataset, sample_metadata).to_csv(
         args.output / "validation_metrics.csv", index=False,
     )
+    dataset_diagnostics(dataset, sample_metadata).to_csv(
+        args.output / "dataset_diagnostics.csv", index=False,
+    )
+    candidate_diagnostics(policy, dataset, sample_metadata).to_csv(
+        args.output / "candidate_diagnostics.csv", index=False,
+    )
     print(f"Reducer ranker complete: {args.output}")
+
+
+def _validate_named_datasets(
+    inputs: Sequence[NamedPath],
+    loaded: Sequence[tuple[RankingDataset, pd.DataFrame, dict[str, object]]],
+) -> None:
+    first_dataset, _, first_manifest = loaded[0]
+    for named_input, (dataset, _, manifest) in zip(inputs, loaded):
+        if dataset.candidate_names != first_dataset.candidate_names:
+            raise ValueError(f"dataset {named_input.name!r} candidate catalog differs")
+        if dataset.feature_names != first_dataset.feature_names:
+            raise ValueError(f"dataset {named_input.name!r} feature schema differs")
+        if manifest.get("target_contract") != first_manifest.get("target_contract"):
+            raise ValueError(f"dataset {named_input.name!r} target schema differs")
+        if dataset.indices_for_split("train").size == 0:
+            raise ValueError(f"dataset {named_input.name!r} has no training samples")
+        if dataset.indices_for_split("validation").size == 0:
+            raise ValueError(f"dataset {named_input.name!r} has no validation samples")
 
 
 def _write_collection_summaries(metadata: pd.DataFrame, output: Path) -> None:
@@ -427,50 +491,29 @@ def _write_collection_summaries(metadata: pd.DataFrame, output: Path) -> None:
         counts.to_csv(output / filename, index=False)
 
 
-def _validation_metric_frame(
-    policy: RankingPolicy,
-    dataset: RankingDataset,
-    metadata: pd.DataFrame,
-) -> pd.DataFrame:
-    validation = np.asarray(dataset.splits) == "validation"
-    if not np.any(validation):
-        raise ValueError("training diagnostics require a validation split")
-    grouped_metadata = metadata.copy()
-    if "condition" not in grouped_metadata:
-        grouped_metadata["condition"] = "__unspecified__"
-    rows = []
-    groups: list[tuple[str, int | None, np.ndarray]] = [
-        ("__all__", None, validation),
-    ]
-    for (condition, budget), indices in grouped_metadata[validation].groupby(
-        ["condition", "budget"], dropna=False,
-    ).groups.items():
-        mask = np.zeros(dataset.num_samples, dtype=np.bool_)
-        mask[np.asarray(list(indices), dtype=np.int64)] = True
-        groups.append((str(condition), int(budget), mask))
-    for condition, budget, mask in groups:
-        metrics = evaluate_ranking(policy, dataset.subset(np.flatnonzero(mask)))
-        rows.append({
-            "condition": condition,
-            "budget": budget,
-            "sample_count": int(np.count_nonzero(mask)),
-            **asdict(metrics),
-        })
-    return pd.DataFrame(rows)
-
-
 def run_evaluate(args: argparse.Namespace) -> None:
     unknown_traces = set(args.trace_kinds) - set(TRACE_KINDS)
     if unknown_traces:
         raise ValueError(f"unknown fixed robot-arm traces: {sorted(unknown_traces)}")
     candidate_names = tuple(args.candidates)
-    policy = RtlolaRankingPolicy(
-        _load_policy(args.model), default_action_catalog(candidate_names),
-    )
+    model_inputs = tuple(args.model)
+    model_names = tuple(item.name for item in model_inputs)
+    if len(set(model_names)) != len(model_names):
+        raise ValueError("named evaluation models must have unique names")
+    policies = {
+        item.name: RtlolaRankingPolicy(
+            _load_policy(item.path), default_action_catalog(candidate_names),
+        )
+        for item in model_inputs
+    }
+    model_hashes = {
+        item.name: model_sha256(item.path) for item in model_inputs
+    }
+    model_directories = {item.name: item.path for item in model_inputs}
     run_fixed_learning_evaluation(
         FixedLearningEvaluationConfig(
             output=args.output,
-            model_name=args.model_name,
+            model_names=model_names,
             trace_kinds=tuple(args.trace_kinds),
             budgets=tuple(args.budgets),
             baselines=tuple(args.baselines),
@@ -479,10 +522,10 @@ def run_evaluate(args: argparse.Namespace) -> None:
             horizon=args.horizon,
             beam_width=args.beam_width,
         ),
-        policy,
-        model_sha256=model_sha256(args.model),
+        policies,
+        model_sha256=model_hashes,
         source_sha256=pzr_source_sha256(),
-        model_directory=args.model,
+        model_directories=model_directories,
         workers=args.workers,
     )
     print(f"Learning evaluation complete: {args.output}")
