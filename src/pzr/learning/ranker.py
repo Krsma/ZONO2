@@ -1,33 +1,37 @@
-"""PyTorch reducer scoring with pairwise and soft-distillation objectives."""
+"""PyTorch reducer scoring with ranking, distillation, and regret objectives."""
 
 from __future__ import annotations
 
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
-from typing import Literal
 
 import numpy as np
 from numpy.typing import NDArray
 import torch
 from torch import Tensor, nn
-from torch.nn import functional as F
 from torch.utils.data import DataLoader, TensorDataset
 
+from pzr.artifact_io import write_json_atomic
 from pzr.learning.dataset import ReducerCostDataset
-from pzr.learning.targets import (
+from pzr.learning.objectives import (
     ABSOLUTE_TOLERANCE,
-    PAIRWISE_OBJECTIVE_CONTRACT,
+    EXPECTED_REGRET_OBJECTIVE_CONTRACT,
+    ObjectiveName,
     RELATIVE_TOLERANCE,
+    cost_sensitive_pairwise_loss,
+    expected_regret_loss,
+    expected_regret_targets,
     normalized_regrets,
+    objective_contract,
     rankable_state_mask,
-    soft_objective_contract,
+    soft_distillation_loss,
     soft_teacher_distribution,
     tolerant_best_mask,
+    validate_objective_contract,
 )
 
 
-ObjectiveName = Literal["pairwise", "soft-kl"]
 MODEL_SCHEMA = "pzr.reducer-scorer.v3"
 
 
@@ -131,6 +135,12 @@ class ReducerMetrics:
     predicted_entropy: float
     kl_divergence: float
     infeasible_probability: float
+    regression_rmse: float
+    regression_mae: float
+    prediction_below_zero_count: int
+    prediction_above_two_count: int
+    prediction_outside_target_range_count: int
+    prediction_outside_target_range_rate: float
 
 
 @dataclass(frozen=True)
@@ -159,7 +169,7 @@ class ReducerPolicy:
     ) -> None:
         if normalizer.mean.size != len(model.feature_schema.feature_names):
             raise ValueError("model and normalizer feature dimensions differ")
-        _validate_objective_contract(objective_contract)
+        validate_objective_contract(objective_contract)
         self.model = model.cpu().eval()
         self.normalizer = normalizer
         self.objective_contract = dict(objective_contract)
@@ -208,7 +218,7 @@ class ReducerPolicy:
             "torch_version": torch.__version__,
             "objective_contract": self.objective_contract,
         }
-        (directory / "model.json").write_text(json.dumps(payload, indent=2, sort_keys=True))
+        write_json_atomic(payload, directory / "model.json")
 
     @classmethod
     def load(cls, directory: Path) -> "ReducerPolicy":
@@ -216,7 +226,7 @@ class ReducerPolicy:
         if payload.get("schema") != MODEL_SCHEMA:
             raise ValueError("unsupported reducer scorer schema")
         objective_contract = dict(payload["objective_contract"])
-        _validate_objective_contract(objective_contract)
+        validate_objective_contract(objective_contract)
         schema_payload = payload["feature_schema"]
         schema = FeatureSchema(
             name=str(schema_payload["name"]),
@@ -241,76 +251,6 @@ class ReducerPolicy:
         )
 
 
-def cost_sensitive_pairwise_loss(
-    scores: Tensor,
-    teacher_costs: Tensor,
-    feasible: Tensor,
-) -> Tensor:
-    """Average independently normalized pairwise softplus losses over states."""
-    if scores.shape != teacher_costs.shape or feasible.shape != scores.shape:
-        raise ValueError("score, cost, and feasibility tensors must align")
-    safe_costs = torch.where(feasible, teacher_costs, torch.zeros_like(teacher_costs))
-    cost_i = safe_costs.unsqueeze(2)
-    cost_j = safe_costs.unsqueeze(1)
-    feasible_i = feasible.unsqueeze(2)
-    feasible_j = feasible.unsqueeze(1)
-    gap = cost_j - cost_i
-    tolerance = torch.maximum(
-        torch.full_like(gap, ABSOLUTE_TOLERANCE),
-        RELATIVE_TOLERANCE * torch.maximum(cost_i.abs(), cost_j.abs()),
-    )
-    ranked = feasible_i & feasible_j & (gap > tolerance)
-    feasible_over_infeasible = feasible_i & ~feasible_j
-    meaningful_gaps = torch.where(ranked, gap, torch.zeros_like(gap))
-    largest_gap = meaningful_gaps.amax(dim=(1, 2), keepdim=True)
-    weights = torch.where(
-        largest_gap > 0.0,
-        meaningful_gaps / torch.clamp_min(largest_gap, ABSOLUTE_TOLERANCE),
-        torch.zeros_like(gap),
-    )
-    weights = torch.where(feasible_over_infeasible, torch.ones_like(weights), weights)
-    score_margin = scores.unsqueeze(2) - scores.unsqueeze(1)
-    state_weight = weights.sum(dim=(1, 2))
-    rankable = state_weight > 0.0
-    if not bool(torch.any(rankable)):
-        return scores.sum() * 0.0
-    state_loss = (weights * F.softplus(score_margin)).sum(dim=(1, 2))
-    return (state_loss[rankable] / state_weight[rankable]).mean()
-
-
-def soft_distillation_loss(
-    scores: Tensor,
-    teacher_probabilities: Tensor,
-    feasible: Tensor,
-    *,
-    feasibility_penalty: float,
-) -> tuple[Tensor, Tensor, Tensor]:
-    """Return state-balanced total, KL, and infeasible-mass losses."""
-    if scores.shape != teacher_probabilities.shape or feasible.shape != scores.shape:
-        raise ValueError("score, target-probability, and feasibility tensors must align")
-    valid = feasible.any(dim=1)
-    if not bool(torch.any(valid)):
-        zero = scores.sum() * 0.0
-        return zero, zero, zero
-    log_probability = F.log_softmax(-scores, dim=1)
-    probability = torch.softmax(-scores, dim=1)
-    positive = teacher_probabilities > 0.0
-    log_teacher = torch.where(
-        positive,
-        torch.log(torch.clamp_min(teacher_probabilities, torch.finfo(scores.dtype).tiny)),
-        torch.zeros_like(teacher_probabilities),
-    )
-    state_kl = torch.where(
-        positive,
-        teacher_probabilities * (log_teacher - log_probability),
-        torch.zeros_like(scores),
-    ).sum(dim=1)
-    state_infeasible = torch.where(~feasible, probability, torch.zeros_like(probability)).sum(dim=1)
-    kl = state_kl[valid].mean()
-    infeasible_mass = state_infeasible[valid].mean()
-    return kl + feasibility_penalty * infeasible_mass, kl, infeasible_mass
-
-
 def train_reducer_policy(
     dataset: ReducerCostDataset,
     feature_schema: FeatureSchema,
@@ -328,27 +268,22 @@ def train_reducer_policy(
 ) -> tuple[ReducerPolicy, ReducerTrainingResult]:
     if dataset.feature_names != feature_schema.feature_names:
         raise ValueError("dataset does not match feature schema")
-    if objective == "pairwise":
-        if temperature is not None:
-            raise ValueError("pairwise training does not accept a temperature")
-        objective_contract = dict(PAIRWISE_OBJECTIVE_CONTRACT)
-    elif objective == "soft-kl":
-        if temperature is None:
-            raise ValueError("soft-KL training requires a temperature")
-        objective_contract = soft_objective_contract(temperature, feasibility_penalty)
-    else:
-        raise ValueError(f"unsupported training objective: {objective}")
+    contract = objective_contract(
+        objective,
+        temperature=temperature,
+        feasibility_penalty=feasibility_penalty,
+    )
     train_indices = dataset.indices_for_split("train")
     val_indices = dataset.indices_for_split("validation")
     if train_indices.size == 0 or val_indices.size == 0:
         raise ValueError("training and validation splits must both be non-empty")
     if epochs < 1 or batch_size < 1 or patience < 1:
         raise ValueError("epochs, batch size, and patience must be positive")
-    if objective == "soft-kl" and (
+    if objective in ("soft-kl", "expected-regret") and (
         not np.any(np.any(dataset.feasible[train_indices], axis=1))
         or not np.any(np.any(dataset.feasible[val_indices], axis=1))
     ):
-        raise ValueError("soft-KL training and validation each need a feasible state")
+        raise ValueError(f"{objective} training and validation each need a feasible state")
     if objective == "pairwise" and (
         not np.any(rankable_state_mask(dataset.teacher_costs[train_indices], dataset.feasible[train_indices]))
         or not np.any(rankable_state_mask(dataset.teacher_costs[val_indices], dataset.feasible[val_indices]))
@@ -364,9 +299,15 @@ def train_reducer_policy(
     costs = torch.tensor(dataset.teacher_costs, dtype=torch.float64)
     feasible = torch.tensor(dataset.feasible, dtype=torch.bool)
     teacher_probabilities = None
+    regression_targets = None
     if objective == "soft-kl":
         teacher_probabilities = torch.tensor(
             soft_teacher_distribution(dataset.teacher_costs, dataset.feasible, float(temperature)),
+            dtype=torch.float64,
+        )
+    elif objective == "expected-regret":
+        regression_targets = torch.tensor(
+            expected_regret_targets(dataset.teacher_costs, dataset.feasible),
             dtype=torch.float64,
         )
     model = ReducerScorer(feature_schema, dataset.candidate_names, hidden_sizes)
@@ -393,6 +334,13 @@ def train_reducer_policy(
         scores = model(features[indices]).to(torch.float64)
         if objective == "pairwise":
             total = cost_sensitive_pairwise_loss(scores, costs[indices], feasible[indices])
+            zero = total.detach() * 0.0
+            return total, zero, zero
+        if objective == "expected-regret":
+            assert regression_targets is not None
+            total = expected_regret_loss(
+                scores, regression_targets[indices], feasible[indices],
+            )
             zero = total.detach() * 0.0
             return total, zero, zero
         assert teacher_probabilities is not None
@@ -433,7 +381,7 @@ def train_reducer_policy(
                 break
     assert best_state is not None
     model.load_state_dict(best_state)
-    policy = ReducerPolicy(model, normalizer, objective_contract)
+    policy = ReducerPolicy(model, normalizer, contract)
     return policy, ReducerTrainingResult(
         objective=objective,
         epochs=len(train_history),
@@ -502,6 +450,19 @@ def evaluate_reducer(policy: ReducerPolicy, dataset: ReducerCostDataset) -> Redu
     if np.any(valid):
         predicted_entropy = float(np.mean(-np.sum(probabilities * np.log(np.maximum(probabilities, 1e-300)), axis=1)[valid]))
     infeasible_probability = np.sum(np.where(~dataset.feasible, probabilities, 0.0), axis=1)
+    regression_rmse = regression_mae = float("nan")
+    below_zero_count = above_two_count = outside_count = 0
+    outside_rate = float("nan")
+    if objective_schema == EXPECTED_REGRET_OBJECTIVE_CONTRACT["schema"] and np.any(valid):
+        targets = expected_regret_targets(dataset.teacher_costs, dataset.feasible)
+        errors = scores[valid] - targets[valid]
+        regression_rmse = float(np.sqrt(np.mean(np.square(errors))))
+        regression_mae = float(np.mean(np.abs(errors)))
+        valid_scores = scores[valid]
+        below_zero_count = int(np.count_nonzero(valid_scores < 0.0))
+        above_two_count = int(np.count_nonzero(valid_scores > 2.0))
+        outside_count = below_zero_count + above_two_count
+        outside_rate = float(outside_count / valid_scores.size)
     return ReducerMetrics(
         pairwise_accuracy=float(correct / total) if total else 1.0,
         top1_accuracy=float(np.mean(top1[valid])) if np.any(valid) else float("nan"),
@@ -517,21 +478,10 @@ def evaluate_reducer(policy: ReducerPolicy, dataset: ReducerCostDataset) -> Redu
         predicted_entropy=predicted_entropy,
         kl_divergence=kl_divergence,
         infeasible_probability=float(np.mean(infeasible_probability[valid])) if np.any(valid) else float("nan"),
+        regression_rmse=regression_rmse,
+        regression_mae=regression_mae,
+        prediction_below_zero_count=below_zero_count,
+        prediction_above_two_count=above_two_count,
+        prediction_outside_target_range_count=outside_count,
+        prediction_outside_target_range_rate=outside_rate,
     )
-
-
-def _validate_objective_contract(contract: dict[str, object]) -> None:
-    schema = contract.get("schema")
-    if schema == PAIRWISE_OBJECTIVE_CONTRACT["schema"]:
-        if contract != PAIRWISE_OBJECTIVE_CONTRACT:
-            raise ValueError("pairwise objective contract differs")
-        return
-    if schema == "pzr.reducer-objective.soft-kl-v1":
-        expected = soft_objective_contract(
-            float(contract["temperature"]),
-            float(contract["feasibility_penalty"]),
-        )
-        if contract != expected:
-            raise ValueError("soft-KL objective contract differs")
-        return
-    raise ValueError("unsupported reducer objective contract")

@@ -3,22 +3,25 @@ import pytest
 import torch
 
 from pzr.learning.dataset import ReducerCostDataset
+from pzr.learning.objectives import (
+    EXPECTED_REGRET_OBJECTIVE_CONTRACT,
+    PAIRWISE_OBJECTIVE_CONTRACT,
+    cost_sensitive_pairwise_loss,
+    expected_regret_loss,
+    expected_regret_targets,
+    normalized_regrets,
+    rankable_state_mask,
+    soft_objective_contract,
+    soft_distillation_loss,
+    soft_teacher_distribution,
+    tolerant_best_mask,
+)
 from pzr.learning.ranker import (
     FeatureNormalizer,
     FeatureSchema,
     ReducerPolicy,
     ReducerScorer,
-    cost_sensitive_pairwise_loss,
-    soft_distillation_loss,
     train_reducer_policy,
-)
-from pzr.learning.targets import (
-    PAIRWISE_OBJECTIVE_CONTRACT,
-    normalized_regrets,
-    rankable_state_mask,
-    soft_objective_contract,
-    soft_teacher_distribution,
-    tolerant_best_mask,
 )
 
 
@@ -78,6 +81,48 @@ def test_soft_targets_are_invariant_to_positive_cost_rescaling():
     )
 
 
+def test_expected_regret_targets_are_scale_invariant_and_penalize_infeasible():
+    costs = np.asarray([[2.0, 5.0, 11.0, np.nan]])
+    feasible = np.asarray([[True, True, True, False]])
+    expected = np.asarray([[0.0, 1.0 / 3.0, 1.0, 2.0]])
+    np.testing.assert_allclose(expected_regret_targets(costs, feasible), expected)
+    np.testing.assert_allclose(
+        expected_regret_targets(costs * 1e6, feasible), expected,
+    )
+
+
+def test_expected_regret_loss_weights_states_equally_and_skips_all_infeasible():
+    scores = torch.tensor([
+        [0.0, 0.0, 0.0, 0.0],
+        [1.0, 1.0, 1.0, 1.0],
+        [3.0, 3.0, 3.0, 3.0],
+    ], dtype=torch.float64, requires_grad=True)
+    targets = torch.zeros_like(scores)
+    feasible = torch.tensor([
+        [True, True, True, True],
+        [True, False, False, False],
+        [False, False, False, False],
+    ])
+    combined = expected_regret_loss(scores, targets, feasible)
+    separate = torch.stack([
+        expected_regret_loss(scores[index:index + 1], targets[index:index + 1], feasible[index:index + 1])
+        for index in range(2)
+    ]).mean()
+    torch.testing.assert_close(combined, separate)
+    assert float(combined.detach()) == pytest.approx(0.5)
+
+
+def test_expected_regret_aliases_estimate_conditional_mean_targets():
+    targets = torch.tensor([[0.0, 2.0], [2.0, 0.0]], dtype=torch.float64)
+    feasible = torch.ones_like(targets, dtype=torch.bool)
+    conditional_mean = torch.ones_like(targets)
+    low = expected_regret_loss(conditional_mean, targets, feasible)
+    left_mode = expected_regret_loss(torch.tensor([[0.0, 2.0], [0.0, 2.0]]), targets, feasible)
+    right_mode = expected_regret_loss(torch.tensor([[2.0, 0.0], [2.0, 0.0]]), targets, feasible)
+    assert low < left_mode
+    assert low < right_mode
+
+
 def test_soft_loss_gives_states_equal_weight_despite_catastrophic_gap():
     costs = np.asarray([[0.0, 1.0], [0.0, 1e30]])
     feasible = np.ones_like(costs, dtype=np.bool_)
@@ -120,6 +165,7 @@ def test_tight_scale_aware_ties_are_uniform_and_skipped_consistently():
     np.testing.assert_array_equal(rankable_state_mask(costs, feasible), [False, True])
     np.testing.assert_allclose(normalized_regrets(costs, feasible)[0], [0.0, 0.0])
     np.testing.assert_allclose(soft_teacher_distribution(costs, feasible, 0.1)[0], [0.5, 0.5])
+    np.testing.assert_allclose(expected_regret_targets(costs, feasible)[0], [0.0, 0.0])
 
 
 def test_all_infeasible_state_is_skipped_by_soft_loss():
@@ -144,7 +190,10 @@ def test_inference_ties_use_candidate_catalog_order():
     assert policy.rank_candidates(np.asarray([0.0, 0.0])) == ["girard", "scott", "pca"]
 
 
-@pytest.mark.parametrize("objective,temperature", [("pairwise", None), ("soft-kl", 0.2)])
+@pytest.mark.parametrize(
+    "objective,temperature",
+    [("pairwise", None), ("soft-kl", 0.2), ("expected-regret", None)],
+)
 def test_scorer_trains_deterministically_and_round_trips(tmp_path, objective, temperature):
     left, left_result = train_reducer_policy(
         _dataset(), SCHEMA, objective=objective, temperature=temperature,
@@ -161,7 +210,13 @@ def test_scorer_trains_deterministically_and_round_trips(tmp_path, objective, te
     loaded = ReducerPolicy.load(tmp_path)
     np.testing.assert_allclose(loaded.predict_scores(raw), left.predict_scores(raw))
     assert loaded.objective_contract == (
-        PAIRWISE_OBJECTIVE_CONTRACT if objective == "pairwise" else soft_objective_contract(0.2, 1.0)
+        PAIRWISE_OBJECTIVE_CONTRACT
+        if objective == "pairwise"
+        else (
+            soft_objective_contract(0.2, 1.0)
+            if objective == "soft-kl"
+            else EXPECTED_REGRET_OBJECTIVE_CONTRACT
+        )
     )
 
 

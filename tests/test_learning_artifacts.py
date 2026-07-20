@@ -29,6 +29,7 @@ def test_reducer_cost_artifact_round_trip_is_non_empty(tmp_path):
     np.testing.assert_array_equal(loaded.features, _dataset().features)
     np.testing.assert_allclose(loaded.teacher_costs, _dataset().teacher_costs, equal_nan=True)
     assert tuple(metadata["sample_id"]) == loaded.sample_ids
+    assert manifest["schema"] == "pzr.reducer-cost-dataset.v5"
     assert manifest["cost_contract"]["schema"] == "pzr.reducer-cost-target.v3"
     for name in ("samples.npz", "samples.csv", "candidate_costs.csv", "manifest.json"):
         assert (tmp_path / name).stat().st_size > 0

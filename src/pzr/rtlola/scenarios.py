@@ -52,6 +52,8 @@ class RtlolaScenario:
     public_stream_keys: tuple[str, ...]
     trigger_keys: tuple[str, ...]
     trace_factory: TraceFactory
+    input_channel_names: tuple[str, ...]
+    timestamp_channel_indices: tuple[int, ...] = ()
     source_revision: str | None = None
     trigger_labels: tuple[str, ...] = ()
 
@@ -110,6 +112,8 @@ def registered_scenarios() -> tuple[RtlolaScenario, ...]:
             public_stream_keys=OMNI_PUBLIC_STREAM_KEYS,
             trigger_keys=OMNI_EXPECTED_VERDICT_KEYS,
             trace_factory=_omni_trace_factory,
+            input_channel_names=("time", "direction", "acceleration"),
+            timestamp_channel_indices=(0,),
             trigger_labels=OMNI_EXPECTED_VERDICT_KEYS,
         ),
         RtlolaScenario(
@@ -122,6 +126,11 @@ def registered_scenarios() -> tuple[RtlolaScenario, ...]:
             public_stream_keys=ARM_PUBLIC_STREAM_KEYS,
             trigger_keys=ARM_TRIGGER_KEYS,
             trace_factory=_arm_trace_factory,
+            input_channel_names=(
+                "time", "a1m", "a2m", "a3m", "a4m", "a5m",
+                "cx", "cy", "cz", "x_min", "x_max", "y_min", "y_max",
+            ),
+            timestamp_channel_indices=(0,),
             source_revision=RLOLAEVAL_REVISION,
             trigger_labels=tuple(
                 ARM_TRIGGER_LABELS[key] for key in ARM_TRIGGER_KEYS

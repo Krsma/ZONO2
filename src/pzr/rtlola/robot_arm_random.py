@@ -15,6 +15,7 @@ from typing import Callable
 import numpy as np
 from numpy.typing import NDArray
 
+from pzr.artifact_io import atomic_text_writer, write_json_atomic
 from pzr.rtlola.engine import RtlolaEvent
 from pzr.rtlola.robot_arm import RobotArmTraceRow, SCENE_PATH
 
@@ -231,8 +232,7 @@ def write_random_waypoint_trace(trace: RandomWaypointTrace, directory: Path) -> 
     """Persist a generated trace and provenance as an explicit artifact."""
     directory.mkdir(parents=True, exist_ok=True)
     csv_path = directory / "trace.csv"
-    temporary_csv = directory / ".trace.csv.tmp"
-    with temporary_csv.open("w", newline="") as handle:
+    with atomic_text_writer(csv_path, newline="") as handle:
         writer = csv.writer(handle)
         writer.writerow((
             "time", "a1m", "a2m", "a3m", "a4m", "a5m",
@@ -247,12 +247,7 @@ def write_random_waypoint_trace(trace: RandomWaypointTrace, directory: Path) -> 
                 *(_sparse_value(value) for value in row.expected_center),
                 *(_sparse_value(value) for value in row.geofence),
             ))
-    temporary_csv.replace(csv_path)
-    temporary_metadata = directory / ".metadata.json.tmp"
-    temporary_metadata.write_text(
-        json.dumps(asdict(trace.metadata), indent=2, sort_keys=True),
-    )
-    temporary_metadata.replace(directory / "metadata.json")
+    write_json_atomic(asdict(trace.metadata), directory / "metadata.json")
 
 
 def load_random_waypoint_trace(directory: Path) -> RandomWaypointTrace:

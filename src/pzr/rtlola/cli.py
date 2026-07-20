@@ -82,6 +82,7 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--length", type=int, default=None)
     parser.add_argument("--horizon", type=int, default=None)
     parser.add_argument("--beam-width", type=int, default=None)
+    parser.add_argument("--prediction-step-seconds", type=float, default=0.1)
     parser.add_argument("--mpc-tail-horizon", type=int, default=8)
     parser.add_argument("--mpc-root-beam-width", type=int, default=1)
     parser.add_argument(
@@ -112,6 +113,7 @@ def main(argv: list[str] | None = None) -> None:
         "output_dir": str(args.output),
         "mpc_tail_horizon": args.mpc_tail_horizon,
         "mpc_root_beam_width": args.mpc_root_beam_width,
+        "prediction_step_seconds": args.prediction_step_seconds,
     }
     if args.mpc_candidates is not None:
         params["mpc_candidate_names"] = args.mpc_candidates

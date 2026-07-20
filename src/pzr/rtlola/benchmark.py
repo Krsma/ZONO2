@@ -2,16 +2,17 @@
 
 from __future__ import annotations
 
-from dataclasses import asdict, dataclass, field
+from dataclasses import asdict, dataclass, field, replace
 import hashlib
 from pathlib import Path
 import time
-from typing import Protocol, Sequence
+from typing import Mapping, Protocol, Sequence
 
 import numpy as np
 import pandas as pd
 import yaml
 
+from pzr.artifact_io import write_csv_atomic, write_text_atomic
 from pzr.rtlola.actions import (
     CORE_STATIC_ACTION_NAMES,
     EXACT_BASELINE_ACTION_NAME,
@@ -32,6 +33,11 @@ from pzr.rtlola.engine import (
     RtlolaEvent,
     RtlolaStateRef,
     RtlolaStepResult,
+)
+from pzr.rtlola.input_prediction import (
+    InputPredictionDiagnostic,
+    prediction_diagnostics,
+    predict_future_events,
 )
 from pzr.rtlola.reference import (
     REFERENCE_CACHE_SCHEMA,
@@ -58,7 +64,14 @@ CORE_STATIC_METHODS = CORE_STATIC_ACTION_NAMES
 STATIC_METHODS = STATIC_ACTION_METHOD_NAMES
 BASELINE_MPC_METHODS = ("mpc_terminal_beam",)
 FULL_WIDTH_MPC_METHOD = "mpc_terminal_full_width"
-MPC_METHODS = (*tuple(MPC_VARIANTS), FULL_WIDTH_MPC_METHOD)
+PREDICTIVE_MPC_METHODS = {
+    "mpc_terminal_beam_predictive_hold": "hold",
+    "mpc_terminal_beam_predictive_linear": "linear",
+    "mpc_terminal_beam_predictive_quadratic": "quadratic",
+}
+MPC_METHODS = (
+    *tuple(MPC_VARIANTS), FULL_WIDTH_MPC_METHOD, *tuple(PREDICTIVE_MPC_METHODS),
+)
 ALL_METHODS = (*STATIC_METHODS, *MPC_METHODS)
 CORE_METHODS = (*CORE_STATIC_METHODS, *BASELINE_MPC_METHODS)
 TERMINAL_BINDING_APPROX_LOSS = "terminal_binding_approx_loss"
@@ -109,6 +122,7 @@ class RtlolaBenchmarkConfig:
     budget: int = 10
     horizon: int = 2
     beam_width: int = 4
+    prediction_step_seconds: float = 0.1
     mpc_tail_horizon: int = 8
     mpc_root_beam_width: int = 1
     seeds: int = 3
@@ -175,6 +189,8 @@ class RtlolaStepRecord:
     tail_path_loss: float = float("nan")
     tail_terminal_loss: float = float("nan")
     tail_fallback_count: int = 0
+    input_predictor: str = ""
+    prediction_step_seconds: float = float("nan")
     root_evaluations: tuple[MpcRootEvaluation, ...] = ()
 
 
@@ -195,6 +211,7 @@ class RtlolaRunResult:
     steps: tuple[RtlolaStepRecord, ...]
     budget: int | None = None
     trace_kind: str = "default"
+    prediction_diagnostics: tuple[InputPredictionDiagnostic, ...] = ()
 
     @property
     def total_reductions(self) -> int:
@@ -226,6 +243,8 @@ class RtlolaBenchmarkResult:
     timeseries: pd.DataFrame
     summary: pd.DataFrame
     aggregate: pd.DataFrame
+    prediction_diagnostics: pd.DataFrame
+    prediction_error_summary: pd.DataFrame
     failures: tuple[RtlolaRunFailure, ...] = ()
 
 
@@ -303,6 +322,39 @@ def aggregate_summary(
 
 
 def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
+    """Evaluate configured built-in methods through the common validated loop."""
+    return _run_benchmark_loop(
+        config,
+        methods=methods_for_config(config),
+        direct_policies={},
+    )
+
+
+def run_direct_policy_benchmark(
+    config: RtlolaBenchmarkConfig,
+    policy: DirectRtlolaPolicy,
+    *,
+    method: str,
+) -> RtlolaBenchmarkResult:
+    """Evaluate one direct policy through the common validated loop."""
+    return _run_benchmark_loop(
+        config,
+        methods=(method,),
+        direct_policies={method: policy},
+    )
+
+
+def _run_benchmark_loop(
+    config: RtlolaBenchmarkConfig,
+    *,
+    methods: Sequence[str],
+    direct_policies: Mapping[str, DirectRtlolaPolicy],
+) -> RtlolaBenchmarkResult:
+    """Run built-in and direct policies with identical trace/reference accounting."""
+    if not methods or len(set(methods)) != len(methods):
+        raise ValueError("benchmark methods must be non-empty and unique")
+    if not set(direct_policies) <= set(methods):
+        raise ValueError("direct policies must correspond to requested methods")
     if config.reference_mode not in {"exact", "verdict", "off"}:
         raise ValueError("reference_mode must be one of: exact, verdict, off")
     if config.length < 1:
@@ -315,6 +367,8 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
         raise ValueError("horizon must be non-negative")
     if config.beam_width < 1:
         raise ValueError("beam_width must be >= 1")
+    if not np.isfinite(config.prediction_step_seconds) or config.prediction_step_seconds <= 0.0:
+        raise ValueError("prediction_step_seconds must be positive and finite")
     if config.mpc_tail_horizon < 0:
         raise ValueError("mpc_tail_horizon must be non-negative")
     if config.mpc_root_beam_width < 1:
@@ -348,7 +402,7 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
             )
             if config.reference_mode != "off" else None
         )
-        for method in methods_for_config(config):
+        for method in methods:
             outcome = _run_single(
                 config,
                 scenario,
@@ -360,6 +414,7 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
                 seed,
                 generated.trace_kind,
                 reference,
+                direct_policy=direct_policies.get(method),
             )
             if isinstance(outcome, RtlolaRunFailure):
                 failures.append(outcome)
@@ -368,6 +423,19 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
     timeseries = results_to_dataframe(raw)
     summary = summarize_results(raw)
     aggregate = aggregate_summary(summary)
+    diagnostic_rows = [
+        {
+            **asdict(row),
+            "method": run.method,
+            "seed": run.seed,
+            "budget": run.budget,
+            "trace_kind": run.trace_kind,
+        }
+        for run in raw
+        for row in run.prediction_diagnostics
+    ]
+    prediction_rows = pd.DataFrame(diagnostic_rows)
+    prediction_summary = summarize_prediction_errors(prediction_rows)
     if timeseries.empty:
         timeseries = pd.DataFrame(
             columns=("seed", "method", "budget", "trace_kind"),
@@ -386,63 +454,8 @@ def run_benchmark(config: RtlolaBenchmarkConfig) -> RtlolaBenchmarkResult:
         timeseries=timeseries,
         summary=summary,
         aggregate=aggregate,
-        failures=tuple(failures),
-    )
-
-
-def run_direct_policy_benchmark(
-    config: RtlolaBenchmarkConfig,
-    policy: DirectRtlolaPolicy,
-    *,
-    method: str = "learned_direct",
-) -> RtlolaBenchmarkResult:
-    """Evaluate one direct policy with the standard trace and reference machinery."""
-    if config.reference_mode not in {"exact", "verdict", "off"}:
-        raise ValueError("reference_mode must be one of: exact, verdict, off")
-    scenario = scenario_by_name(config.scenario)
-    catalog = default_action_catalog(tuple(config.mpc_candidate_names))
-    raw: list[RtlolaRunResult] = []
-    failures: list[RtlolaRunFailure] = []
-    for seed in range(config.seeds):
-        generated = scenario.generate_trace(
-            config.length, seed, trace_kind=config.trace_kind,
-        )
-        reference = (
-            load_or_compute_reference(
-                generated.events,
-                scenario=scenario,
-                trace_kind=generated.trace_kind,
-                seed=seed,
-                cache_path=reference_cache_path(
-                    config.reference_cache, seed, config.seeds,
-                ),
-                include_approximation=config.reference_mode == "exact",
-            )
-            if config.reference_mode != "off" else None
-        )
-        outcome = _run_single(
-            config,
-            scenario,
-            generated.events,
-            method,
-            catalog.mpc_candidates,
-            catalog.by_name,
-            catalog.fallback,
-            seed,
-            generated.trace_kind,
-            reference,
-            direct_policy=policy,
-        )
-        if isinstance(outcome, RtlolaRunFailure):
-            failures.append(outcome)
-        else:
-            raw.append(outcome)
-    return RtlolaBenchmarkResult(
-        config=config,
-        raw_results=tuple(raw),
-        timeseries=results_to_dataframe(raw),
-        summary=summarize_results(raw),
-        aggregate=aggregate_summary(summarize_results(raw)),
+        prediction_diagnostics=prediction_rows,
+        prediction_error_summary=prediction_summary,
         failures=tuple(failures),
     )
 
@@ -466,6 +479,7 @@ def _run_single(
         expected_verdict_keys=scenario.expected_verdict_keys,
     )
     steps: list[RtlolaStepRecord] = []
+    run_prediction_diagnostics: list[InputPredictionDiagnostic] = []
     for index, event in enumerate(trace):
         state = engine.snapshot(step=index, time=event.time)
         try:
@@ -482,7 +496,19 @@ def _run_single(
                 "inspect",
                 exc,
             )
-        future = tuple(trace[index + 1:index + 1 + config.horizon])
+        predictor = PREDICTIVE_MPC_METHODS.get(method)
+        if predictor is None:
+            future = tuple(trace[index + 1:index + 1 + config.horizon])
+            prediction = None
+        else:
+            prediction = predict_future_events(
+                trace[:index + 1],
+                predictor=predictor,
+                horizon=config.horizon,
+                step_seconds=config.prediction_step_seconds,
+                timestamp_channel_indices=scenario.timestamp_channel_indices,
+            )
+            future = prediction.events
         start = time.perf_counter()
         try:
             decision = direct_policy.choose(
@@ -512,6 +538,16 @@ def _run_single(
                 "select",
                 exc,
             )
+
+        if prediction is not None:
+            actual_future = tuple(trace[index + 1:index + 1 + config.horizon])
+            run_prediction_diagnostics.extend(prediction_diagnostics(
+                prediction,
+                actual_future,
+                predictor=predictor,
+                decision_step=index,
+                channel_names=scenario.input_channel_names,
+            ))
 
         try:
             committed = _commit_decision(
@@ -568,6 +604,7 @@ def _run_single(
         steps=tuple(steps),
         budget=config.budget,
         trace_kind=trace_kind,
+        prediction_diagnostics=tuple(run_prediction_diagnostics),
     )
 
 
@@ -598,8 +635,8 @@ def _select_method_decision(
             evaluated_leaves=1,
             pruned_branches=0,
         )
-    if method == "mpc_terminal_beam":
-        return beam_search(
+    if method == "mpc_terminal_beam" or method in PREDICTIVE_MPC_METHODS:
+        decision = beam_search(
             engine,
             state,
             event,
@@ -612,16 +649,25 @@ def _select_method_decision(
             use_reference_loss=True,
             configured_horizon=config.horizon,
         )
+        if method in PREDICTIVE_MPC_METHODS:
+            return replace(
+                decision,
+                mpc_variant=method,
+                input_predictor=PREDICTIVE_MPC_METHODS[method],
+                prediction_step_seconds=config.prediction_step_seconds,
+            )
+        return decision
     if method == FULL_WIDTH_MPC_METHOD:
         return full_width_terminal_search(
             engine,
             state,
             event,
-            trace[step + 1] if step + 1 < len(trace) else None,
+            future,
             mpc_candidates,
             config.budget,
             fallback=fallback,
             none_action=by_name[EXACT_BASELINE_ACTION_NAME],
+            configured_horizon=config.horizon,
         )
     if method in MPC_VARIANTS:
         variant = MPC_VARIANTS[method]
@@ -783,6 +829,8 @@ def make_step_record(
         tail_path_loss=decision.tail_path_loss,
         tail_terminal_loss=decision.tail_terminal_loss,
         tail_fallback_count=decision.tail_fallback_count,
+        input_predictor=decision.input_predictor,
+        prediction_step_seconds=decision.prediction_step_seconds,
         root_evaluations=decision.root_evaluations,
     )
 
@@ -864,6 +912,8 @@ def results_to_dataframe(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
                 "tail_path_loss": step.tail_path_loss,
                 "tail_terminal_loss": step.tail_terminal_loss,
                 "tail_fallback_count": step.tail_fallback_count,
+                "input_predictor": step.input_predictor,
+                "prediction_step_seconds": step.prediction_step_seconds,
             }
             row.update(step.trigger_verdicts)
             row.update({
@@ -902,6 +952,8 @@ def root_evaluations_to_dataframe(
         "realized_optimized_horizon",
         "configured_tail_horizon",
         "root_beam_width",
+        "input_predictor",
+        "prediction_step_seconds",
     )
     rows: list[dict[str, object]] = []
     for run in results:
@@ -931,6 +983,8 @@ def root_evaluations_to_dataframe(
                     "realized_optimized_horizon": step.realized_optimized_horizon,
                     "configured_tail_horizon": step.configured_tail_horizon,
                     "root_beam_width": step.root_beam_width,
+                    "input_predictor": step.input_predictor,
+                    "prediction_step_seconds": step.prediction_step_seconds,
                 })
     return pd.DataFrame(rows, columns=columns)
 
@@ -980,6 +1034,15 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
         reducer_failure_count = sum(step.reducer_failure_count for step in run.steps)
         infeasible_candidate_count = sum(step.infeasible_candidate_count for step in run.steps)
         tail_fallback_count = sum(step.tail_fallback_count for step in run.steps)
+        evaluated_leaves = np.asarray(
+            [step.evaluated_leaves for step in run.steps], dtype=np.float64,
+        )
+        pruned_branches = np.asarray(
+            [step.pruned_branches for step in run.steps], dtype=np.float64,
+        )
+        realized_horizons = np.asarray(
+            [step.realized_optimized_horizon for step in run.steps], dtype=np.float64,
+        )
         first_step = run.steps[0] if run.steps else None
         rows.append({
             "method": run.method,
@@ -990,10 +1053,17 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             "mpc_objective": first_step.mpc_objective if first_step is not None else "",
             "root_strategy": first_step.root_strategy if first_step is not None else "",
             "optimized_horizon": first_step.optimized_horizon if first_step is not None else 0,
+            "mean_realized_optimized_horizon": float(np.mean(realized_horizons)),
+            "min_realized_optimized_horizon": int(np.min(realized_horizons)),
+            "max_realized_optimized_horizon": int(np.max(realized_horizons)),
             "configured_tail_horizon": (
                 first_step.configured_tail_horizon if first_step is not None else 0
             ),
             "root_beam_width": first_step.root_beam_width if first_step is not None else 0,
+            "input_predictor": first_step.input_predictor if first_step is not None else "",
+            "prediction_step_seconds": (
+                first_step.prediction_step_seconds if first_step is not None else float("nan")
+            ),
             "mean_state_width": float(np.mean(widths)),
             "max_state_width": float(np.max(widths)),
             "mean_generator_count": float(np.mean(gens)),
@@ -1030,8 +1100,40 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             "reducer_failure_count": reducer_failure_count,
             "infeasible_candidate_count": infeasible_candidate_count,
             "tail_fallback_count": tail_fallback_count,
+            "mean_evaluated_leaves": float(np.mean(evaluated_leaves)),
+            "max_evaluated_leaves": int(np.max(evaluated_leaves)),
+            "total_evaluated_leaves": int(np.sum(evaluated_leaves)),
+            "mean_pruned_branches": float(np.mean(pruned_branches)),
+            "max_pruned_branches": int(np.max(pruned_branches)),
+            "total_pruned_branches": int(np.sum(pruned_branches)),
         })
     return pd.DataFrame(rows)
+
+
+def summarize_prediction_errors(diagnostics: pd.DataFrame) -> pd.DataFrame:
+    """Aggregate causal forecast errors by trace, predictor, lead, and channel."""
+    columns = (
+        "trace_kind", "predictor", "lead", "channel_index", "channel_name",
+        "prediction_count", "mean_error", "mae", "rmse", "max_absolute_error",
+    )
+    if diagnostics.empty:
+        return pd.DataFrame(columns=columns)
+    rows: list[dict[str, object]] = []
+    group_columns = [
+        "trace_kind", "predictor", "lead", "channel_index", "channel_name",
+    ]
+    for keys, frame in diagnostics.groupby(group_columns, dropna=False, sort=True):
+        errors = frame["error"].to_numpy(dtype=np.float64)
+        absolute = np.abs(errors)
+        rows.append({
+            **dict(zip(group_columns, keys)),
+            "prediction_count": len(frame),
+            "mean_error": float(np.mean(errors)),
+            "mae": float(np.mean(absolute)),
+            "rmse": float(np.sqrt(np.mean(np.square(errors)))),
+            "max_absolute_error": float(np.max(absolute)),
+        })
+    return pd.DataFrame(rows, columns=columns)
 
 
 def _nanmean(values: np.ndarray) -> float:
@@ -1070,16 +1172,23 @@ def _binding_runtime_ns(verdict: dict[str, object]) -> float:
 def save_benchmark_results(result: RtlolaBenchmarkResult, output_dir: Path) -> None:
     scenario_dir = output_dir / result.config.scenario
     scenario_dir.mkdir(parents=True, exist_ok=True)
-    result.timeseries.to_csv(scenario_dir / "timeseries.csv", index=False)
-    result.summary.to_csv(scenario_dir / "summary.csv", index=False)
-    result.aggregate.to_csv(scenario_dir / "aggregate.csv", index=False)
-    root_evaluations_to_dataframe(result.raw_results).to_csv(
-        scenario_dir / "mpc_root_evaluations.csv",
-        index=False,
+    write_csv_atomic(result.timeseries, scenario_dir / "timeseries.csv")
+    write_csv_atomic(result.summary, scenario_dir / "summary.csv")
+    write_csv_atomic(result.aggregate, scenario_dir / "aggregate.csv")
+    write_csv_atomic(
+        result.prediction_diagnostics,
+        scenario_dir / "input_prediction_errors.csv",
     )
-    failures_to_dataframe(result.failures).to_csv(
-        scenario_dir / "run_failures.csv",
-        index=False,
+    write_csv_atomic(
+        result.prediction_error_summary,
+        scenario_dir / "input_prediction_error_summary.csv",
+    )
+    write_csv_atomic(
+        root_evaluations_to_dataframe(result.raw_results),
+        scenario_dir / "mpc_root_evaluations.csv",
+    )
+    write_csv_atomic(
+        failures_to_dataframe(result.failures), scenario_dir / "run_failures.csv",
     )
     _write_dashboard_artifacts(result, scenario_dir, output_dir)
     scenario = scenario_by_name(result.config.scenario)
@@ -1103,8 +1212,9 @@ def save_benchmark_results(result: RtlolaBenchmarkResult, output_dir: Path) -> N
             zip(scenario.trigger_keys, scenario.trigger_labels)
         ),
     }
-    with open(output_dir / "config.yaml", "w") as f:
-        yaml.safe_dump(config_payload, f, sort_keys=False)
+    write_text_atomic(
+        yaml.safe_dump(config_payload, sort_keys=False), output_dir / "config.yaml",
+    )
 
 
 def _write_dashboard_artifacts(
@@ -1113,8 +1223,9 @@ def _write_dashboard_artifacts(
     output_dir: Path,
 ) -> None:
     scenario = scenario_by_name(result.config.scenario)
-    trigger_confusion(result.timeseries, scenario.trigger_keys).to_csv(
-        scenario_dir / "trigger_confusion.csv", index=False,
+    write_csv_atomic(
+        trigger_confusion(result.timeseries, scenario.trigger_keys),
+        scenario_dir / "trigger_confusion.csv",
     )
     pareto_columns = [
         "method",
@@ -1132,7 +1243,7 @@ def _write_dashboard_artifacts(
         if not result.summary.empty
         else pd.DataFrame(columns=pareto_columns)
     )
-    pareto.to_csv(scenario_dir / "pareto_runtime_vs_loss.csv", index=False)
+    write_csv_atomic(pareto, scenario_dir / "pareto_runtime_vs_loss.csv")
     figures_dir = output_dir / "figures"
     figures_dir.mkdir(parents=True, exist_ok=True)
     _plot_pareto(pareto, figures_dir / f"{result.config.scenario}_pareto_runtime_vs_loss")

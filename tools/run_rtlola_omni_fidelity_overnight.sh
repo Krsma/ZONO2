@@ -15,15 +15,8 @@ HORIZON_SCAN="${PZR_HORIZON_SCAN:-1,2,4,8}"
 HORIZON_BUDGET="${PZR_HORIZON_BUDGET:-8}"
 BEAM_WIDTH="${PZR_BEAM_WIDTH:-4}"
 SEEDS="${PZR_SEEDS:-10}"
-REGRET_ITERATIONS="${PZR_REGRET_ITERATIONS:-1}"
-REGRET_EPOCHS="${PZR_REGRET_EPOCHS:-50}"
-REGRET_TRAIN_SEEDS="${PZR_REGRET_TRAIN_SEEDS:-10}"
-REGRET_EVAL_SEEDS="${PZR_REGRET_EVAL_SEEDS:-10}"
-REGRET_TRAIN_SEED_START="${PZR_REGRET_TRAIN_SEED_START:-10000}"
-REGRET_EVAL_SEED_START="${PZR_REGRET_EVAL_SEED_START:-0}"
 MAX_SECONDS="${PZR_MAX_SECONDS:-43200}"
 SKIP_HORIZON="${PZR_SKIP_HORIZON:-0}"
-SKIP_LEARNING="${PZR_SKIP_LEARNING:-0}"
 START_SECONDS="$(date +%s)"
 
 export OPENBLAS_NUM_THREADS="${OPENBLAS_NUM_THREADS:-1}"
@@ -161,34 +154,6 @@ if [[ "$SKIP_HORIZON" != "1" ]]; then
             --root "$horizon_root" \
             --scenario omni_robot
     done
-fi
-
-if [[ "$SKIP_LEARNING" != "1" ]]; then
-    first_budget="${budget_values[0]}"
-    first_trace="${trace_values[0]}"
-    run_stage "native_pooled_learning" "$PYTHON" -m pzr.rtlola.cli \
-        --profile paper \
-        --scenario omni_robot \
-        --trace-kind "$first_trace" \
-        --length "$LENGTH" \
-        --seeds 1 \
-        --budget "$first_budget" \
-        --horizon "$HORIZON" \
-        --beam-width "$BEAM_WIDTH" \
-        --methods girard \
-        --reference-mode exact \
-        --learned-mode regret \
-        --regret-iterations "$REGRET_ITERATIONS" \
-        --regret-epochs "$REGRET_EPOCHS" \
-        --regret-train-seeds "$REGRET_TRAIN_SEEDS" \
-        --regret-eval-seeds "$REGRET_EVAL_SEEDS" \
-        --regret-train-seed-start "$REGRET_TRAIN_SEED_START" \
-        --regret-eval-seed-start "$REGRET_EVAL_SEED_START" \
-        --regret-budgets "$BUDGETS" \
-        --regret-train-traces "$TRACES" \
-        --regret-eval-traces "$TRACES" \
-        --no-progress \
-        --output "$OUT_DIR/learning_stage" || exit $?
 fi
 
 "$PYTHON" -m pzr.rtlola.sweep_report \

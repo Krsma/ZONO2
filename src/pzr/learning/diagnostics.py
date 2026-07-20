@@ -9,7 +9,9 @@ import pandas as pd
 
 from pzr.learning.dataset import ReducerCostDataset
 from pzr.learning.ranker import ReducerPolicy, evaluate_reducer
-from pzr.learning.targets import (
+from pzr.learning.objectives import (
+    EXPECTED_REGRET_OBJECTIVE_CONTRACT,
+    expected_regret_targets,
     normalized_regrets,
     rankable_state_mask,
     soft_teacher_distribution,
@@ -84,6 +86,9 @@ def dataset_diagnostics(
             "soft_objective_fraction": (
                 float(np.count_nonzero(selected_valid) / split_total) if split_total else 0.0
             ),
+            "expected_regret_objective_fraction": (
+                float(np.count_nonzero(selected_valid) / split_total) if split_total else 0.0
+            ),
             "pairwise_objective_fraction": (
                 float(np.count_nonzero(rankable[selected]) / split_rankable)
                 if split_rankable else 0.0
@@ -102,6 +107,18 @@ def dataset_diagnostics(
             "mean_disturbance_probability": (
                 float(np.mean(metadata.loc[selected, "disturbance_probability"].astype(float)))
                 if "disturbance_probability" in metadata else 0.0
+            ),
+            "disturbance_eligible_fraction": (
+                float(np.mean(metadata.loc[selected, "disturbance_eligible"].astype(bool)))
+                if "disturbance_eligible" in metadata else 0.0
+            ),
+            "recovery_forced_fraction": (
+                float(np.mean(metadata.loc[selected, "recovery_forced"].astype(bool)))
+                if "recovery_forced" in metadata else 0.0
+            ),
+            "mean_target_disturbance_rate": (
+                float(np.mean(metadata.loc[selected, "target_disturbance_rate"].astype(float)))
+                if "target_disturbance_rate" in metadata else 0.0
             ),
         })
     return pd.DataFrame(rows).sort_values(["dataset_label", "split", "budget"], ignore_index=True)
@@ -125,11 +142,18 @@ def candidate_diagnostics(
     exact_best = np.argmin(safe, axis=1)
     valid = np.any(dataset.feasible, axis=1)
     teacher_probabilities = np.full_like(predicted_probabilities, np.nan)
+    regression_targets = np.full_like(scores, np.nan)
+    regression_objective = False
     if policy.objective_contract.get("schema") == "pzr.reducer-objective.soft-kl-v1":
         teacher_probabilities = soft_teacher_distribution(
             dataset.teacher_costs,
             dataset.feasible,
             float(policy.objective_contract["temperature"]),
+        )
+    elif policy.objective_contract.get("schema") == EXPECTED_REGRET_OBJECTIVE_CONTRACT["schema"]:
+        regression_objective = True
+        regression_targets = expected_regret_targets(
+            dataset.teacher_costs, dataset.feasible,
         )
     rows = []
     validation = metadata[metadata["split"] == "validation"]
@@ -138,6 +162,15 @@ def candidate_diagnostics(
         for candidate_index, candidate in enumerate(dataset.candidate_names):
             feasible = dataset.feasible[selected, candidate_index]
             candidate_regrets = regrets[selected, candidate_index][feasible]
+            regression_rows = valid[selected] if regression_objective else np.zeros(
+                len(selected), dtype=np.bool_,
+            )
+            candidate_errors = (
+                scores[selected, candidate_index][regression_rows]
+                - regression_targets[selected, candidate_index][regression_rows]
+            )
+            finite_errors = candidate_errors[np.isfinite(candidate_errors)]
+            candidate_scores = scores[selected, candidate_index][regression_rows]
             rows.append({
                 "dataset_label": str(label),
                 "budget": int(budget),
@@ -158,6 +191,19 @@ def candidate_diagnostics(
                 "mean_normalized_regret": float(np.mean(candidate_regrets)) if candidate_regrets.size else float("nan"),
                 "median_normalized_regret": float(np.median(candidate_regrets)) if candidate_regrets.size else float("nan"),
                 "max_normalized_regret": float(np.max(candidate_regrets)) if candidate_regrets.size else float("nan"),
+                "regression_rmse": (
+                    float(np.sqrt(np.mean(np.square(finite_errors))))
+                    if finite_errors.size else float("nan")
+                ),
+                "regression_mae": (
+                    float(np.mean(np.abs(finite_errors)))
+                    if finite_errors.size else float("nan")
+                ),
+                "prediction_below_zero_count": int(np.count_nonzero(candidate_scores < 0.0)),
+                "prediction_above_two_count": int(np.count_nonzero(candidate_scores > 2.0)),
+                "prediction_outside_target_range_count": int(np.count_nonzero(
+                    (candidate_scores < 0.0) | (candidate_scores > 2.0)
+                )),
             })
     return pd.DataFrame(rows).sort_values(["dataset_label", "budget", "candidate"], ignore_index=True)
 

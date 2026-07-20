@@ -11,7 +11,8 @@ scenario traces, bounded search, learning, metrics, and artifact generation.
   traces, native transform catalog, MPC search, benchmark runner, and CLI.
 - `../rlola-eval/`: upstream source of truth for the packaged robot-arm
   specification and recorded traces.
-- `src/pzr/learning/`: scenario-neutral reducer-cost distillation and DART calibration.
+- `src/pzr/learning/`: scenario-neutral pairwise reducer learning, secondary
+  distillation/DART objectives, and bounded challenger screening.
 - `rlolapythonbinding/`: pinned RTLola Python binding submodule.
 - `tests/`: pure unit tests and binding-backed semantic tests.
 - `tools/`: binding/MuJoCo environment setup and robot-arm smoke wrapper.
@@ -55,7 +56,7 @@ The Omni scenario provides the historically compatible `canonical` trace and
 calibrated `safe`, `x_violated`, and `y_violated` traces. Numeric public
 `position_x` and `position_y` bounds are included in its artifacts.
 
-Run a small clean soft-distillation smoke:
+Run a small Pairwise Ranking Policy smoke:
 
 ```bash
 pzr-learning generate --output /tmp/pzr-learning/traces --event-count 30 \
@@ -65,46 +66,75 @@ pzr-learning collect --output /tmp/pzr-learning/clean \
   --train-seeds 2 --validation-seeds 1 --test-seeds 0 \
   --collection-mode teacher
 pzr-learning train --dataset clean=/tmp/pzr-learning/clean/dataset \
-  --output /tmp/pzr-learning/model-soft-clean --objective soft-kl \
-  --temperature-grid 0.1,0.2 --epochs 2
+  --output /tmp/pzr-learning/model-pairwise-ranking-policy --objective pairwise --epochs 2
 ```
 
-Run the resumable Geometry15 soft-DART experiment with:
+Run the paper-facing Pairwise Ranking Policy experiment with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-soft-dart-v3-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b \
   PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
-  tools/run_rtlola_learning_full.sh
+  tools/run_rtlola_learning_primary.sh
 ```
 
-The run generates 48 fresh traces: clean teacher train/validation seeds
-0--19/20--25 and frozen discrete-DART train/validation seeds 26--41/42--47.
-The clean soft model supplies a held-out categorical confusion kernel; each
-disturbance lasts one reducer decision before the teacher retakes control.
-Collection uses ten spawned workers; evaluation uses four and
-recycles each worker after one cell. BLAS, OpenMP, MKL, and NumExpr remain at
-one native thread per worker. Set both worker variables to one for debugging.
-Set `PZR_TRACE_STORE` to reuse an immutable validated trace store with a fresh
-experiment output directory after a source change.
+The primary run generates 26 independent 500-event random-waypoint traces. It
+uses seeds 0--19 for teacher training and 20--25 for clean validation, trains
+only `pairwise_ranking_policy`, and compares it with Girard, Scott, PCA,
+Combastel, and the two-event full-width MPC teacher. The completion criterion is
+exactly 144 validated cells: six full traces by four budgets by six methods.
+No revised primary result exists until the fresh manifest records all 144 cells
+without failures.
 
-The final exact evaluation has 192 cells: six full traces, four budgets, three
-learned ablations, four static reducers, and the two-event full-width MPC teacher.
-No corrected result is complete until all 192 cells validate.
+The Phase 1 schema reset removed all prior learning result directories. No
+active primary, secondary, or exploratory learning result artifact exists;
+new Pairwise Ranking Policy claims require a fresh canonical 144-cell manifest.
+
+Soft-KL and guarded one-round DART remain available as completed secondary
+ablations. Their historical result artifact is no longer active. The observed
+DART improvement was marginal and is confounded by additional training data,
+so neither method appears in the default pipeline.
+
+Run the separate bounded exploration with:
+
+```bash
+PZR_PRIMARY_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b \
+  PZR_OUT_DIR=results/rtlola-learning-bounded-exploration-v1-7371495-b4cfbf4-e6ecd0b \
+  tools/run_rtlola_learning_exploration.sh
+```
+
+This workflow trains the data-matched Clean36 and DART36 controls plus an
+expected-regret Clean20 challenger. It screens four learned models and Girard
+over 60 full-length cells. At most one challenger can proceed to a 72-cell full
+evaluation; if none meets every safety, loss, cell-regression, and clean-
+validation gate, the workflow records that method expansion should stop.
 
 Use the same staged pipeline at smoke scale with:
 
 ```bash
-PZR_OUT_DIR=/tmp/pzr-learning-soft-dart-smoke \
-PZR_EVENT_COUNT=20 PZR_BUDGETS=40 PZR_TRACE_KINDS=figure8 \
+PZR_OUT_DIR=/tmp/pzr-learning-pairwise-ranking-policy-smoke \
+PZR_EVENT_COUNT=20 PZR_EVAL_LENGTH=2 \
 PZR_CLEAN_TRAIN_SEEDS=2 PZR_CLEAN_VALIDATION_SEEDS=1 \
-PZR_DART_TRAIN_SEEDS=2 PZR_DART_VALIDATION_SEEDS=1 \
-PZR_SOFT_TEMPERATURES=0.1,0.2 PZR_EPOCHS=2 PZR_PATIENCE=2 \
+PZR_EPOCHS=2 PZR_PATIENCE=2 \
 PZR_COLLECTION_WORKERS=2 PZR_EVALUATION_WORKERS=2 \
-PZR_EVAL_LENGTH=20 tools/run_rtlola_learning_full.sh
+tools/run_rtlola_learning_primary.sh
 ```
 
-See `science/LEARNING_PIPELINE.md` for the feature contract, soft target,
-discrete-DART calibration, seed schedule, exact evaluation, and artifact schemas.
+The separate online-MPC add-on reuses the frozen primary model and evaluates
+Girard and PRP anchors, horizon-3 oracle beam and full-width MPC, and causal
+hold/linear/quadratic beam MPC. Linear prediction is the predeclared headline
+online method. Run or resume primary, add-on, and joined CSV reporting with:
+
+```bash
+tools/run_rtlola_learning_paper.sh
+```
+
+Predictive MPC sees the exact arrived current event and causal input history;
+PRP remains strictly pre-event. Forecasts use scheduled times at 0.1-second
+increments and never inspect recorded future inputs during action selection.
+
+See `science/LEARNING_PIPELINE.md` for the feature contract, pairwise and
+expected-regret objectives, secondary DART calibration, seed schedules,
+promotion gate, exact evaluation, and artifact schemas.
 Learning runs are intentionally separate from `pzr-benchmark`.
 
 Prepare or resume the full FPR-first robot-arm sweep:
@@ -229,7 +259,7 @@ Each benchmark run writes `timeseries.csv`, `summary.csv`, `aggregate.csv`, and
 `run_failures.csv` below the scenario directory, plus `config.yaml`,
 trigger-confusion data, and runtime/loss figures. Incomplete runs are recorded
 in the failure table and excluded from metrics. Learned runs also write policy,
-candidate-cost, soft-target diagnostics, DART calibration, metadata, and held-out evaluation files
+candidate-cost, target diagnostics, optional DART calibration, metadata, and held-out evaluation files
 under `learning/<scenario>/`. The staged pipeline instead writes versioned
 datasets, explicit PyTorch model directories, and generalization evaluation
 artifacts at the user-provided paths.

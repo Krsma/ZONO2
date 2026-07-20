@@ -53,7 +53,7 @@ class RtlolaReducerPolicy:
                 predicted_sequence=(self.catalog.no_op.name,),
                 evaluated_leaves=1,
                 pruned_branches=0,
-                mpc_variant="learned_direct",
+                mpc_variant="direct_policy",
                 root_strategy="ranked_direct",
             )
 
@@ -84,7 +84,7 @@ class RtlolaReducerPolicy:
                 pruned_branches=0,
                 reducer_failure_count=failures,
                 infeasible_candidate_count=failures,
-                mpc_variant="learned_direct",
+                mpc_variant="direct_policy",
                 root_strategy="ranked_direct",
             )
 
@@ -105,6 +105,6 @@ class RtlolaReducerPolicy:
             fallback_used=True,
             reducer_failure_count=failures,
             infeasible_candidate_count=failures,
-            mpc_variant="learned_direct",
+            mpc_variant="direct_policy",
             root_strategy="ranked_direct",
         )

@@ -13,7 +13,7 @@ import pandas as pd
 from pzr.learning.artifacts import write_reducer_cost_dataset
 from pzr.learning.dart import DartCalibration
 from pzr.learning.dataset import ReducerCostDataset
-from pzr.learning.targets import normalized_regrets
+from pzr.learning.objectives import normalized_regrets
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.engine import RtlolaEngine, RtlolaEvent
 from pzr.rtlola.features import RTL_RANKING_FEATURE_NAMES, extract_ranking_features
@@ -22,6 +22,24 @@ from pzr.rtlola.search import full_width_terminal_search
 
 
 CollectionMode = Literal["teacher", "dart"]
+
+
+@dataclass(frozen=True)
+class DartDecisionMetadata:
+    """Optional disturbance state emitted only by guarded-DART collection."""
+
+    executed_action: str
+    disturbed: bool
+    disturbance_eligible: bool
+    disturbance_attempted: bool
+    recovery_forced: bool
+    target_disturbance_rate: float
+    injection_probability: float
+    disturbance_probability: float
+    regret_cap: float
+    selected_direction_probability: float
+    sampled_normalized_regret: float
+    calibration_sha256: str | None
 
 
 @dataclass(frozen=True)
@@ -39,17 +57,11 @@ class CollectedReducerCostSample:
     feasible: tuple[bool, ...]
     teacher_action: str
     teacher_sequence: tuple[str, ...]
-    collection_mode: str
-    executed_action: str
-    disturbed: bool
-    disturbance_probability: float
-    infeasible_probability_redirected: float
-    sampled_normalized_regret: float
-    dart_calibration_sha256: str | None
     evaluated_leaves: int
     teacher_reducer_failure_count: int
     teacher_infeasible_candidate_count: int
     execution_fallback_used: bool
+    dart: DartDecisionMetadata | None = None
 
 
 def collect_teacher_episode(
@@ -87,6 +99,7 @@ def collect_teacher_episode(
         expected_verdict_keys=scenario.expected_verdict_keys,
     )
     samples = []
+    recovery_remaining = 0
     for step, event in enumerate(events[:-1]):
         state = engine.snapshot(step=step, time=event.time)
         metrics = engine.metrics(state)
@@ -97,47 +110,88 @@ def collect_teacher_episode(
                 engine,
                 state,
                 event,
-                events[step + 1],
+                (events[step + 1],),
                 catalog.mpc_candidates,
                 budget,
                 fallback=catalog.fallback,
                 none_action=catalog.no_op,
+                configured_horizon=1,
             )
             costs, feasible = _aligned_root_costs(decision.root_evaluations, candidate_names)
             teacher_action = decision.first_action.name
             executed_action = teacher_action
             disturbed = False
+            disturbance_eligible = False
+            disturbance_attempted = False
+            recovery_forced = False
+            target_disturbance_rate = 0.0
+            injection_probability = 0.0
             disturbance_probability = 0.0
-            redirected = 0.0
+            regret_cap = float("nan")
+            selected_direction_probability = float("nan")
             sampled_regret = float("nan")
-            if (
+            if collection_mode == "dart" and dart_calibration is not None:
+                budget_index = dart_calibration.budget_index(budget)
+                target_disturbance_rate = float(
+                    dart_calibration.target_disturbance_rates[budget_index]
+                )
+                injection_probability = float(
+                    dart_calibration.injection_probabilities[budget_index]
+                )
+                regret_cap = float(dart_calibration.regret_caps[budget_index])
+            if recovery_remaining > 0:
+                recovery_forced = True
+                recovery_remaining -= 1
+            elif (
                 collection_mode == "dart"
                 and dart_calibration is not None
                 and teacher_action in candidate_names
                 and np.any(feasible)
             ):
                 teacher_index = candidate_names.index(teacher_action)
-                raw_distribution = dart_calibration.probabilities[
-                    dart_calibration.budgets.index(budget), teacher_index,
-                ]
-                redirected = float(np.sum(raw_distribution[~feasible]))
-                distribution = dart_calibration.collection_distribution(
-                    budget, teacher_action, feasible,
+                regrets = normalized_regrets(costs, feasible)
+                distribution = dart_calibration.alternative_distribution(
+                    budget, teacher_action, feasible, regrets,
                 )
-                disturbance_probability = float(1.0 - distribution[teacher_index])
-                rng = np.random.default_rng(np.random.SeedSequence([
-                    disturbance_seed, seed, budget, step,
-                ]))
-                selected = int(rng.choice(len(candidate_names), p=distribution))
-                executed_action = candidate_names[selected]
-                disturbed = selected != teacher_index
-                sampled_regret = float(normalized_regrets(costs, feasible)[selected])
+                disturbance_eligible = bool(np.sum(distribution) > 0.0)
+                if disturbance_eligible:
+                    disturbance_probability = injection_probability
+                    rng = np.random.default_rng(np.random.SeedSequence([
+                        disturbance_seed, seed, budget, step,
+                    ]))
+                    disturbance_attempted = bool(rng.random() < injection_probability)
+                    if disturbance_attempted:
+                        selected = int(rng.choice(len(candidate_names), p=distribution))
+                        executed_action = candidate_names[selected]
+                        disturbed = selected != teacher_index
+                        sampled_regret = float(regrets[selected])
+                        selected_direction_probability = float(distribution[selected])
+                        if sampled_regret > regret_cap + 1e-15:
+                            raise AssertionError("DART sampled an action beyond its regret cap")
+                        recovery_remaining = dart_calibration.config.recovery_decisions
             action = (
                 catalog.by_name[executed_action]
                 if executed_action in candidate_names
                 else decision.first_action
             )
             sample_id = f"{trace_id}:{collection_mode}:budget-{budget}:step-{step}"
+            dart_metadata = (
+                DartDecisionMetadata(
+                    executed_action=executed_action,
+                    disturbed=disturbed,
+                    disturbance_eligible=disturbance_eligible,
+                    disturbance_attempted=disturbance_attempted,
+                    recovery_forced=recovery_forced,
+                    target_disturbance_rate=target_disturbance_rate,
+                    injection_probability=injection_probability,
+                    disturbance_probability=disturbance_probability,
+                    regret_cap=regret_cap,
+                    selected_direction_probability=selected_direction_probability,
+                    sampled_normalized_regret=sampled_regret,
+                    calibration_sha256=dart_calibration_sha256,
+                )
+                if collection_mode == "dart" else None
+            )
             samples.append(CollectedReducerCostSample(
                 sample_id=sample_id,
                 trace_id=trace_id,
@@ -152,17 +206,11 @@ def collect_teacher_episode(
                 feasible=tuple(bool(value) for value in feasible),
                 teacher_action=teacher_action,
                 teacher_sequence=decision.predicted_sequence,
-                collection_mode=collection_mode,
-                executed_action=executed_action,
-                disturbed=disturbed,
-                disturbance_probability=disturbance_probability,
-                infeasible_probability_redirected=redirected,
-                sampled_normalized_regret=sampled_regret,
-                dart_calibration_sha256=dart_calibration_sha256,
                 evaluated_leaves=decision.evaluated_leaves,
                 teacher_reducer_failure_count=decision.reducer_failure_count,
                 teacher_infeasible_candidate_count=decision.infeasible_candidate_count,
                 execution_fallback_used=executed_action not in candidate_names,
+                dart=dart_metadata,
             ))
         engine.live_step(event, action, budget, step=step + 1)
     return tuple(samples)
@@ -181,6 +229,9 @@ def build_reducer_cost_dataset(
     if candidate_names is not None and candidate_names != sample_candidate_names:
         raise ValueError("explicit candidate catalog differs from collected samples")
     candidate_names = sample_candidate_names
+    dart_presence = {sample.dart is not None for sample in samples}
+    if len(dart_presence) != 1:
+        raise ValueError("clean and DART decision metadata must not be mixed in one shard")
     for sample in samples:
         if sample.candidate_names != candidate_names:
             raise ValueError("collected samples use different candidate catalogs")
@@ -198,7 +249,7 @@ def build_reducer_cost_dataset(
 
 
 def _sample_metadata(sample: CollectedReducerCostSample) -> dict[str, object]:
-    return {
+    metadata: dict[str, object] = {
         "sample_id": sample.sample_id,
         "trace_id": sample.trace_id,
         "split": sample.split,
@@ -208,18 +259,27 @@ def _sample_metadata(sample: CollectedReducerCostSample) -> dict[str, object]:
         "step": sample.step,
         "teacher_action": sample.teacher_action,
         "teacher_sequence": json.dumps(sample.teacher_sequence),
-        "collection_mode": sample.collection_mode,
-        "executed_action": sample.executed_action,
-        "disturbed": sample.disturbed,
-        "disturbance_probability": sample.disturbance_probability,
-        "infeasible_probability_redirected": sample.infeasible_probability_redirected,
-        "sampled_normalized_regret": sample.sampled_normalized_regret,
-        "dart_calibration_sha256": sample.dart_calibration_sha256,
         "evaluated_leaves": sample.evaluated_leaves,
         "teacher_reducer_failure_count": sample.teacher_reducer_failure_count,
         "teacher_infeasible_candidate_count": sample.teacher_infeasible_candidate_count,
         "execution_fallback_used": sample.execution_fallback_used,
     }
+    if sample.dart is not None:
+        metadata.update({
+            "executed_action": sample.dart.executed_action,
+            "disturbed": sample.dart.disturbed,
+            "disturbance_eligible": sample.dart.disturbance_eligible,
+            "disturbance_attempted": sample.dart.disturbance_attempted,
+            "recovery_forced": sample.dart.recovery_forced,
+            "target_disturbance_rate": sample.dart.target_disturbance_rate,
+            "injection_probability": sample.dart.injection_probability,
+            "disturbance_probability": sample.dart.disturbance_probability,
+            "regret_cap": sample.dart.regret_cap,
+            "selected_direction_probability": sample.dart.selected_direction_probability,
+            "sampled_normalized_regret": sample.dart.sampled_normalized_regret,
+            "dart_calibration_sha256": sample.dart.calibration_sha256,
+        })
+    return metadata
 
 
 def _empty_reducer_cost_dataset(
@@ -241,10 +301,7 @@ def _empty_reducer_cost_dataset(
 def _sample_metadata_columns() -> tuple[str, ...]:
     return (
         "sample_id", "trace_id", "split", "condition", "seed", "budget",
-        "step", "teacher_action", "teacher_sequence", "collection_mode",
-        "executed_action", "disturbed", "disturbance_probability",
-        "infeasible_probability_redirected", "sampled_normalized_regret",
-        "dart_calibration_sha256", "evaluated_leaves",
+        "step", "teacher_action", "teacher_sequence", "evaluated_leaves",
         "teacher_reducer_failure_count", "teacher_infeasible_candidate_count",
         "execution_fallback_used",
     )

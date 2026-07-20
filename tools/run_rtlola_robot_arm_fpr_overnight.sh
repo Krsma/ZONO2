@@ -10,7 +10,6 @@ ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
 LENGTH_OVERRIDE="${PZR_LENGTH:-}"
 BUDGETS="${PZR_BUDGETS:-40,80,120,180}"
 EVAL_TRACES="${PZR_EVAL_TRACES:-figure8,figure8_drift,random,random_drift,square,square_drift}"
-TRAIN_TRACES="${PZR_TRAIN_TRACES:-figure8,random,square}"
 METHODS="${PZR_METHODS:-girard,scott,pca,combastel,mpc_terminal_beam,mpc_terminal_girard_tail,mpc_cumulative_girard_tail,mpc_one_step_girard_rollout}"
 HORIZON="${PZR_HORIZON:-4}"
 BEAM_WIDTH="${PZR_BEAM_WIDTH:-4}"
@@ -18,12 +17,7 @@ MPC_TAIL_HORIZON="${PZR_MPC_TAIL_HORIZON:-8}"
 MPC_ROOT_BEAM_WIDTH="${PZR_MPC_ROOT_BEAM_WIDTH:-1}"
 MPC_CANDIDATES="${PZR_MPC_CANDIDATES:-}"
 SEEDS="${PZR_SEEDS:-1}"
-REGRET_ITERATIONS="${PZR_REGRET_ITERATIONS:-1}"
-REGRET_EPOCHS="${PZR_REGRET_EPOCHS:-50}"
-REGRET_TRAIN_SEEDS="${PZR_REGRET_TRAIN_SEEDS:-1}"
-REGRET_EVAL_SEEDS="${PZR_REGRET_EVAL_SEEDS:-1}"
 MAX_SECONDS="${PZR_MAX_SECONDS:-259200}"
-SKIP_LEARNING="${PZR_SKIP_LEARNING:-1}"
 JOBS="${PZR_JOBS:-1}"
 START_SECONDS="$(date +%s)"
 
@@ -401,40 +395,6 @@ for trace_kind in "${eval_trace_values[@]}"; do
     done
 done
 wait_for_stage_batch || exit $?
-
-if [[ "$SKIP_LEARNING" != "1" ]]; then
-    first_budget="${budget_values[0]}"
-    first_trace="${eval_trace_values[0]}"
-    learning_dir="$OUT_DIR/learning_stage"
-    run_stage \
-        "pooled_learning" "$learning_dir" "girard" \
-        "${trace_lengths[$first_trace]}" 1 \
-        "$PYTHON" -m pzr.rtlola.cli \
-        --profile paper \
-        --scenario robot_arm \
-        --trace-kind "$first_trace" \
-        --length "${trace_lengths[$first_trace]}" \
-        --seeds 1 \
-        --budget "$first_budget" \
-        --horizon "$HORIZON" \
-        --beam-width "$BEAM_WIDTH" \
-        --mpc-tail-horizon "$MPC_TAIL_HORIZON" \
-        --mpc-root-beam-width "$MPC_ROOT_BEAM_WIDTH" \
-        "${mpc_candidate_args[@]}" \
-        --methods girard \
-        --reference-mode exact \
-        --reference-cache "$REFERENCE_DIR/${first_trace}.seed_0.${REFERENCE_NAMESPACE}.json" \
-        --learned-mode regret \
-        --regret-iterations "$REGRET_ITERATIONS" \
-        --regret-epochs "$REGRET_EPOCHS" \
-        --regret-train-seeds "$REGRET_TRAIN_SEEDS" \
-        --regret-eval-seeds "$REGRET_EVAL_SEEDS" \
-        --regret-budgets "$BUDGETS" \
-        --regret-train-traces "$TRAIN_TRACES" \
-        --regret-eval-traces "$EVAL_TRACES" \
-        --no-progress \
-        --output "$OUT_DIR/learning_stage" || exit $?
-fi
 
 "$PYTHON" -m pzr.rtlola.sweep_report --root "$OUT_DIR"
 echo "RTLola FPR overnight sweep complete: $OUT_DIR"

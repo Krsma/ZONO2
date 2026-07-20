@@ -42,13 +42,20 @@ binding-native cost vector. Geometry15 inference remains strictly pre-event:
 the scorer observes only current-zonotope aggregates, emits one lower-is-better
 score per reducer, and tries binding actions in stable score order.
 
-The primary target is a temperature-controlled distribution derived from
-tolerance-aware normalized regret. Training minimizes state-balanced KL
-divergence and explicitly penalizes student probability on infeasible actions.
-The scores are not calibrated regrets. The corrected hard pairwise loss remains
-only as a clean-data ablation.
+Our proposed learned method is Pairwise Ranking Policy. Its tolerance-aware objective
+ranks feasible reducers by binding-native cost, ranks every feasible reducer
+above every infeasible reducer, and averages normalized pair losses equally
+across rankable states. The primary experiment uses twenty clean teacher traces
+for training and six seed-disjoint clean traces for validation.
 
-## Asymmetric Learning and DART
+We retain two secondary objectives for controlled ablations. Soft-KL distills a
+temperature-controlled action distribution. Expected-regret regression assigns
+feasible candidates normalized regret in `[0,1]`, assigns infeasible candidates
+the target `2.0`, and estimates conditional mean penalized regret with
+state-balanced mean squared error. Only Pairwise Ranking Policy appears in the primary
+evaluation.
+
+## Secondary Asymmetric Learning and DART Ablation
 
 The two-event teacher has privileged information that Geometry15 cannot
 observe. Warrington et al., [*Robust Asymmetric Learning in
@@ -64,11 +71,39 @@ this RTLola experiment.
 Student-controlled DAgger rollouts compound this information mismatch.
 Instead, we adapt Laskey et al.'s [*DART: Noise Injection for Robust Imitation
 Learning*](https://proceedings.mlr.press/v78/laskey17a.html) to the discrete
-reducer catalog: We estimate a categorical novice-confusion kernel on held-out
-clean trajectories, occasionally execute one feasible disturbed teacher
-action, and return control to the teacher at the next decision. This is a
-one-round discrete DART adaptation, not a claim that the original continuous
-noise model applies unchanged.
+reducer catalog. We calibrate a global per-budget noise magnitude from the
+pairwise novice's held-out meaningful error, while a smoothed categorical
+kernel models the error direction. We restrict perturbations to the Q90
+novice-regret radius and force the next reduction decision to use the teacher.
+This design preserves DART's supervisor-noise and recovery mechanism without a
+learner roll-in. However, it is a guarded one-round discrete adaptation, not a
+claim that the original continuous noise model applies unchanged.
+
+The preceding v3 implementation coupled magnitude and direction in each
+teacher-action row. The resulting feedback was harmful: shifted states made
+rare corrective teacher actions likely to be overwritten again, so nominally
+one-step disturbances formed long runs. The corrected calibration explicitly
+prevents this behavior and records target, expected, and realized rates.
+
+The completed guarded-DART evaluation remains a secondary ablation. Its
+observed improvement was marginal and is confounded by additional training
+data. Consequently, the default pipeline does not train Soft-KL or DART models.
+Its historical artifact, together with every prior learning result directory,
+was removed by the Phase 1 schema reset and is not an active result.
+
+## Evaluation Claims
+
+The primary completion criterion is 144 validated cells: six authoritative
+traces, four transform bounds, Pairwise Ranking Policy, four static reducers, and the
+two-event MPC teacher. A separate 60-cell screen compares data scale, guarded
+DART, and expected-regret challengers under explicit matched references. At
+most one challenger can proceed to a 72-cell full evaluation.
+
+These matrices define experimental contracts, not results. We do not claim new
+primary or exploratory findings before the corresponding source-aware manifests
+validate every required cell without native failures or non-finite artifacts.
+In particular, no active learning result artifact exists after the Phase 1
+cleanup; a new Pairwise Ranking Policy claim requires the canonical 144 cells.
 
 ## Scenarios
 

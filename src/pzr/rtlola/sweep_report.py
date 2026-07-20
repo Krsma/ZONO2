@@ -7,11 +7,10 @@ from pathlib import Path
 
 import pandas as pd
 
+from pzr.artifact_io import write_csv_atomic
 from pzr.rtlola.plots import write_sweep_figures
-from pzr.rtlola.scenarios import scenario_by_name
 from pzr.rtlola.tables import (
     budget_sensitivity,
-    learned_comparison,
     method_comparison,
     mpc_static_improvement_by_budget,
     mpc_action_composition,
@@ -22,21 +21,14 @@ from pzr.rtlola.tables import (
     reference_balance_by_trace,
     runtime_summary,
     timeseries_metric_summary,
-    trigger_confusion,
 )
 
 
 def consolidate_sweep(root: Path, scenario: str = "robot_arm") -> None:
     """Write compact metric and trigger tables from completed cells."""
     summaries = _read_tables(root / "runs", "summary.csv")
-    learning_summary = _read_optional(
-        root / "learning_stage" / "learning" / scenario
-        / "regret_eval_summary.csv",
-    )
-    if learning_summary is not None:
-        summaries.append(learning_summary)
     combined = pd.concat(summaries, ignore_index=True) if summaries else pd.DataFrame()
-    timeseries = _combined_timeseries(root, scenario)
+    timeseries = _combined_timeseries(root)
     if not combined.empty:
         identity = [
             column
@@ -64,24 +56,15 @@ def consolidate_sweep(root: Path, scenario: str = "robot_arm") -> None:
             )
             if column in combined
         ])
-    combined.to_csv(root / "combined_summary.csv", index=False)
+    write_csv_atomic(combined, root / "combined_summary.csv")
     primary = primary_metrics(combined)
     primary_path = root / "primary_metrics.csv"
-    primary.to_csv(primary_path, index=False)
+    write_csv_atomic(primary, primary_path)
     print(f"Primary metrics: {primary_path}")
     if not primary.empty:
         print(primary.to_string(index=False))
 
     confusion = _read_tables(root / "runs", "trigger_confusion.csv")
-    learning_timeseries = _read_optional(
-        root / "learning_stage" / "learning" / scenario
-        / "regret_eval_timeseries.csv",
-    )
-    if learning_timeseries is not None:
-        confusion.append(trigger_confusion(
-            learning_timeseries,
-            scenario_by_name(scenario).trigger_keys,
-        ))
     combined_confusion = (
         pd.concat(confusion, ignore_index=True)
         if confusion else pd.DataFrame()
@@ -99,62 +82,52 @@ def consolidate_sweep(root: Path, scenario: str = "robot_arm") -> None:
                 if column in combined_confusion
             ],
         )
-    combined_confusion.to_csv(root / "combined_trigger_confusion.csv", index=False)
+    write_csv_atomic(combined_confusion, root / "combined_trigger_confusion.csv")
 
     failures = _read_tables(root / "runs", "run_failures.csv")
     combined_failures = (
         pd.concat(failures, ignore_index=True)
         if failures else pd.DataFrame()
     )
-    combined_failures.to_csv(root / "combined_run_failures.csv", index=False)
+    write_csv_atomic(combined_failures, root / "combined_run_failures.csv")
 
     root_evaluations = _read_tables(root / "runs", "mpc_root_evaluations.csv")
     combined_root_evaluations = (
         pd.concat(root_evaluations, ignore_index=True)
         if root_evaluations else pd.DataFrame()
     )
-    combined_root_evaluations.to_csv(
-        root / "combined_mpc_root_evaluations.csv",
-        index=False,
+    write_csv_atomic(
+        combined_root_evaluations, root / "combined_mpc_root_evaluations.csv",
     )
 
-    reducer_counts = _reducer_counts(root, scenario)
-    reducer_counts.to_csv(root / "combined_reducer_counts.csv", index=False)
-    method_comparison(combined).to_csv(
-        root / "method_comparison.csv",
-        index=False,
+    reducer_counts = _reducer_counts(root)
+    write_csv_atomic(reducer_counts, root / "combined_reducer_counts.csv")
+    write_csv_atomic(
+        method_comparison(combined), root / "method_comparison.csv",
     )
-    mpc_action_composition(reducer_counts).to_csv(
-        root / "mpc_action_composition.csv",
-        index=False,
+    write_csv_atomic(
+        mpc_action_composition(reducer_counts), root / "mpc_action_composition.csv",
     )
-    mpc_plan_followthrough(timeseries).to_csv(
-        root / "mpc_plan_followthrough.csv",
-        index=False,
+    write_csv_atomic(
+        mpc_plan_followthrough(timeseries), root / "mpc_plan_followthrough.csv",
     )
-    mpc_girard_deferral(timeseries).to_csv(
-        root / "mpc_girard_deferral.csv",
-        index=False,
+    write_csv_atomic(
+        mpc_girard_deferral(timeseries), root / "mpc_girard_deferral.csv",
     )
     mpc_comparison = mpc_metric_comparison(combined)
-    mpc_comparison.to_csv(root / "mpc_vs_static_metrics.csv", index=False)
-    learned_comparison(combined).to_csv(
-        root / "learned_vs_mpc_metrics.csv",
-        index=False,
-    )
+    write_csv_atomic(mpc_comparison, root / "mpc_vs_static_metrics.csv")
     budget_table = budget_sensitivity(combined)
-    budget_table.to_csv(root / "budget_sensitivity.csv", index=False)
+    write_csv_atomic(budget_table, root / "budget_sensitivity.csv")
     runtime_table = runtime_summary(combined, timeseries)
-    runtime_table.to_csv(root / "runtime_summary.csv", index=False)
-    reference_balance_by_trace(combined).to_csv(
-        root / "reference_balance_by_trace.csv",
-        index=False,
+    write_csv_atomic(runtime_table, root / "runtime_summary.csv")
+    write_csv_atomic(
+        reference_balance_by_trace(combined), root / "reference_balance_by_trace.csv",
     )
     timeseries_table = timeseries_metric_summary(timeseries)
-    timeseries_table.to_csv(root / "timeseries_metric_summary.csv", index=False)
-    mpc_static_improvement_by_budget(mpc_comparison).to_csv(
+    write_csv_atomic(timeseries_table, root / "timeseries_metric_summary.csv")
+    write_csv_atomic(
+        mpc_static_improvement_by_budget(mpc_comparison),
         root / "mpc_static_improvement_by_budget.csv",
-        index=False,
     )
     written = write_sweep_figures(
         root,
@@ -183,20 +156,8 @@ def _read_tables(root: Path, filename: str) -> list[pd.DataFrame]:
     return frames
 
 
-def _read_optional(path: Path) -> pd.DataFrame | None:
-    if not path.exists() or path.stat().st_size == 0:
-        return None
-    return pd.read_csv(path)
-
-
-def _reducer_counts(root: Path, scenario: str) -> pd.DataFrame:
+def _reducer_counts(root: Path) -> pd.DataFrame:
     frames = _read_tables(root / "runs", "timeseries.csv")
-    learned = _read_optional(
-        root / "learning_stage" / "learning" / scenario
-        / "regret_eval_timeseries.csv",
-    )
-    if learned is not None:
-        frames.append(learned)
     if not frames:
         return pd.DataFrame()
     timeseries = pd.concat(frames, ignore_index=True)
@@ -222,14 +183,8 @@ def _reducer_counts(root: Path, scenario: str) -> pd.DataFrame:
     )
 
 
-def _combined_timeseries(root: Path, scenario: str) -> pd.DataFrame:
+def _combined_timeseries(root: Path) -> pd.DataFrame:
     frames = _read_tables(root / "runs", "timeseries.csv")
-    learned = _read_optional(
-        root / "learning_stage" / "learning" / scenario
-        / "regret_eval_timeseries.csv",
-    )
-    if learned is not None:
-        frames.append(learned)
     return pd.concat(frames, ignore_index=True) if frames else pd.DataFrame()
 
 

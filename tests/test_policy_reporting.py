@@ -1,9 +1,9 @@
 import pandas as pd
 
-from pzr.learning.reporting import write_learning_plots
+from pzr.rtlola.policy_reporting import write_policy_plots
 
 
-def test_learning_plots_are_non_empty(tmp_path):
+def test_policy_plots_are_non_empty(tmp_path):
     summary = pd.DataFrame([
         {
             "trace_kind": trace,
@@ -16,15 +16,15 @@ def test_learning_plots_are_non_empty(tmp_path):
         }
         for index, (trace, method, budget) in enumerate((
             ("figure8", "girard", 40),
-            ("figure8", "learned_direct", 40),
+            ("figure8", "pairwise_ranking_policy", 40),
             ("square", "girard", 80),
-            ("square", "learned_direct", 80),
+            ("square", "pairwise_ranking_policy", 80),
         ))
     ])
     timeseries = pd.DataFrame([
         {
             "trace_kind": trace,
-            "method": "learned_direct",
+            "method": "pairwise_ranking_policy",
             "budget": budget,
             "step": step,
             "approx_loss": float(step + 1),
@@ -37,15 +37,14 @@ def test_learning_plots_are_non_empty(tmp_path):
         for step in range(2)
     ])
 
-    write_learning_plots(
-        timeseries, summary, tmp_path, learned_methods=("learned_direct",),
+    write_policy_plots(
+        timeseries, summary, tmp_path, policy_methods=("pairwise_ranking_policy",),
     )
 
     assert {path.name for path in tmp_path.glob("*.png")} == {
         "metrics_vs_budget.png",
         "generalization_by_trace.png",
-        "objective_data_ablation.png",
-        "candidate_composition_learned_direct.png",
-        "loss_over_time_learned_direct.png",
+        "candidate_composition_pairwise_ranking_policy.png",
+        "loss_over_time_pairwise_ranking_policy.png",
     }
     assert all(path.stat().st_size > 0 for path in tmp_path.glob("*.png"))

@@ -6,6 +6,7 @@ from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
 
+from pzr.artifact_io import write_json_atomic
 from pzr.learning.provenance import pzr_source_sha256, sha256_files
 from pzr.rtlola.robot_arm_random import (
     RANDOM_WAYPOINT_CONDITIONS,
@@ -111,7 +112,7 @@ def generate_random_waypoint_trace_store(
     ):
         raise ValueError("random-waypoint trace-store manifest contents differ")
     if existing is None:
-        _write_json_atomic(manifest, manifest_path)
+        write_json_atomic(manifest, manifest_path)
     return load_random_waypoint_trace_store(config.output)
 
 
@@ -255,12 +256,6 @@ def _trace_record(
         "mujoco_version": trace.metadata.mujoco_version,
         "generator_config": trace.metadata.generator_config,
     }
-
-
-def _write_json_atomic(payload: object, path: Path) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    temporary.replace(path)
 
 
 def _without_pzr_source(payload: dict[str, object]) -> dict[str, object]:

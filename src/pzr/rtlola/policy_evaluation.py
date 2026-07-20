@@ -1,4 +1,4 @@
-"""Resumable exact evaluation for direct RTLola ranking policies."""
+"""Resumable exact evaluation for static, MPC, and learned reducer policies."""
 
 from __future__ import annotations
 
@@ -13,9 +13,12 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
-from pzr.learning.provenance import payload_sha256
+from pzr.artifact_io import write_csv_atomic, write_json_atomic
+from pzr.learning.provenance import payload_sha256, sha256_files
+from pzr.learning.provenance import model_sha256 as compute_model_sha256
 from pzr.learning.ranker import ReducerPolicy
-from pzr.learning.reporting import write_learning_plots
+from pzr.learning.training import NamedDataset
+from pzr.rtlola.policy_reporting import write_policy_reports
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.binding import (
     BINDING_BUILD_PROFILE,
@@ -23,6 +26,7 @@ from pzr.rtlola.binding import (
     INTERPRETER_REVISION,
 )
 from pzr.rtlola.benchmark import (
+    PREDICTIVE_MPC_METHODS,
     RtlolaBenchmarkConfig,
     prepare_reference_cache,
     run_benchmark,
@@ -32,31 +36,35 @@ from pzr.rtlola.learned_policy import RtlolaReducerPolicy
 from pzr.rtlola.robot_arm import ROBOT_ARM_TRACE_ROWS
 
 
-LEARNING_EVALUATION_SCHEMA = "pzr.learning-evaluation.v3"
-COMPARISON_METRICS = (
-    "fpr",
-    "fnr",
-    "mean_approx_loss",
-    "final_approx_loss",
-    "max_approx_loss",
-    "sum_approx_loss",
-    "mean_state_width",
-    "max_state_width",
-    "total_time_ms",
-)
+POLICY_EVALUATION_SCHEMA = "pzr.policy-evaluation.v2"
+@dataclass(frozen=True)
+class PolicyComparison:
+    name: str
+    challenger: str
+    reference: str
+
+    def __post_init__(self) -> None:
+        values = (self.name, self.challenger, self.reference)
+        if any(not re.fullmatch(r"[A-Za-z0-9_.-]+", value) for value in values):
+            raise ValueError("comparison names and methods must be filesystem-safe")
+        if self.challenger == self.reference:
+            raise ValueError("comparison challenger and reference must differ")
 
 
 @dataclass(frozen=True)
-class FixedLearningEvaluationConfig:
+class FixedPolicyEvaluationConfig:
     output: Path
     model_names: tuple[str, ...]
     trace_kinds: tuple[str, ...]
     budgets: tuple[int, ...]
-    baselines: tuple[str, ...]
+    benchmark_methods: tuple[str, ...]
     candidate_names: tuple[str, ...]
     length: int | None = None
     horizon: int = 1
     beam_width: int = 4
+    prediction_step_seconds: float = 0.1
+    comparisons: tuple[PolicyComparison, ...] = ()
+    expected_cell_count: int | None = None
 
     def __post_init__(self) -> None:
         if not self.model_names or any(
@@ -65,18 +73,41 @@ class FixedLearningEvaluationConfig:
             raise ValueError("model names must be non-empty and filesystem-safe")
         if len(set(self.model_names)) != len(self.model_names):
             raise ValueError("learned model names must be unique")
-        if set(self.model_names) & set(self.baselines):
-            raise ValueError("learned model names collide with baselines")
-        if not self.trace_kinds or not self.budgets or not self.baselines:
-            raise ValueError("evaluation traces, budgets, and baselines must be non-empty")
-        if len(set(self.baselines)) != len(self.baselines):
-            raise ValueError("evaluation baselines must be unique")
+        if set(self.model_names) & set(self.benchmark_methods):
+            raise ValueError("learned model names collide with benchmark methods")
+        if not self.trace_kinds or not self.budgets or not self.benchmark_methods:
+            raise ValueError("evaluation traces, budgets, and benchmark methods must be non-empty")
+        if len(set(self.benchmark_methods)) != len(self.benchmark_methods):
+            raise ValueError("evaluation benchmark methods must be unique")
         if self.length is not None and self.length < 1:
             raise ValueError("evaluation length must be positive")
+        if not np.isfinite(self.prediction_step_seconds) or self.prediction_step_seconds <= 0.0:
+            raise ValueError("prediction step seconds must be positive and finite")
+        comparison_names = tuple(item.name for item in self.comparisons)
+        if len(set(comparison_names)) != len(comparison_names):
+            raise ValueError("policy comparison names must be unique")
+        available = set(self.model_names)
+        for comparison in self.comparisons:
+            missing = {comparison.challenger, comparison.reference} - available
+            if missing:
+                raise ValueError(
+                    f"comparison {comparison.name!r} references missing learned models: "
+                    f"{sorted(missing)}"
+                )
+        actual_cell_count = (
+            len(self.trace_kinds)
+            * len(self.budgets)
+            * (len(self.benchmark_methods) + len(self.model_names))
+        )
+        if self.expected_cell_count is not None and self.expected_cell_count != actual_cell_count:
+            raise ValueError(
+                f"evaluation matrix has {actual_cell_count} cells, "
+                f"expected {self.expected_cell_count}"
+            )
 
 
-def run_fixed_learning_evaluation(
-    config: FixedLearningEvaluationConfig,
+def run_fixed_policy_evaluation(
+    config: FixedPolicyEvaluationConfig,
     policies: Mapping[str, RtlolaReducerPolicy],
     *,
     model_sha256: Mapping[str, str],
@@ -102,9 +133,9 @@ def run_fixed_learning_evaluation(
     if root_manifest_path.exists():
         previous = json.loads(root_manifest_path.read_text())
         if previous.get("experiment_fingerprint") != experiment_fingerprint:
-            raise ValueError(f"stale learning evaluation output: {config.output}")
+            raise ValueError(f"stale policy evaluation output: {config.output}")
     config.output.mkdir(parents=True, exist_ok=True)
-    method_names = (*config.baselines, *config.model_names)
+    method_names = (*config.benchmark_methods, *config.model_names)
     reference_caches = {}
     for trace_kind in config.trace_kinds:
         length = _trace_length(config, trace_kind)
@@ -112,7 +143,7 @@ def run_fixed_learning_evaluation(
             config.output / "references" / f"{trace_kind}-length-{length}-exact.json"
         )
         reference_config = _benchmark_config(
-            config, trace_kind, length, config.baselines[0], reference_cache,
+            config, trace_kind, length, config.benchmark_methods[0], reference_cache,
         )
         prepare_reference_cache(reference_config)
         reference_caches[trace_kind] = reference_cache
@@ -134,6 +165,7 @@ def run_fixed_learning_evaluation(
                     method=method,
                     model_sha256=model_sha256.get(method),
                     source_sha256=source_sha256,
+                    exact_reference_sha256=sha256_files((reference_cache,)),
                 )
                 cell_dir = (
                     config.output / "cells" / trace_kind
@@ -189,33 +221,74 @@ def run_fixed_learning_evaluation(
     ]
     completed_timeseries = [item[0] for item in completed]
     completed_summaries = [item[1] for item in completed]
+    completed_predictions = [item[2] for item in completed if not item[2].empty]
     timeseries = pd.concat(completed_timeseries, ignore_index=True)
     summary = pd.concat(completed_summaries, ignore_index=True)
-    _write_evaluation_reports(config, timeseries, summary)
+    predictions = (
+        pd.concat(completed_predictions, ignore_index=True)
+        if completed_predictions else pd.DataFrame()
+    )
+    write_policy_reports(config, timeseries, summary, predictions)
     manifest = {
-        "schema": LEARNING_EVALUATION_SCHEMA,
+        "schema": POLICY_EVALUATION_SCHEMA,
         "reference_mode": "exact",
         "full_length": config.length is None,
         "length_override": config.length,
         "trace_kinds": list(config.trace_kinds),
         "budgets": list(config.budgets),
         "candidate_names": list(config.candidate_names),
-        "baselines": list(config.baselines),
+        "horizon": config.horizon,
+        "beam_width": config.beam_width,
+        "prediction_step_seconds": config.prediction_step_seconds,
+        "prediction_schedule": "current_event_time_plus_fixed_step_multiples",
+        "predictors": {
+            method: PREDICTIVE_MPC_METHODS[method]
+            for method in config.benchmark_methods
+            if method in PREDICTIVE_MPC_METHODS
+        },
+        "benchmark_methods": list(config.benchmark_methods),
         "models": {
             name: {"sha256": model_sha256[name]}
             for name in config.model_names
         },
+        "comparisons": [asdict(comparison) for comparison in config.comparisons],
         "pzr_source_sha256": source_sha256,
         "experiment_fingerprint": experiment_fingerprint,
         "cell_count": len(completed_summaries),
+        "expected_cell_count": config.expected_cell_count,
         "failure_count": 0,
         "worker_count": workers,
         "binding_revision": BINDING_REVISION,
         "interpreter_revision": INTERPRETER_REVISION,
         "binding_build_profile": BINDING_BUILD_PROFILE,
     }
-    _write_json_atomic(manifest, root_manifest_path)
+    write_json_atomic(manifest, root_manifest_path)
     return timeseries, summary
+
+
+def run_policy_evaluation_from_models(
+    config: FixedPolicyEvaluationConfig,
+    models: tuple[NamedDataset, ...],
+    *,
+    source_sha256: str,
+    workers: int = 1,
+) -> tuple[pd.DataFrame, pd.DataFrame]:
+    """Load named model artifacts and run the common fixed-policy evaluator."""
+    if tuple(model.name for model in models) != config.model_names:
+        raise ValueError("named model artifacts and evaluation configuration must align")
+    catalog = default_action_catalog(config.candidate_names)
+    policies = {
+        model.name: RtlolaReducerPolicy(ReducerPolicy.load(model.path), catalog)
+        for model in models
+    }
+    return run_fixed_policy_evaluation(
+        config,
+        policies,
+        model_sha256={model.name: compute_model_sha256(model.path) for model in models},
+        source_sha256=source_sha256,
+        model_directories={model.name: model.path for model in models},
+        workers=workers,
+    )
 
 
 @dataclass(frozen=True)
@@ -251,7 +324,7 @@ def _run_evaluation_cell_job(job: _EvaluationCellJob) -> None:
 
 
 def _experiment_fingerprint(
-    config: FixedLearningEvaluationConfig,
+    config: FixedPolicyEvaluationConfig,
     *,
     model_sha256: Mapping[str, str],
     source_sha256: str,
@@ -270,7 +343,7 @@ def _experiment_fingerprint(
     return payload_sha256(payload)
 
 
-def _trace_length(config: FixedLearningEvaluationConfig, trace_kind: str) -> int:
+def _trace_length(config: FixedPolicyEvaluationConfig, trace_kind: str) -> int:
     authoritative = ROBOT_ARM_TRACE_ROWS[trace_kind]
     if config.length is None:
         return authoritative
@@ -282,7 +355,7 @@ def _trace_length(config: FixedLearningEvaluationConfig, trace_kind: str) -> int
 
 
 def _benchmark_config(
-    config: FixedLearningEvaluationConfig,
+    config: FixedPolicyEvaluationConfig,
     trace_kind: str,
     length: int,
     method: str,
@@ -297,6 +370,7 @@ def _benchmark_config(
         budget=config.budgets[0] if budget is None else budget,
         horizon=config.horizon,
         beam_width=config.beam_width,
+        prediction_step_seconds=config.prediction_step_seconds,
         seeds=1,
         methods=[method],
         reference_mode="exact",
@@ -307,16 +381,17 @@ def _benchmark_config(
 
 def _cell_identity(
     *,
-    config: FixedLearningEvaluationConfig,
+    config: FixedPolicyEvaluationConfig,
     trace_kind: str,
     length: int,
     budget: int,
     method: str,
     model_sha256: str | None,
     source_sha256: str,
+    exact_reference_sha256: str,
 ) -> dict[str, object]:
     payload = {
-        "schema": LEARNING_EVALUATION_SCHEMA,
+        "schema": POLICY_EVALUATION_SCHEMA,
         "trace_kind": trace_kind,
         "length": length,
         "budget": budget,
@@ -324,10 +399,14 @@ def _cell_identity(
         "candidate_names": list(config.candidate_names),
         "horizon": config.horizon,
         "beam_width": config.beam_width,
+        "input_predictor": PREDICTIVE_MPC_METHODS.get(method),
+        "prediction_step_seconds": config.prediction_step_seconds,
+        "prediction_schedule": "current_event_time_plus_fixed_step_multiples",
         "reference_mode": "exact",
         "exact_reference_contract": "trigger_booleans_and_logical_row_center_radius_v1",
         "model_sha256": model_sha256 if method in config.model_names else None,
         "pzr_source_sha256": source_sha256,
+        "exact_reference_sha256": exact_reference_sha256,
         "binding_revision": BINDING_REVISION,
         "interpreter_revision": INTERPRETER_REVISION,
         "binding_build_profile": BINDING_BUILD_PROFILE,
@@ -344,16 +423,20 @@ def _load_or_run_cell(
     learned_methods: tuple[str, ...],
     policy: RtlolaReducerPolicy | None,
     expected_length: int,
-) -> tuple[pd.DataFrame, pd.DataFrame]:
+) -> tuple[pd.DataFrame, pd.DataFrame, pd.DataFrame]:
     manifest_path = directory / "manifest.json"
     if manifest_path.exists():
         manifest = json.loads(manifest_path.read_text())
         if manifest != identity:
-            raise ValueError(f"stale learning evaluation cell: {directory}")
+            raise ValueError(f"stale policy evaluation cell: {directory}")
         timeseries = pd.read_csv(directory / "timeseries.csv")
         summary = pd.read_csv(directory / "summary.csv")
         _validate_cell(timeseries, summary, method, expected_length)
-        return timeseries, summary
+        prediction_path = directory / "input_prediction_errors.csv"
+        predictions = (
+            pd.read_csv(prediction_path) if prediction_path.is_file() else pd.DataFrame()
+        )
+        return timeseries, summary, predictions
 
     if method in learned_methods:
         if policy is None:
@@ -365,18 +448,24 @@ def _load_or_run_cell(
         result = run_benchmark(benchmark_config)
     directory.mkdir(parents=True, exist_ok=True)
     if result.failures:
-        _write_json_atomic(
+        write_json_atomic(
             [asdict(failure) for failure in result.failures],
             directory / "failures.json",
         )
-        raise RuntimeError(f"learning evaluation cell failed: {directory}")
+        raise RuntimeError(f"policy evaluation cell failed: {directory}")
     timeseries = result.timeseries
     summary = result.summary
     _validate_cell(timeseries, summary, method, expected_length)
-    _write_csv_atomic(timeseries, directory / "timeseries.csv")
-    _write_csv_atomic(summary, directory / "summary.csv")
-    _write_json_atomic(identity, manifest_path)
-    return timeseries, summary
+    write_csv_atomic(timeseries, directory / "timeseries.csv")
+    write_csv_atomic(summary, directory / "summary.csv")
+    result_predictions = getattr(result, "prediction_diagnostics", pd.DataFrame())
+    if not result_predictions.empty:
+        write_csv_atomic(
+            result_predictions,
+            directory / "input_prediction_errors.csv",
+        )
+    write_json_atomic(identity, manifest_path)
+    return timeseries, summary, result_predictions
 
 
 def _validate_cell(
@@ -407,256 +496,3 @@ def _validate_cell(
     ]
     if not np.isfinite(summary[loss_columns].to_numpy(dtype=np.float64)).all():
         raise ValueError("exact evaluation cell contains non-finite native loss")
-
-
-def _write_evaluation_reports(
-    config: FixedLearningEvaluationConfig,
-    timeseries: pd.DataFrame,
-    summary: pd.DataFrame,
-) -> None:
-    _write_csv_atomic(timeseries, config.output / "timeseries.csv")
-    _write_csv_atomic(summary, config.output / "summary.csv")
-    _write_csv_atomic(
-        candidate_selection(timeseries), config.output / "candidate_selection.csv",
-    )
-    _write_csv_atomic(
-        decision_accounting(timeseries), config.output / "decision_accounting.csv",
-    )
-    macro = macro_metrics(summary)
-    _write_csv_atomic(macro, config.output / "macro_metrics.csv")
-    _write_csv_atomic(
-        macro[[
-            "method", "budget", "aggregation", "mean_approx_loss",
-            "final_approx_loss", "max_approx_loss", "sum_approx_loss",
-        ]],
-        config.output / "macro_loss_metrics.csv",
-    )
-    _write_csv_atomic(
-        macro[[
-            "method", "budget", "aggregation", "mean_state_width",
-            "max_state_width",
-        ]],
-        config.output / "macro_width_metrics.csv",
-    )
-    _write_csv_atomic(
-        macro[["method", "budget", "aggregation", "total_time_ms"]],
-        config.output / "macro_runtime_metrics.csv",
-    )
-    _write_csv_atomic(
-        micro_trigger_metrics(summary), config.output / "micro_trigger_metrics.csv",
-    )
-    comparisons = pd.concat([
-        comparison_to_baseline(summary, learned_method, baseline)
-        for learned_method in config.model_names
-        for baseline in config.baselines
-    ], ignore_index=True)
-    _write_csv_atomic(comparisons, config.output / "method_comparisons.csv")
-    static_methods = tuple(
-        method for method in config.baselines
-        if method in {"girard", "scott", "pca", "combastel"}
-    )
-    _write_csv_atomic(
-        best_static_metrics(summary, static_methods),
-        config.output / "best_static_metrics.csv",
-    )
-    _write_csv_atomic(
-        objective_data_ablation(summary, config.model_names),
-        config.output / "objective_data_ablation.csv",
-    )
-    write_learning_plots(
-        timeseries, summary, config.output / "plots", learned_methods=config.model_names,
-    )
-
-
-def candidate_selection(timeseries: pd.DataFrame) -> pd.DataFrame:
-    data = timeseries.copy()
-    data["reduction_required"] = data["pre_generator_count"] > data["budget"]
-    groups = [
-        "trace_kind", "budget", "method", "reduction_required", "reducer_used",
-    ]
-    result = data.groupby(groups, dropna=False).size().rename("count").reset_index()
-    totals = result.groupby(groups[:-1], dropna=False)["count"].transform("sum")
-    result["fraction"] = result["count"] / totals
-    return result
-
-
-def decision_accounting(timeseries: pd.DataFrame) -> pd.DataFrame:
-    data = timeseries.copy()
-    data["reduction_required"] = data["pre_generator_count"] > data["budget"]
-    data["automatic_none"] = ~data["reduction_required"] & (
-        data["reducer_used"] == "none"
-    )
-    data["infeasible_step"] = data["infeasible_candidate_count"] > 0
-    rows = []
-    for keys, frame in data.groupby(["trace_kind", "budget", "method"], dropna=False):
-        trace_kind, budget, method = keys
-        required = frame["reduction_required"]
-        required_count = int(required.sum())
-        rows.append({
-            "trace_kind": trace_kind,
-            "budget": budget,
-            "method": method,
-            "step_count": len(frame),
-            "reduction_required_count": required_count,
-            "reduction_required_rate": float(required.mean()),
-            "automatic_none_count": int(frame["automatic_none"].sum()),
-            "automatic_none_rate": float(frame["automatic_none"].mean()),
-            "fallback_count": int(frame["fallback_used"].sum()),
-            "fallback_rate_on_reductions": _conditional_rate(
-                frame["fallback_used"], required,
-            ),
-            "infeasible_candidate_count": int(
-                frame["infeasible_candidate_count"].sum()
-            ),
-            "infeasible_step_count": int(frame["infeasible_step"].sum()),
-            "infeasible_step_rate_on_reductions": _conditional_rate(
-                frame["infeasible_step"], required,
-            ),
-        })
-    return pd.DataFrame(rows)
-
-
-def _conditional_rate(values: pd.Series, condition: pd.Series) -> float:
-    return float(values[condition].mean()) if bool(condition.any()) else 0.0
-
-
-def macro_metrics(summary: pd.DataFrame) -> pd.DataFrame:
-    metrics = [
-        "mean_approx_loss", "final_approx_loss", "max_approx_loss",
-        "sum_approx_loss", "mean_state_width", "max_state_width",
-        "total_time_ms",
-    ]
-    result = summary.groupby(["method", "budget"], as_index=False)[metrics].mean()
-    result.insert(2, "aggregation", "macro_trace_mean")
-    return result
-
-
-def micro_trigger_metrics(summary: pd.DataFrame) -> pd.DataFrame:
-    columns = [
-        "false_positive_count", "false_negative_count",
-        "reference_positive_count", "reference_negative_count",
-    ]
-    result = summary.groupby(["method", "budget"], as_index=False)[columns].sum()
-    result["fpr"] = result["false_positive_count"] / result[
-        "reference_negative_count"
-    ].replace(0, np.nan)
-    result["fnr"] = result["false_negative_count"] / result[
-        "reference_positive_count"
-    ].replace(0, np.nan)
-    result.insert(2, "aggregation", "micro_trigger_counts")
-    return result
-
-
-def comparison_to_baseline(
-    summary: pd.DataFrame,
-    learned_method: str,
-    baseline: str,
-) -> pd.DataFrame:
-    keys = ["trace_kind", "budget"]
-    learned = summary[summary["method"] == learned_method].set_index(keys)
-    reference = summary[summary["method"] == baseline].set_index(keys)
-    if set(learned.index) != set(reference.index):
-        raise ValueError(f"learned and {baseline} evaluation cells do not align")
-    rows = []
-    for key in sorted(learned.index):
-        trace_kind, budget = key
-        for metric in COMPARISON_METRICS:
-            learned_value = float(learned.loc[key, metric])
-            baseline_value = float(reference.loc[key, metric])
-            rows.append({
-                "trace_kind": trace_kind,
-                "budget": budget,
-                "learned_method": learned_method,
-                "baseline": baseline,
-                "metric": metric,
-                "learned_value": learned_value,
-                "baseline_value": baseline_value,
-                "difference": learned_value - baseline_value,
-                "ratio": (
-                    learned_value / baseline_value
-                    if baseline_value != 0.0 else float("nan")
-                ),
-            })
-    return pd.DataFrame(rows)
-
-
-def best_static_metrics(
-    summary: pd.DataFrame,
-    static_methods: tuple[str, ...],
-) -> pd.DataFrame:
-    """Select the lowest static method independently for every reported metric."""
-    if not static_methods:
-        raise ValueError("best-static reporting requires a static reducer")
-    rows = []
-    static = summary[summary["method"].isin(static_methods)]
-    for (trace_kind, budget), frame in static.groupby(["trace_kind", "budget"]):
-        ordered = frame.assign(
-            _method_order=frame["method"].map({
-                method: index for index, method in enumerate(static_methods)
-            }),
-        ).sort_values("_method_order")
-        if set(ordered["method"]) != set(static_methods):
-            raise ValueError("static evaluation cells do not align")
-        for metric in COMPARISON_METRICS:
-            values = ordered[metric].to_numpy(dtype=np.float64)
-            finite = np.isfinite(values)
-            if "approx_loss" in metric and not finite.all():
-                raise ValueError("best-static native loss contains non-finite values")
-            best_index = (
-                int(np.argmin(np.where(finite, values, np.inf)))
-                if finite.any() else None
-            )
-            rows.append({
-                "trace_kind": trace_kind,
-                "budget": int(budget),
-                "metric": metric,
-                "defined_static_count": int(np.count_nonzero(finite)),
-                "best_static_method": (
-                    str(ordered.iloc[best_index]["method"])
-                    if best_index is not None else None
-                ),
-                "best_static_value": (
-                    float(values[best_index]) if best_index is not None else float("nan")
-                ),
-            })
-    return pd.DataFrame(rows)
-
-
-def objective_data_ablation(
-    summary: pd.DataFrame,
-    learned_methods: tuple[str, ...],
-) -> pd.DataFrame:
-    """Compare the clean objective and disturbed-data learned ablations."""
-    pairs = list(zip(learned_methods[:-1], learned_methods[1:]))
-    if len(learned_methods) > 2:
-        pairs.append((learned_methods[0], learned_methods[-1]))
-    rows = []
-    for earlier, later in pairs:
-        comparison = comparison_to_baseline(summary, later, earlier).rename(columns={
-            "learned_method": "later_stage",
-            "baseline": "earlier_stage",
-            "learned_value": "later_value",
-            "baseline_value": "earlier_value",
-        })
-        rows.append(comparison)
-    columns = [
-        "trace_kind", "budget", "later_stage", "earlier_stage", "metric",
-        "later_value", "earlier_value", "difference", "ratio",
-    ]
-    return pd.concat(rows, ignore_index=True)[columns] if rows else pd.DataFrame(
-        columns=columns,
-    )
-
-
-def _write_csv_atomic(frame: pd.DataFrame, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    frame.to_csv(temporary, index=False)
-    temporary.replace(path)
-
-
-def _write_json_atomic(payload: object, path: Path) -> None:
-    path.parent.mkdir(parents=True, exist_ok=True)
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(json.dumps(payload, indent=2, sort_keys=True))
-    temporary.replace(path)

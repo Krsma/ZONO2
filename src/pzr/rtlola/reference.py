@@ -10,6 +10,7 @@ from typing import Sequence
 
 import numpy as np
 
+from pzr.artifact_io import write_text_atomic
 from pzr.rtlola.binding import (
     BINDING_BUILD_PROFILE,
     BINDING_REVISION,
@@ -269,6 +270,4 @@ def _write_reference_cache(
             for step in steps
         ],
     }, indent=2, sort_keys=True)
-    temporary = cache_path.with_name(f".{cache_path.name}.tmp")
-    temporary.write_text(payload)
-    temporary.replace(cache_path)
+    write_text_atomic(payload, cache_path)

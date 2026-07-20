@@ -697,7 +697,7 @@ def test_full_width_terminal_search_scores_every_root_without_pruning():
         FakeEngine(),
         SimpleNamespace(depth=0, path=()),
         object(),
-        object(),
+        (object(),),
         (alpha, beta),
         budget=10,
         fallback=fallback,
@@ -743,7 +743,7 @@ def test_full_width_terminal_search_uses_automatic_none_in_continuation():
         FakeEngine(),
         SimpleNamespace(depth=0, path=()),
         object(),
-        object(),
+        (object(),),
         (alpha, beta),
         budget=10,
         fallback=fallback,
@@ -753,6 +753,67 @@ def test_full_width_terminal_search_uses_automatic_none_in_continuation():
     assert result.first_action.name == "alpha"
     assert result.predicted_sequence == ("alpha", "none")
     assert result.evaluated_leaves == 3
+
+
+def test_full_width_terminal_search_explores_256_horizon_three_leaves():
+    none = RtlolaAction("none", lambda _budget: object(), explicit_budget=False)
+    fallback = RtlolaAction("interval", lambda _budget: object(), explicit_budget=False)
+    actions = tuple(
+        RtlolaAction(name, lambda _budget: object(), explicit_budget=False)
+        for name in ("a", "b", "c", "d")
+    )
+
+    class FakeEngine:
+        def metrics(self, _state):
+            return SimpleNamespace(dynamic_generator_count=99, dimension=1)
+
+        def branch_step(self, state, event, action, config_budget):
+            del event, config_budget
+            next_state = SimpleNamespace(
+                depth=state.depth + 1,
+                path=(*state.path, action.name),
+            )
+            return SimpleNamespace(
+                verdict={}, state=next_state, action_name=action.name,
+                metrics=SimpleNamespace(state_width=0.0),
+            )
+
+        def approx_loss(self, reference, candidate):
+            assert reference.path == ("none",) * candidate.depth
+            return float(sum(ord(name) for name in candidate.path))
+
+    result = full_width_terminal_search(
+        FakeEngine(),
+        SimpleNamespace(depth=0, path=()),
+        object(),
+        (object(), object(), object()),
+        actions,
+        budget=10,
+        fallback=fallback,
+        none_action=none,
+        configured_horizon=3,
+    )
+
+    assert result.evaluated_leaves == 256
+    assert result.predicted_sequence == ("a", "a", "a", "a")
+    assert result.optimized_horizon == 3
+    assert result.realized_optimized_horizon == 3
+
+    unpruned_beam = beam_search(
+        FakeEngine(),
+        SimpleNamespace(depth=0, path=()),
+        object(),
+        (object(), object(), object()),
+        actions,
+        budget=10,
+        beam_width=256,
+        fallback=fallback,
+        none_action=none,
+        use_reference_loss=True,
+        configured_horizon=3,
+    )
+    assert unpruned_beam.predicted_sequence == result.predicted_sequence
+    assert unpruned_beam.predicted_cost == result.predicted_cost
 
 
 def test_tail_variants_preserve_roots_and_score_distinct_objectives():

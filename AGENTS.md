@@ -6,7 +6,8 @@ This Python 3.11 research package is RTLola-centered:
 
 - `src/pzr/rtlola/`: specifications, trace adapters, binding wrapper, native
   transform catalog, search, benchmark execution, reporting, and CLI.
-- `src/pzr/learning/`: reducer-cost datasets, soft distillation, and DART calibration.
+- `src/pzr/learning/`: reducer-cost datasets, Pairwise Ranking Policy training,
+  secondary objectives, DART calibration, and bounded challenger screening.
 - `rlolapythonbinding/`: pinned binding submodule.
 - `tests/`: pure tests plus binding-backed semantic contracts.
 - `tools/`: reproducible environment setup and robot-arm smoke execution.
@@ -46,8 +47,7 @@ pzr-learning collect --output /tmp/pzr-learning \
   --budgets 10 --candidates girard,scott --train-seeds 1 \
   --validation-seeds 1 --test-seeds 0 --collection-mode teacher
 pzr-learning train --dataset clean=/tmp/pzr-learning/dataset \
-  --output /tmp/pzr-learning-model --objective soft-kl \
-  --temperature-grid 0.1,0.2 --epochs 2
+  --output /tmp/pzr-learning-model --objective pairwise --epochs 2
 ```
 
 ## Current RTLola Experiment Configuration
@@ -74,8 +74,9 @@ the binding-native transforms, counters, and approximation loss. PZR reports
 the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
-The last recorded full release-binding validation after the soft-DART
-integration was 111 passing tests with no skips.
+The last recorded full release-binding validation after the Pairwise Ranking Policy
+cleanup and bounded-exploration integration was 129 passing tests with no skips on
+2026-07-19.
 
 The authoritative trace kinds and full lengths are:
 
@@ -158,30 +159,56 @@ The current learned policy uses the version-2, 15-scalar Geometry15 schema:
 the original 12 budget/current-zonotope aggregates plus row-width
 concentration, active-generator norm variation, and mean normalized off-axis
 generator mass. It is strictly pre-event and does not use stream values,
-history, spectral statistics, or an inference-time preview rollout. The
-current experiment pre-generates 48 independent 500-event nominal
-random-waypoint traces. Clean teacher train/validation seeds are 0--19/20--25;
-discrete-DART train/validation seeds are 26--41/42--47. The DART kernel is a
-teacher-action-conditioned categorical confusion matrix fitted from the frozen
-soft-clean model on clean validation states. A sampled feasible disturbance
-lasts one decision, after which the teacher recomputes its cost vector. Its
-fixed-trace comparison evaluates `learned_pairwise_clean`, `learned_soft_clean`,
-and `learned_soft_dart`
-against Girard, Scott, PCA, Combastel, and the two-event
-`mpc_terminal_full_width` teacher: 192 cells in total.
+history, spectral statistics, or an inference-time preview rollout.
+
+Pairwise Ranking Policy is the sole paper-facing learned method. The primary experiment
+pre-generates 26 independent 500-event nominal random-waypoint traces. Clean
+teacher train/validation seeds are 0--19/20--25. It evaluates
+`pairwise_ranking_policy` against Girard, Scott, PCA, Combastel, and the two-event
+`mpc_terminal_full_width` teacher: 144 cells in total. Do not claim a revised
+primary result until a fresh source-aware manifest validates all 144 cells.
+
+The Phase 1 cleanup reset all prior learning result directories. There is no
+active primary, secondary, or exploratory learning result artifact. New
+Pairwise Ranking Policy claims require a fresh canonical 144-cell manifest.
+
+Soft-KL and guarded DART remain completed secondary ablations and are not part
+of the default wrapper. Their historical result artifact was removed during the
+schema reset; the observed improvement was marginal and is confounded by
+additional data.
+DART calibration uses the frozen Pairwise Ranking Policy model's tolerance-aware clean-
+validation errors, fits a smoothed teacher-action-conditioned direction kernel,
+targets the global per-budget novice-error rate, restricts alternatives to the
+Q90 normalized-regret radius, and forces one teacher recovery decision after
+every disturbance.
+
+The bounded exploration generates extra seeds 26--41 and collects those same 16
+traces as clean teacher and guarded-DART train-only datasets. It screens
+`pairwise_ranking_policy_clean20`, `pairwise_ranking_policy_clean36`, `pairwise_ranking_policy_dart36`, and
+`expected_regret_clean20` with Girard over `figure8`, `random`, and
+`square_drift`: 60 cells. Explicit comparisons are `data_scale`, `dart_effect`,
+and `objective`. At most one passing challenger receives a 72-cell full
+evaluation with its matched reference and Girard. Do not claim exploratory
+results until the screen, selection, and any required promotion manifests
+validate.
+
 The six fixed evaluation traces always retain their full authoritative lengths.
 Teacher shards use ten spawned workers. Post-reference evaluation cells use
 four spawned workers with `max_tasks_per_child=1`; each worker owns its monitor
 and planner. BLAS, OpenMP, MKL, and NumExpr remain limited to one thread per worker.
 
-The primary objective is state-balanced soft action-value distillation. Feasible
+The primary objective is tolerance-aware state-balanced pairwise ranking. Feasible
 cost gaps within `max(1e-15, 1e-9 * max(abs(cost_i), abs(cost_j)))` are ties;
-remaining gaps are divided by the largest meaningful gap in the state and
-converted to `softmax(-regret / temperature)`. Infeasible target probability is
-zero, and training adds the student probability mass on infeasible actions as a
-penalty. Clean validation selects one temperature, which is reused by the
-soft-DART model. The corrected pairwise loss remains only as the clean-data
-ablation. Scores are lower-is-better and are not calibrated regrets.
+meaningful pair weights are divided by the largest meaningful gap in the state,
+and every feasible candidate ranks above every infeasible candidate. Scores are
+lower-is-better and uncalibrated.
+
+The `expected-regret-v1` challenger uses feasible normalized regret targets in
+`[0,1]`, an infeasible target of `2.0`, candidate-mean MSE within each state, and
+an equal mean over states with a feasible action. It uses no hyperparameter
+grid, selects checkpoints by clean-validation regression loss, and does not
+clamp predictions. Preserve stable ranking, native feasibility retries, and
+interval fallback accounting.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the

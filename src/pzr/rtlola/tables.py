@@ -7,6 +7,8 @@ from typing import Sequence
 import numpy as np
 import pandas as pd
 
+from pzr.rtlola.actions import STATIC_ACTION_METHOD_NAMES
+
 
 PRIMARY_METRIC_COLUMNS = (
     "trace_kind",
@@ -776,9 +778,7 @@ def mpc_metric_comparison(summary: pd.DataFrame) -> pd.DataFrame:
             .mean()
         )
         static = (
-            frame.loc[
-                ~is_mpc & ~frame["method"].isin(["none", "learned_direct"])
-            ]
+            frame.loc[frame["method"].isin(STATIC_ACTION_METHOD_NAMES) & (frame["method"] != "none")]
             .groupby("method", as_index=False)[metric_columns]
             .mean()
         )
@@ -809,54 +809,6 @@ def mpc_metric_comparison(summary: pd.DataFrame) -> pd.DataFrame:
                     ),
                 })
     return pd.DataFrame(rows, columns=columns)
-
-
-def learned_comparison(summary: pd.DataFrame) -> pd.DataFrame:
-    if summary.empty or "mean_approx_loss" not in summary:
-        return pd.DataFrame()
-    group_columns = [
-        column
-        for column in ("trace_kind", "budget")
-        if column in summary
-    ]
-    metric_columns = [
-        column
-        for column in (
-            "mean_approx_loss",
-            "final_approx_loss",
-            "sum_approx_loss",
-            "mean_state_width",
-            "fpr",
-            "fnr",
-            "total_time_ms",
-        )
-        if column in summary
-    ]
-    rows: list[dict[str, object]] = []
-    for group_key, frame in summary.groupby(group_columns, dropna=False):
-        values = group_key if isinstance(group_key, tuple) else (group_key,)
-        group_values = dict(zip(group_columns, values))
-        by_method = frame.groupby("method", as_index=False)[metric_columns].mean()
-        learned = by_method[by_method["method"] == "learned_direct"]
-        mpc = by_method[by_method["method"] == "mpc_terminal_beam"]
-        if learned.empty or mpc.empty:
-            continue
-        learned_row = learned.iloc[0]
-        mpc_row = mpc.iloc[0]
-        row: dict[str, object] = dict(group_values)
-        for metric in metric_columns:
-            learned_value = float(learned_row[metric])
-            mpc_value = float(mpc_row[metric])
-            row[f"learned_{metric}"] = learned_value
-            row[f"mpc_{metric}"] = mpc_value
-            row[f"absolute_{metric}_change"] = learned_value - mpc_value
-            row[f"relative_{metric}_change"] = (
-                learned_value / mpc_value - 1.0
-                if np.isfinite(mpc_value) and mpc_value != 0.0
-                else float("nan")
-            )
-        rows.append(row)
-    return pd.DataFrame(rows)
 
 
 def _boolean_series(frame: pd.DataFrame, column: str) -> pd.Series:

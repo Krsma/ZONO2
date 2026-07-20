@@ -1,126 +1,182 @@
-# RTLola Soft-Distillation and DART Pipeline
+# RTLola Pairwise Ranking Policy and Bounded Method Exploration
 
-## Policy and Teacher
+## Proposed Policy and Teacher
 
-The learned policy selects Girard, Scott, PCA, or Combastel. `none` remains
-automatic while the state is within the transform bound, and `interval` is
-fallback-only. The model and dataset artifacts fix the candidate order.
+We use *Pairwise Ranking Policy* as the sole paper-facing learned method. The policy
+selects Girard, Scott, PCA, or Combastel; `none` remains automatic while the
+state is within the binding transform bound, and `interval` is fallback-only.
+The model and dataset artifacts fix the candidate order.
 
-Geometry15 version 2 contains the original twelve budget/current-zonotope
-aggregates plus row-width concentration, active-generator norm variation, and
-mean normalized off-axis generator mass. The 15-32-32-4 ReLU scorer is strictly
-pre-event and emits uncalibrated lower-is-better scores. Inference performs one
-forward pass and then tries reducers through the binding in stable score order.
+Geometry15 version 2 contains fifteen pre-event aggregates: the original twelve
+budget/current-zonotope features, row-width concentration, active-generator
+norm variation, and mean normalized off-axis generator mass. The 15-32-32-4
+ReLU scorer emits one raw lower-is-better score per candidate. Inference performs
+one forward pass and then tries binding reducers in stable score order.
 
 The privileged `mpc_terminal_full_width` teacher evaluates every first reducer
 and every required second reducer over the current and next events. Its target
-is binding-native terminal approximation loss against an ephemeral unreduced
-rollout. Incomplete roots are infeasible. Neither collection nor inference
-writes zonotope matrices from Python.
+is the binding-native terminal approximation loss against an ephemeral
+unreduced rollout. Incomplete roots are infeasible. Neither collection nor
+inference writes zonotope matrices from Python.
 
-## Soft Action-Value Distillation
+## Pairwise Ranking Policy Objective
 
-For feasible action (a), let (d_a=C_a-\min_b C_b). We set (d_a=0) when
-it is within
-
-```text
-max(1e-15, 1e-9 * max(abs(C_a), abs(C_min)))
-```
-
-of the minimum. We divide the remaining gaps by the largest meaningful gap in
-the state. If no meaningful gap exists, every feasible action has zero regret.
-The teacher distribution is
+For two feasible actions with costs (C_i) and (C_j), we treat their costs as
+tied when their gap is at most
 
 ```text
-q_tau(a | s) = softmax(-normalized_regret(a) / tau)
+max(1e-15, 1e-9 * max(abs(C_i), abs(C_j))).
 ```
 
-over feasible actions; infeasible actions receive probability zero. The
-student distribution is `softmax(-score)`. Each valid state's loss is
-`KL(q || p) + lambda * sum(p[infeasible])`, with `lambda=1`, and valid states
-are averaged equally. States with no feasible reducer are excluded from the
-objective and reported. The same tolerance helper defines tolerant-best masks,
-normalized regrets, diagnostics, and the hard pairwise ablation.
+Every meaningful feasible pair contributes a softplus ranking loss weighted by
+its gap divided by the largest meaningful feasible gap in that state. Every
+feasible action ranks above every infeasible action with unit weight. We first
+normalize the weighted pair loss within each rankable state and then average
+states equally. Raw scores remain uncalibrated; only their stable ordering is
+used at inference time.
 
-We train the soft-clean model at temperatures `0.05,0.1,0.2,0.5` from identical
-initialization and data order. Clean validation selects one temperature by
-infeasible selections, mean selected normalized regret, maximum regret, KL,
-and finally the lower temperature. The soft-DART model reuses this temperature
-and trains from scratch. The pairwise-clean model uses the corrected per-state
-pairwise objective only as an ablation.
+## Primary Data and Evaluation
 
-## One-Round Discrete DART
-
-The teacher sees the next event while Geometry15 does not. This asymmetric
-information can make exact teacher actions unlearnable from the student input,
-as discussed by [Warrington et al.
-(2021)](https://proceedings.mlr.press/v139/warrington21a.html) and, in a more
-general theoretical setting, [Cai et al.
-(2024)](https://papers.nips.cc/paper_files/paper/2024/hash/74d188c51d97fcfbc0269f584d6a53b7-Abstract-Conference.html).
-We therefore do not use learner-controlled collection.
-
-Following the supervisor-noise principle of [DART (Laskey et al.,
-2017)](https://proceedings.mlr.press/v78/laskey17a.html), we fit
-`P(student_action | budget, teacher_action)` by categorical maximum likelihood
-on the frozen soft-clean model's clean validation predictions. Unobserved rows
-remain the identity distribution. During DART collection, probability assigned
-to currently infeasible alternatives is redirected to the teacher action.
-Sampling is deterministic in disturbance seed, trace seed, budget, and event
-index. At the next reduction decision, the teacher recomputes the complete
-cost vector and retakes control. Thus errors never compound through a student
-roll-in.
-
-## Data Schedule and Artifacts
-
-The fresh trace store contains 48 independent 500-event nominal
+The primary trace store contains 26 independent 500-event nominal
 random-waypoint trajectories:
 
 | Dataset | Train | Validation | Collection |
 |---|---:|---:|---|
-| Clean | 0--19 | 20--25 | teacher |
-| DART | 26--41 | 42--47 | frozen disturbed teacher |
+| Primary clean | 0--19 | 20--25 | teacher |
 
-The clean validation split is development data: It selects the temperature and
-calibrates the confusion kernel, but never contributes gradients. DART
-validation is collected with the frozen kernel and also remains outside
-training. The six packaged fixed traces are the final out-of-distribution
-evaluation.
+Validation trajectories never contribute gradients. The wrapper trains only
+`pairwise_ranking_policy` and evaluates it against Girard, Scott, PCA,
+Combastel, and `mpc_terminal_full_width`. The primary matrix therefore contains
+six fixed traces by four budgets by six methods, or 144 cells.
 
-Version-3 reducer-cost datasets store features, complete cost and feasibility
-vectors, split/sample identity, teacher and executed actions, disturbance
-metadata, native revisions, trace hashes, and source fingerprints. Targets are
-derived during training rather than persisted as tie masks. Model artifacts
-store the objective contract, dataset hashes, temperature, feasibility weight,
-histories, seed, and source fingerprint. DART calibration stores the empirical
-confusion matrix, row counts, diagnostics, and model/dataset hashes.
+Exact references are prepared once per trace before parallel cells. Teacher
+collection uses ten spawned workers; post-reference evaluation uses four
+spawned workers with `max_tasks_per_child=1`. Every worker owns its binding
+monitor, while BLAS, OpenMP, MKL, and NumExpr remain limited to one native
+thread.
 
-## Commands and Evaluation
-
-Run the full resumable experiment with:
+Run the primary experiment with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-geometry15-random500-soft-dart-v3-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b \
 PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
-tools/run_rtlola_learning_full.sh
+tools/run_rtlola_learning_primary.sh
 ```
 
-The wrapper trains `learned_pairwise_clean`, `learned_soft_clean`, and
-`learned_soft_dart`. Repeated named `--dataset NAME=PATH` and
-`--model NAME=PATH` inputs require exact schema and catalog alignment. The
-`calibrate-dart` command freezes the clean model/dataset identity before any
-disturbed shard is collected.
+The output must be fresh and source-aware. We do not claim a revised primary
+result until its manifest validates all 144 full-length cells without failures.
+The Phase 1 cleanup removed every prior learning result directory, so no active
+primary, secondary, or exploratory learning result artifact exists.
 
-Evaluation compares the three learned models with the four static reducers and
-the two-event full-width MPC teacher: six traces by four budgets by eight
-methods gives 192 cells. Exact references are prepared once per trace before
-parallel cells. Collection uses ten spawned workers; evaluation uses four
-spawned workers and `max_tasks_per_child=1`. Every worker owns its binding
-monitor, while BLAS, OpenMP, MKL, and NumExpr use one thread.
+## Secondary Soft-KL and Guarded DART Ablations
 
-Reports retain complete time series and summaries, macro loss/width/runtime,
-micro FPR/FNR, fallback and infeasible accounting, candidate composition,
-`method_comparisons.csv`, independently selected `best_static_metrics.csv`,
-and `objective_data_ablation.csv`. Finite extreme static results remain in the
-tables. Native failures, non-finite losses, incomplete rows, or missing cells
-leave the experiment incomplete. A smoke or prefix run is not a completed
-scientific result.
+Soft action-value distillation and guarded one-round discrete DART remain in
+the codebase as completed secondary ablations. They are not stages of the
+primary wrapper. Their historical result artifact was removed in the schema
+reset and is not an active result.
+
+Soft-KL converts tolerance-aware feasible regrets to
+`softmax(-regret / temperature)`, assigns infeasible candidates zero target
+probability, and penalizes student probability on infeasible actions. Guarded
+DART calibrates the global per-budget disturbance rate from the frozen Pairwise
+Clean model's clean-validation errors. It separately fits a smoothed teacher-
+action-conditioned direction kernel, restricts alternatives to the Q90
+normalized-regret radius, and forces one teacher recovery decision after every
+disturbance.
+
+The guarded calibration corrected a harmful feedback mechanism in the earlier
+adaptation: shifted corrective states could otherwise trigger repeated
+disturbances. However, the observed improvement from the corrected DART run was
+marginal and is confounded by its additional training traces. We therefore keep
+it as an ablation rather than presenting it as the proposed method.
+
+## Expected-Regret Challenger
+
+The exploratory *expected-regret-v1* objective uses the same Geometry15 scorer.
+For each state with at least one feasible action, we assign feasible candidates
+their tolerance-aware normalized regret in ([0,1]) and infeasible candidates a
+fixed target of (2.0). We compute mean squared error across candidates within
+each state and then average valid states equally. States with no feasible action
+are excluded and reported.
+
+This regression has no hyperparameter grid and uses clean-validation regression
+loss for checkpoint selection. Outputs are not clamped: they estimate the
+conditional mean penalized regret when repeated Geometry15 observations alias
+different teacher states. Diagnostics report RMSE, MAE, per-candidate errors,
+and predictions outside ([0,2]), alongside selection regret, feasibility, and
+ranking metrics.
+
+## Bounded Exploration and Promotion Gate
+
+The separate exploration reuses the primary clean dataset and frozen Pairwise
+Clean model. It generates seeds 26--41 once and labels the same sixteen traces
+twice: clean teacher collection and guarded DART collection. Auxiliary datasets
+are train-only; all model selection uses the unchanged primary validation seeds
+20--25.
+
+We screen four models:
+
+| Model | Training data | Objective |
+|---|---|---|
+| `pairwise_ranking_policy_clean20` | frozen primary clean | pairwise |
+| `pairwise_ranking_policy_clean36` | primary clean + 16 extra clean | pairwise |
+| `pairwise_ranking_policy_dart36` | primary clean + 16 extra DART | pairwise |
+| `expected_regret_clean20` | primary clean | expected regret |
+
+The evaluation manifest stores three explicit comparisons: `data_scale`
+compares Clean36 with Clean20, `dart_effect` compares DART36 with Clean36, and
+`objective` compares expected regret with Clean20. The screen covers full-length
+`figure8`, `random`, and `square_drift` at four budgets, plus Girard: 60 cells.
+
+A challenger passes only if it completes without native failures or non-finite
+artifacts; adds no false positives, false negatives, infeasible selections, or
+fallbacks; reduces total summed loss by at least 2%; lowers macro mean loss; has
+no cell above 110% of its reference's summed loss; and does not worsen mean
+selected normalized regret on clean validation. We select the largest summed-
+loss reduction. Within 0.5 percentage points, we prefer Clean36, then expected
+regret, then DART.
+
+At most one challenger receives a full evaluation. That evaluation contains the
+winner, its matched reference, and Girard over six traces and four budgets, or
+72 cells. If no challenger passes, the selection manifest records that method
+expansion stops and Pairwise Ranking Policy remains the only proposed method. We do not
+modify DART further unless DART36 passes its data-matched comparison.
+
+Run the exploration with:
+
+```bash
+PZR_PRIMARY_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-bounded-exploration-v1-7371495-b4cfbf4-e6ecd0b \
+tools/run_rtlola_learning_exploration.sh
+```
+
+No exploratory result is reportable before the 60-cell screen manifest and the
+selection manifest validate. If a challenger is promoted, its result additionally
+requires the complete 72-cell manifest.
+
+## Artifacts
+
+Version-5 reducer-cost datasets store Geometry15 features, complete native cost
+and feasibility vectors, split/sample identity, teacher summaries, native
+revisions, trace hashes, and source fingerprints. Clean datasets contain no
+synthetic disturbance columns. DART datasets additionally store optional
+per-decision disturbance metadata and `dart_collection_summary.csv`.
+Model directories store the objective contract, dataset hashes, validation
+provenance, histories, seed, weights, normalizer, and source fingerprint.
+
+Evaluation reports retain complete time series and summaries, macro
+loss/width/runtime, micro FPR/FNR, fallback and infeasible accounting, candidate
+composition, `method_comparisons.csv`, and independently selected
+`best_static_metrics.csv`. The evaluator uses schema
+`pzr.policy-evaluation.v2`. Version 2 records the configured predictor, fixed
+schedule, horizon, beam width, and exact-reference identity. The separate MPC
+add-on contains 168 cells: Girard and frozen-PRP anchors, horizon-3 oracle beam
+and full width, and horizon-3 hold/linear/quadratic predictive beams. Joined
+reporting rejects anchor or provenance mismatches and emits a 240-cell paper
+dataset, a linear-prediction main table, a predictor ablation, and explicit
+safety/accounting tables. Predictive MPC is causal but current-event-aware;
+the learned policy remains strictly pre-event.
+
+Exploratory runs additionally write validated
+`policy_comparisons.csv`, `challenger_assessments.csv`, and `selection.json`.
+The primary run omits empty policy-comparison tables and plots.

@@ -4,9 +4,9 @@ import torch
 
 pytest.importorskip("rlola_python_binding")
 
-from pzr.learning.dart import DartCalibration
+from pzr.learning.dart import DartCalibration, DartCalibrationConfig
 from pzr.learning.ranker import FeatureNormalizer, ReducerPolicy, ReducerScorer
-from pzr.learning.targets import PAIRWISE_OBJECTIVE_CONTRACT, tolerant_best_mask
+from pzr.learning.objectives import PAIRWISE_OBJECTIVE_CONTRACT, tolerant_best_mask
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.benchmark import (
     RtlolaBenchmarkConfig,
@@ -60,7 +60,7 @@ def test_full_width_teacher_scores_all_roots_without_mutating_live_state():
         engine,
         state,
         events[12],
-        events[13],
+        (events[13],),
         catalog.mpc_candidates,
         budget=10,
         fallback=catalog.fallback,
@@ -108,7 +108,7 @@ def test_pytorch_policy_uses_current_state_only_for_direct_inference():
     assert decision.first_action.name == "girard"
     assert decision.predicted_sequence == ("girard",)
     assert decision.evaluated_leaves == 1
-    assert decision.mpc_variant == "learned_direct"
+    assert decision.mpc_variant == "direct_policy"
 
 
 def test_direct_policy_features_do_not_depend_on_current_event_values():
@@ -142,8 +142,16 @@ def test_dart_collection_executes_one_step_disturbances_under_teacher_control():
     calibration = DartCalibration(
         candidate_names=("girard", "scott"),
         budgets=(10,),
-        probabilities=np.asarray([[[0.0, 1.0], [1.0, 0.0]]]),
+        direction_probabilities=np.asarray([[[0.0, 1.0], [1.0, 0.0]]]),
         row_counts=np.asarray([[10, 10]]),
+        error_counts=np.asarray([[10, 10]]),
+        target_disturbance_rates=np.asarray([0.5]),
+        injection_probabilities=np.asarray([1.0]),
+        regret_caps=np.asarray([1.0]),
+        expected_disturbance_rates=np.asarray([0.5]),
+        eligible_fractions=np.asarray([1.0]),
+        saturated=np.asarray([False]),
+        config=DartCalibrationConfig(),
         context={},
     )
     samples = collect_teacher_episode(
@@ -162,9 +170,21 @@ def test_dart_collection_executes_one_step_disturbances_under_teacher_control():
     )
 
     assert samples
-    assert {sample.collection_mode for sample in samples} == {"dart"}
-    assert {sample.executed_action for sample in samples} <= {"girard", "scott", "interval"}
-    assert any(sample.disturbed for sample in samples)
+    assert all(sample.dart is not None for sample in samples)
+    assert {sample.dart.executed_action for sample in samples if sample.dart} <= {
+        "girard", "scott", "interval",
+    }
+    assert any(sample.dart.disturbed for sample in samples if sample.dart)
+    assert any(sample.dart.recovery_forced for sample in samples if sample.dart)
+    assert all(
+        not (left.dart.disturbed and right.dart.disturbed)
+        for left, right in zip(samples, samples[1:])
+        if left.dart is not None and right.dart is not None
+    )
+    assert all(
+        sample.dart.sampled_normalized_regret <= sample.dart.regret_cap + 1e-15
+        for sample in samples if sample.dart is not None and sample.dart.disturbed
+    )
 
 
 def test_direct_policy_benchmark_uses_standard_exact_metric_schema(tmp_path):
@@ -178,10 +198,12 @@ def test_direct_policy_benchmark_uses_standard_exact_metric_schema(tmp_path):
         mpc_candidate_names=["girard", "scott"],
     )
 
-    result = run_direct_policy_benchmark(config, _direct_policy())
+    result = run_direct_policy_benchmark(
+        config, _direct_policy(), method="pairwise_ranking_policy",
+    )
 
     assert not result.failures
     assert result.raw_results
-    assert result.raw_results[0].method == "learned_direct"
+    assert result.raw_results[0].method == "pairwise_ranking_policy"
     assert np.isfinite(result.summary["mean_approx_loss"]).all()
     assert {"fpr", "fnr", "fallback_rate"} <= set(result.summary.columns)

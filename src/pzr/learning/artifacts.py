@@ -9,11 +9,12 @@ from typing import Mapping
 import numpy as np
 import pandas as pd
 
+from pzr.artifact_io import write_csv_atomic, write_json_atomic
 from pzr.learning.dataset import ReducerCostDataset
-from pzr.learning.targets import COST_CONTRACT
+from pzr.learning.objectives import COST_CONTRACT
 
 
-REDUCER_COST_DATASET_SCHEMA = "pzr.reducer-cost-dataset.v3"
+REDUCER_COST_DATASET_SCHEMA = "pzr.reducer-cost-dataset.v5"
 CANDIDATE_COST_COLUMNS = (
     "sample_id", "candidate", "candidate_index", "feasible", "teacher_cost",
 )
@@ -40,8 +41,8 @@ def write_reducer_cost_dataset(
             sample_ids=np.asarray(dataset.sample_ids),
         )
     temporary_arrays.replace(arrays_path)
-    _write_csv_atomic(sample_metadata, directory / "samples.csv")
-    _write_csv_atomic(_candidate_cost_frame(dataset), directory / "candidate_costs.csv")
+    write_csv_atomic(sample_metadata, directory / "samples.csv")
+    write_csv_atomic(_candidate_cost_frame(dataset), directory / "candidate_costs.csv")
     manifest = {
         "schema": REDUCER_COST_DATASET_SCHEMA,
         "num_samples": dataset.num_samples,
@@ -54,7 +55,7 @@ def write_reducer_cost_dataset(
         },
         **dict(metadata),
     }
-    _write_text_atomic(json.dumps(manifest, indent=2, sort_keys=True), directory / "manifest.json")
+    write_json_atomic(manifest, directory / "manifest.json")
 
 
 def load_reducer_cost_dataset(
@@ -112,15 +113,3 @@ def _validate_sample_metadata(dataset: ReducerCostDataset, metadata: pd.DataFram
         raise ValueError("sample metadata identifiers are not aligned")
     if tuple(metadata["split"].astype(str)) != dataset.splits:
         raise ValueError("sample metadata splits are not aligned")
-
-
-def _write_csv_atomic(frame: pd.DataFrame, path: Path) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    frame.to_csv(temporary, index=False)
-    temporary.replace(path)
-
-
-def _write_text_atomic(value: str, path: Path) -> None:
-    temporary = path.with_name(f".{path.name}.tmp")
-    temporary.write_text(value)
-    temporary.replace(path)
