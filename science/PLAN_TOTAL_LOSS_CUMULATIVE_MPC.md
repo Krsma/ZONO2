@@ -1,5 +1,9 @@
 # Align headline metric and MPC objective with the rlola-eval notebook
 
+> Historical proposal. The terminal-loss paper configuration supersedes the
+> proposed cumulative-primary change. `mpc_cumulative_beam` is retained only as
+> a matched offline objective comparison; `mpc_terminal_beam` remains primary.
+
 ## Context
 
 The loss-discrepancy investigation (science/RTLOLA_MPC_LOSS_INVESTIGATION.md) confirmed both

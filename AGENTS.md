@@ -165,16 +165,19 @@ concentration, active-generator norm variation, and mean normalized off-axis
 generator mass. It is strictly pre-event and does not use stream values,
 history, spectral statistics, or an inference-time preview rollout.
 
-Pairwise Ranking Policy is the sole paper-facing learned method. The primary experiment
-pre-generates 26 independent 500-event nominal random-waypoint traces. Clean
-teacher train/validation seeds are 0--19/20--25. It evaluates
-`pairwise_ranking_policy` against Girard, Scott, PCA, Combastel, and the two-event
-`mpc_terminal_full_width` teacher: 288 cells in total. Do not claim a revised
-primary result until a fresh source-aware manifest validates all 288 cells.
+Pairwise Ranking Policy is the primary paper-facing learned method. The
+versioned experiment in `experiments/terminal_loss_paper_v1.yaml` pre-generates
+26 independent 500-event nominal random-waypoint traces and collects one
+terminal full-width teacher dataset at budgets `40,80,120,150,200,250,500`.
+Clean teacher train/validation seeds are 0--19/20--25. The primary model uses
+all seven budgets; `pairwise_ranking_policy_budget80` is separately trained by
+filtering that dataset to recorded budget-80 samples and is only an
+extrapolation diagnostic.
 
 The Phase 1 cleanup reset all prior learning result directories. There is no
-active primary, secondary, or exploratory learning result artifact. New
-Pairwise Ranking Policy claims require a fresh canonical 288-cell manifest.
+active primary, secondary, exploratory, or terminal-loss paper result artifact.
+New claims require the versioned 224-cell figure-8 headline and 5,040-cell
+held-out manifests, with every failed point explicitly unavailable.
 
 Soft-KL and guarded DART remain completed secondary ablations and are not part
 of the default wrapper. Their historical result artifact was removed during the
@@ -196,7 +199,10 @@ evaluation with its matched reference and Girard. Do not claim exploratory
 results until the screen, selection, and any required promotion manifests
 validate.
 
-The twelve fixed evaluation traces always retain their full authoritative lengths.
+The four figure-8 headline traces always retain their full authoritative lengths.
+Held-out generalization uses seeds 100--119 under all four random-waypoint
+conditions at 500 events. Pilot seeds are 90--91, ablation seeds are 60--64,
+and reserved exploration/model-selection seeds remain 26--41.
 Teacher shards use ten spawned workers. Post-reference evaluation cells use
 four spawned workers with `max_tasks_per_child=1`; each worker owns its monitor
 and planner. BLAS, OpenMP, MKL, and NumExpr remain limited to one thread per worker.
@@ -218,14 +224,17 @@ interval fallback accounting.
 reserve or interpret post-event dense slots as a violation. Preserve the
 distinction between dynamic, active, zero, and constant generators.
 
-MPC and teacher costs use binding-native approximation loss. Terminal beam
-uses terminal loss; the experimental tail variants use either the extended
+MPC and teacher costs use binding-native approximation loss. Terminal beam and
+the two-event full-width teacher use terminal loss. Cumulative beam is a
+matched offline comparison and never the primary method; experimental tail variants use either the extended
 endpoint loss or an undiscounted sum of binding-native state losses. Do not
 replace these with width, trigger-straddling, or a Python proxy during
 unrelated cleanup.
 
-Benchmark reference mode controls offline metrics and caching only. MPC and
-teacher searches construct their own unreduced horizon rollouts.
+Benchmark reference mode controls offline metrics and caching only. Paper MPC
+and teacher searches construct their own unreduced horizon rollouts. Offline
+terminal beam uses recorded future inputs; predictive linear beam uses causal
+history only.
 
 Offline exact references remain specification-independent. Each cache row
 contains exact trigger booleans, a shared logical-row center, and separate

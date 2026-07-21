@@ -69,7 +69,40 @@ pzr-learning train --dataset clean=/tmp/pzr-learning/clean/dataset \
   --output /tmp/pzr-learning/model-pairwise-ranking-policy --objective pairwise --epochs 2
 ```
 
-Run the paper-facing Pairwise Ranking Policy experiment with:
+The paper-facing terminal-loss evaluation is defined by
+`experiments/terminal_loss_paper_v1.yaml` and the staged `pzr-paper` command:
+
+```bash
+pzr-paper prepare
+pzr-paper train
+pzr-paper pilot
+pzr-paper headline
+pzr-paper generalization
+pzr-paper ablation
+pzr-paper timing
+pzr-paper report
+pzr-paper validate
+```
+
+The pilot covers 216 cells and projects the unchanged 5,040-cell held-out
+generalization sweep. If the projection exceeds 72 hours with four one-thread
+workers, `generalization` stops until it is explicitly resumed with
+`--approve-long-run`. The four full figure-8 conditions contribute 224
+headline cells. `objective-comparison` is separate and requires a completed
+notebook-parity manifest; cumulative MPC is never promoted to the primary
+method. Raw cells remain under `results/terminal-loss-paper-v1`; compact source
+tables, TeX tables, PDF/PNG figures, and their hashes are written under
+`paper/corl2026/Zonotopes_at_CoRL/generated/terminal_loss_v1`.
+
+`pairwise_ranking_policy` is trained from one seven-budget terminal full-width
+teacher dataset. `pairwise_ranking_policy_budget80` uses the same dataset with
+an explicit recorded budget-80 filter and appears only in the extrapolation
+study. Offline terminal beam uses recorded future inputs, while the linear
+predictive beam is causal and deployable. Exact caches are used only for
+offline metrics; selection and teaching retain native unreduced rollouts.
+
+The older four-budget Pairwise Ranking Policy wrapper remains available as a
+historical pipeline:
 
 ```bash
 PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \

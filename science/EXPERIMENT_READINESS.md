@@ -18,6 +18,18 @@ An experiment is ready only when:
 - all generated CSV, YAML, PDF, PNG, policy, and metadata artifacts are
   non-empty.
 - incomplete transform runs are recorded and excluded from aggregates.
+- every paper cell identity includes trace/config/source/model/cache hashes and
+  the complete typed method configuration;
+- interval fallback changes the run state to `fallback_failed`, makes headline
+  FPR and completed-run throughput unavailable, and retains pre-fallback
+  diagnostics;
+- the 216-cell pilot projection is at most 72 hours with four one-thread
+  workers, or explicit approval is recorded before the unchanged 5,040-cell
+  held-out sweep;
+- headline aggregation is trace-level, paired bootstrap intervals use 10,000
+  deterministic seed-level replicates, and failed points are not connected;
+- the timing stage uses one worker and one native thread, with warm-up,
+  reference preparation, trace generation, and artifact I/O excluded.
 
 The primary overnight method list contains Girard, Scott, PCA, Combastel, and
 beam MPC. The MPC and learning candidate catalog contains the same four
@@ -28,8 +40,9 @@ fallback obscures standalone behavior. Althoff A, colinear scale, and the
 randomized/diverse clustering reducers are excluded because they are not
 tractable or robust at robot-arm sweep length.
 
-Use `/tmp` for smoke outputs. Serious outputs belong under a new `results/`
-directory and must be generated through `pzr-benchmark`.
+Use `/tmp` for smoke outputs. Serious paper outputs belong under a new
+`results/terminal-loss-paper-v1` directory and must be generated through
+`pzr-paper`; ordinary benchmark diagnostics still use `pzr-benchmark`.
 
 The retired Python monitors, robotics replay/probe paths, drone/F1TENTH
 sidecars, and old paper wrappers are not valid experiment entry points.
