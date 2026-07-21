@@ -1,4 +1,5 @@
 from dataclasses import replace
+import json
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -13,11 +14,13 @@ from pzr.rtlola.paper_artifacts import (
     _plot_budget_facets,
     ablation_table,
     budget80_extrapolation,
+    objective_comparison_table,
 )
 from pzr.rtlola.paper_experiment import (
     BOOTSTRAP_REPLICATES,
     HEADLINE_METHODS,
     PAPER_CELL_SCHEMA,
+    PAPER_CONFIG_SCHEMA,
     ExecutionRegime,
     RunState,
     aggregate_trace_metrics,
@@ -30,9 +33,17 @@ from pzr.rtlola.paper_experiment import (
 from pzr.rtlola.paper_pipeline import (
     DEFAULT_CONFIG,
     EvaluationCellJob,
+    RUN_EXIT_APPROVAL_REQUIRED,
     _execute_cell_job,
+    _junit_counts,
+    _runtime_provenance,
+    _scientific_failure_count,
+    _validate_runtime_provenance,
     build_parser,
+    run_complete_paper_evaluation,
+    run_paper_stage,
 )
+from pzr.rtlola.parity import ParityConfig
 
 
 def _summary_row(
@@ -75,6 +86,10 @@ def _summary_row(
 def test_checked_config_declares_stable_methods_regimes_and_cell_counts():
     config = load_paper_experiment_config(DEFAULT_CONFIG)
 
+    assert DEFAULT_CONFIG.name == "paper_evaluation_v1.yaml"
+    assert config.schema == PAPER_CONFIG_SCHEMA == "pzr.paper-evaluation-config.v1"
+    assert config.experiment_id == "paper-evaluation-v1"
+    assert config.ablation_workers == 1
     assert config.expected_cells("pilot") == 216
     assert config.expected_cells("generalization") == 5_040
     assert config.expected_cells("headline") == 224
@@ -101,6 +116,51 @@ def test_checked_config_seed_groups_are_pairwise_disjoint():
     for index, left in enumerate(groups):
         for right in groups[index + 1:]:
             assert not set(left) & set(right)
+
+
+def test_smoke_parity_event_limit_is_explicit_and_validated(tmp_path):
+    config = ParityConfig(
+        rlola_eval=tmp_path / "rlola-eval",
+        output=tmp_path / "parity",
+        trace_kinds=("figure8",),
+        bounds=(15,),
+        run_speed_gate=False,
+        event_limit=20,
+    )
+    assert config.event_limit == 20
+    with pytest.raises(ValueError, match="at least two"):
+        replace(config, event_limit=1)
+
+
+def test_runtime_provenance_rejects_stale_native_stack():
+    provenance = _runtime_provenance()
+    provenance["binding_revision"] = "old"
+    with pytest.raises(ValueError, match="binding_revision"):
+        _validate_runtime_provenance(provenance, "pilot")
+
+
+def test_preflight_junit_counts_rejectable_outcomes(tmp_path):
+    report = tmp_path / "pytest.xml"
+    report.write_text(
+        '<testsuites><testsuite tests="9" failures="1" errors="2" '
+        'skipped="3"/></testsuites>'
+    )
+
+    assert _junit_counts(report) == {
+        "tests": 9, "failures": 1, "errors": 2, "skipped": 3,
+    }
+
+
+def test_scientific_failure_count_includes_timing_failures(tmp_path):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path / "results",
+    )
+    manifest = config.output_root / "timing" / "manifest.json"
+    manifest.parent.mkdir(parents=True)
+    manifest.write_text('{"failure_count": 4}')
+
+    assert _scientific_failure_count(config) == 4
 
 
 def test_training_budget_filter_preserves_alignment_and_both_splits():
@@ -318,6 +378,21 @@ def test_ablation_marks_failed_grid_cell_unavailable():
     assert bool(result["highlight_default"])
 
 
+def test_objective_comparison_requires_aligned_terminal_and_cumulative_methods():
+    rows = pd.DataFrame([
+        _summary_row(condition="figure8", seed=0, method="mpc_terminal_beam"),
+        _summary_row(condition="figure8", seed=0, method="mpc_cumulative_beam"),
+    ])
+
+    result = objective_comparison_table(rows)
+
+    assert set(result["method"]) == {
+        "mpc_terminal_beam", "mpc_cumulative_beam",
+    }
+    with pytest.raises(ValueError, match="identities differ"):
+        objective_comparison_table(rows.iloc[:1])
+
+
 def test_missing_budget_point_is_not_interpolated_in_exported_plot(tmp_path):
     rows = []
     for method in HEADLINE_METHODS:
@@ -345,5 +420,103 @@ def test_cli_exposes_all_staged_commands_and_long_run_approval():
     ):
         args = parser.parse_args([stage])
         assert args.stage == stage
+    assert parser.parse_args(["run"]).stage == "run"
+    assert parser.parse_args(["status"]).stage == "status"
     assert parser.parse_args(["generalization", "--approve-long-run"]).approve_long_run
     assert BOOTSTRAP_REPLICATES == 10_000
+
+
+def test_ablation_rejects_concurrent_worker_override():
+    config = load_paper_experiment_config(DEFAULT_CONFIG)
+    with pytest.raises(ValueError, match="single worker"):
+        run_paper_stage(config, "ablation", workers=4)
+
+
+def test_complete_run_stops_at_pilot_gate_and_rejects_preapproval(
+    tmp_path, monkeypatch,
+):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path / "results",
+        paper_artifact_dir=tmp_path / "generated",
+    )
+    calls = []
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._run_provenance",
+        lambda _config: {"dirty_source_paths": []},
+    )
+    monkeypatch.setattr("pzr.rtlola.paper_pipeline._run_preflight", lambda *_: None)
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._run_or_resume_parity", lambda *_args, **_kwargs: None,
+    )
+
+    def fake_stage(_config, stage, **_kwargs):
+        calls.append(stage)
+        if stage == "pilot":
+            path = config.output_root / "pilot" / "projection.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"approval_required": true}')
+
+    monkeypatch.setattr("pzr.rtlola.paper_pipeline._run_or_skip_stage", fake_stage)
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._scientific_failure_count", lambda _config: 0,
+    )
+
+    result = run_complete_paper_evaluation(
+        config, rlola_eval=tmp_path / "rlola-eval", smoke=True,
+    )
+
+    assert result.exit_code == RUN_EXIT_APPROVAL_REQUIRED
+    assert calls == ["prepare", "train", "pilot"]
+    with pytest.raises(ValueError, match="only after a pilot"):
+        run_complete_paper_evaluation(
+            replace(config, output_root=tmp_path / "fresh"),
+            rlola_eval=tmp_path / "rlola-eval",
+            approve_long_run=True,
+            smoke=True,
+        )
+
+
+def test_approved_complete_run_records_approval_and_exact_stage_order(
+    tmp_path, monkeypatch,
+):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path / "results",
+        paper_artifact_dir=tmp_path / "generated",
+    )
+    projection = config.output_root / "pilot" / "projection.json"
+    projection.parent.mkdir(parents=True)
+    projection.write_text('{"approval_required": true}')
+    calls = []
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._run_provenance",
+        lambda _config: {"dirty_source_paths": []},
+    )
+    monkeypatch.setattr("pzr.rtlola.paper_pipeline._run_preflight", lambda *_: None)
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._run_or_resume_parity", lambda *_args, **_kwargs: None,
+    )
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._run_or_skip_stage",
+        lambda _config, stage, **_kwargs: calls.append(stage),
+    )
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._scientific_failure_count", lambda _config: 0,
+    )
+
+    result = run_complete_paper_evaluation(
+        config,
+        rlola_eval=tmp_path / "rlola-eval",
+        approve_long_run=True,
+        smoke=True,
+    )
+
+    assert result.exit_code == 0
+    assert calls == [
+        "prepare", "train", "pilot", "objective-comparison", "headline",
+        "generalization", "ablation", "timing", "report", "validate",
+    ]
+    approval = config.output_root / "pilot" / "approval.json"
+    assert approval.is_file()
+    assert json.loads(approval.read_text())["approved"] is True

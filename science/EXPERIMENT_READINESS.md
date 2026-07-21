@@ -41,8 +41,9 @@ randomized/diverse clustering reducers are excluded because they are not
 tractable or robust at robot-arm sweep length.
 
 Use `/tmp` for smoke outputs. Serious paper outputs belong under a new
-`results/terminal-loss-paper-v1` directory and must be generated through
-`pzr-paper`; ordinary benchmark diagnostics still use `pzr-benchmark`.
+`results/paper-evaluation-v1` directory and must be generated through
+`tools/run_paper_evaluation.sh`; ordinary benchmark diagnostics still use
+`pzr-benchmark`.
 
 The retired Python monitors, robotics replay/probe paths, drone/F1TENTH
 sidecars, and old paper wrappers are not valid experiment entry points.

@@ -1,11 +1,18 @@
-# Terminal-Loss Paper Evaluation
+# Paper Evaluation
 
 The authoritative experiment contract is
-`experiments/terminal_loss_paper_v1.yaml`. The `pzr-paper` CLI runs independent,
+`experiments/paper_evaluation_v1.yaml`. The `pzr-paper` CLI runs independent,
 resumable stages: `prepare`, `train`, `pilot`, `objective-comparison`,
 `headline`, `generalization`, `ablation`, `timing`, `report`, and `validate`.
 Old learning wrappers and cumulative-primary proposals are historical and do
 not define the paper result.
+
+Run or resume the complete bundle with `tools/run_paper_evaluation.sh run` and
+inspect it with `tools/run_paper_evaluation.sh status`. The complete command
+runs release tests and the 576-cell pinned notebook parity before scientific
+stages. A projection above 72 hours requires a later
+`run --approve-long-run` invocation; approval cannot be supplied before the
+pilot exists.
 
 ## Method identities
 
@@ -36,7 +43,8 @@ Held-out generalization uses seeds 100--119, four conditions, seven budgets,
 and nine policies. The running example uses the four full-length figure-8
 conditions, seven budgets, and eight headline methods (224 cells). The H/W
 ablation uses seeds 60--64, four conditions, budget 150, and the 4-by-4 grid
-`{1,2,4,8}` (320 cells).
+`{1,2,4,8}` (320 cells). It uses one experiment worker so the displayed
+event-loop throughput is contention-free.
 
 ## Failure and reporting contract
 
@@ -57,7 +65,10 @@ redundant color/marker/line encodings, and do not connect across unavailable
 points. Loss uses a log scale only when every displayed completed value is
 positive.
 
-Raw artifacts remain ignored under `results/terminal-loss-paper-v1`. The
+Raw artifacts remain ignored under `results/paper-evaluation-v1`. The
 report stage writes compact CSV sources, TeX tables, PDF/PNG figures, and a hash
 manifest to
-`paper/corl2026/Zonotopes_at_CoRL/generated/terminal_loss_v1`.
+`paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v1`.
+The compact sources include the pilot projection, terminal-versus-cumulative
+objective comparison, budget-80 extrapolation, fallback diagnostics, reducer
+composition, ablation heatmaps, and contention-free timing.

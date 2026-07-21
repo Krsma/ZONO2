@@ -1,14 +1,20 @@
-"""Staged execution for the versioned terminal-loss paper experiment."""
+"""Staged execution for the versioned paper evaluation."""
 
 from __future__ import annotations
 
 import argparse
 from concurrent.futures import ProcessPoolExecutor
+from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import asdict, dataclass, replace
+from datetime import datetime, timezone
+import json
 from multiprocessing import get_context
 import os
 from pathlib import Path
-from typing import Mapping, Sequence
+import subprocess
+import sys
+from typing import IO, Iterator, Mapping, Sequence
+import xml.etree.ElementTree as ET
 
 import numpy as np
 import pandas as pd
@@ -19,6 +25,11 @@ from pzr.learning.ranker import ReducerPolicy
 from pzr.learning.training import NamedDataset, ReducerTrainingConfig, run_reducer_training
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.benchmark import RtlolaBenchmarkConfig, run_event_trace_benchmark
+from pzr.rtlola.binding import (
+    BINDING_BUILD_PROFILE,
+    BINDING_REVISION,
+    INTERPRETER_REVISION,
+)
 from pzr.rtlola.engine import RtlolaEvent
 from pzr.rtlola.learned_policy import RtlolaReducerPolicy
 from pzr.rtlola.learning_collection import LearningCollectionConfig, run_learning_collection
@@ -32,6 +43,8 @@ from pzr.rtlola.paper_experiment import (
     HEADLINE_METHODS,
     OBJECTIVE_METHODS,
     PAPER_CELL_SCHEMA,
+    PAPER_RUN_SCHEMA,
+    PAPER_STAGE_SCHEMA,
     PILOT_METHODS,
     STAGES,
     ExecutionRegime,
@@ -46,12 +59,25 @@ from pzr.rtlola.paper_experiment import (
     validate_cell_manifest,
     validate_summary_matrix,
 )
-from pzr.rtlola.reference import load_or_compute_reference
-from pzr.rtlola.robot_arm import ROBOT_ARM_TRACE_SHA256
+from pzr.rtlola.parity import PARITY_BOUNDS, ParityConfig, run_parity
+from pzr.rtlola.reference import REFERENCE_CACHE_SCHEMA, load_or_compute_reference
+from pzr.rtlola.robot_arm import (
+    RLOLAEVAL_REVISION,
+    ROBOT_ARM_SPEC_SHA256,
+    ROBOT_ARM_TRACE_SHA256,
+)
 from pzr.rtlola.scenarios import scenario_by_name
 
 
-DEFAULT_CONFIG = Path("experiments/terminal_loss_paper_v1.yaml")
+DEFAULT_CONFIG = Path("experiments/paper_evaluation_v1.yaml")
+REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
+DEFAULT_RLOLA_EVAL = REPOSITORY_ROOT.parent / "rlola-eval"
+RUN_EXIT_COMPLETE = 0
+RUN_EXIT_FAILED_POINTS = 2
+RUN_EXIT_APPROVAL_REQUIRED = 75
+SCIENTIFIC_STAGES = (
+    "pilot", "objective-comparison", "headline", "generalization", "ablation",
+)
 LEARNED_METHODS = {
     "pairwise_ranking_policy": "model-all-budgets",
     "pairwise_ranking_policy_budget80": "model-budget80",
@@ -80,6 +106,29 @@ class EvaluationCellJob:
     model_directory: Path | None
 
 
+@dataclass(frozen=True)
+class PaperRunResult:
+    status: str
+    exit_code: int
+    failure_count: int
+    manifest: Path
+
+
+class _Tee:
+    def __init__(self, *streams: IO[str]) -> None:
+        self.streams = streams
+
+    def write(self, value: str) -> int:
+        for stream in self.streams:
+            stream.write(value)
+            stream.flush()
+        return len(value)
+
+    def flush(self) -> None:
+        for stream in self.streams:
+            stream.flush()
+
+
 def run_paper_stage(
     config: PaperExperimentConfig,
     stage: str,
@@ -105,9 +154,385 @@ def run_paper_stage(
         "validate": _run_validate,
     }
     if stage in {"pilot", "objective-comparison", "headline", "generalization", "ablation"}:
-        selected_workers = config.evaluation_workers if workers is None else workers
+        default_workers = (
+            config.ablation_workers if stage == "ablation" else config.evaluation_workers
+        )
+        selected_workers = default_workers if workers is None else workers
+        if stage == "ablation" and selected_workers != config.ablation_workers:
+            raise ValueError("paper ablation must use its configured single worker")
         return dispatch[stage](config, workers=selected_workers)  # type: ignore[call-arg]
     return dispatch[stage](config)  # type: ignore[call-arg]
+
+
+def run_complete_paper_evaluation(
+    config: PaperExperimentConfig,
+    *,
+    rlola_eval: Path,
+    approve_long_run: bool = False,
+    smoke: bool = False,
+) -> PaperRunResult:
+    """Run or resume every prerequisite and primary paper-evaluation stage."""
+    projection_path = config.output_root / "pilot" / "projection.json"
+    pilot_existed_at_start = projection_path.is_file()
+    if approve_long_run and not pilot_existed_at_start:
+        raise ValueError(
+            "long-run approval is accepted only after a pilot projection exists"
+        )
+    config.output_root.mkdir(parents=True, exist_ok=True)
+    provenance = _run_provenance(config)
+    if provenance["dirty_source_paths"] and not smoke:
+        raise ValueError(
+            "paper evaluation requires clean scientific sources; dirty paths: "
+            f"{provenance['dirty_source_paths']}"
+        )
+    _write_run_manifest(
+        config, status="running", failure_count=0,
+        extra={"provenance": provenance, "approval_recorded": False},
+    )
+
+    _run_preflight(config, provenance)
+    _run_or_resume_parity(config, rlola_eval=rlola_eval, smoke=smoke)
+    for stage in ("prepare", "train", "pilot"):
+        _run_or_skip_stage(config, stage)
+
+    projection = load_json(projection_path)
+    approval_required = bool(projection.get("approval_required"))
+    approval_path = config.output_root / "pilot" / "approval.json"
+    if approval_required and not approve_long_run:
+        manifest = _write_run_manifest(
+            config,
+            status="approval_required",
+            failure_count=_scientific_failure_count(config),
+            extra={
+                "provenance": provenance,
+                "projection": projection,
+                "approval_recorded": False,
+            },
+        )
+        return PaperRunResult(
+            "approval_required", RUN_EXIT_APPROVAL_REQUIRED,
+            _scientific_failure_count(config), manifest,
+        )
+    if approval_required:
+        write_json_atomic({
+            "schema": "pzr.paper-evaluation-approval.v1",
+            "approved": True,
+            "config_sha256": config.config_sha256,
+            "pzr_source_sha256": pzr_source_sha256(),
+            "projection_sha256": sha256_files((projection_path,)),
+            "recorded_at": _utc_now(),
+        }, approval_path)
+
+    for stage in (
+        "objective-comparison", "headline", "generalization", "ablation",
+        "timing", "report", "validate",
+    ):
+        _run_or_skip_stage(
+            config,
+            stage,
+            approve_long_run=approval_required,
+        )
+    failure_count = _scientific_failure_count(config)
+    status = "completed" if failure_count == 0 else "completed_with_failures"
+    manifest = _write_run_manifest(
+        config,
+        status=status,
+        failure_count=failure_count,
+        extra={
+            "provenance": provenance,
+            "projection": projection,
+            "approval_recorded": approval_path.is_file(),
+            "artifact_directory": str(config.paper_artifact_dir),
+        },
+    )
+    return PaperRunResult(
+        status,
+        RUN_EXIT_COMPLETE if failure_count == 0 else RUN_EXIT_FAILED_POINTS,
+        failure_count,
+        manifest,
+    )
+
+
+def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
+    """Return a non-mutating summary of the current paper-evaluation output."""
+    stages: dict[str, object] = {}
+    for stage in STAGES:
+        manifest_path = config.output_root / stage / "manifest.json"
+        if not manifest_path.is_file():
+            stages[stage] = {"status": "missing"}
+            continue
+        try:
+            _validate_completed_stage(config, stage)
+            manifest = load_json(manifest_path)
+            stages[stage] = {
+                "status": str(manifest.get("status", "unknown")),
+                "cell_count": manifest.get("cell_count"),
+                "failure_count": manifest.get("failure_count"),
+            }
+        except (OSError, ValueError) as exc:
+            stages[stage] = {"status": "stale_or_invalid", "message": str(exc)}
+    projection_path = config.output_root / "pilot" / "projection.json"
+    run_manifest = config.output_root / "run" / "manifest.json"
+    return {
+        "schema": "pzr.paper-evaluation-status.v1",
+        "experiment_id": config.experiment_id,
+        "output_root": str(config.output_root),
+        "paper_artifact_dir": str(config.paper_artifact_dir),
+        "run": load_json(run_manifest) if run_manifest.is_file() else {"status": "missing"},
+        "projection": (
+            load_json(projection_path) if projection_path.is_file() else None
+        ),
+        "approval_recorded": (
+            config.output_root / "pilot" / "approval.json"
+        ).is_file(),
+        "stages": stages,
+    }
+
+
+def _run_or_skip_stage(
+    config: PaperExperimentConfig,
+    stage: str,
+    *,
+    approve_long_run: bool = False,
+) -> None:
+    manifest = config.output_root / stage / "manifest.json"
+    if manifest.is_file():
+        _validate_completed_stage(config, stage)
+        print(f"skip validated stage: {stage}", flush=True)
+        return
+    with _stage_log(config, stage):
+        run_paper_stage(
+            config,
+            stage,
+            approve_long_run=approve_long_run,
+        )
+    _validate_completed_stage(config, stage)
+
+
+def _validate_completed_stage(config: PaperExperimentConfig, stage: str) -> None:
+    manifest_path = config.output_root / stage / "manifest.json"
+    manifest = load_json(manifest_path)
+    if manifest.get("schema") != PAPER_STAGE_SCHEMA:
+        raise ValueError(f"unsupported {stage} stage manifest schema")
+    if manifest.get("config_sha256") != config.config_sha256:
+        raise ValueError(f"stale {stage} config manifest")
+    if manifest.get("pzr_source_sha256") != pzr_source_sha256():
+        raise ValueError(f"stale {stage} source manifest")
+    _validate_runtime_provenance(manifest, stage)
+    if stage == "prepare":
+        dataset = config.output_root / "prepare" / "teacher" / "dataset" / "manifest.json"
+        if not dataset.is_file():
+            raise ValueError("prepare teacher dataset is missing")
+    elif stage == "train":
+        models = manifest.get("models")
+        if not isinstance(models, dict):
+            raise ValueError("train manifest lacks models")
+        for payload in models.values():
+            if not isinstance(payload, dict):
+                raise ValueError("train manifest model entry is invalid")
+            path = Path(str(payload["path"]))
+            if model_sha256(path) != payload.get("sha256"):
+                raise ValueError(f"trained model hash differs: {path}")
+    elif stage in SCIENTIFIC_STAGES:
+        _validate_scientific_stage(config, stage)
+    elif stage == "timing":
+        summary = config.output_root / "timing" / "summary.csv"
+        if not summary.is_file() or pd.read_csv(summary).empty:
+            raise ValueError("timing summary is missing or empty")
+    elif stage == "report":
+        if not (config.paper_artifact_dir / "artifact_hashes.json").is_file():
+            raise ValueError("paper artifact hashes are missing")
+    elif stage == "validate":
+        if manifest.get("status") not in {"completed", "completed_with_failures"}:
+            raise ValueError("validation stage did not complete")
+
+
+def _validate_scientific_stage(config: PaperExperimentConfig, stage: str) -> None:
+    directory = config.output_root / stage
+    summary = pd.read_csv(directory / "summary.csv")
+    validate_summary_matrix(config, stage, summary)
+    cell_manifests = tuple((directory / "cells").rglob("manifest.json"))
+    if len(cell_manifests) != config.expected_cells(stage):
+        raise ValueError(f"{stage} cell manifest count differs")
+
+
+def _run_preflight(
+    config: PaperExperimentConfig,
+    provenance: Mapping[str, object],
+) -> None:
+    from pzr.rtlola.binding import require_binding
+
+    require_binding()
+    __import__("mujoco")
+    stage_dir = config.output_root / "preflight"
+    manifest_path = stage_dir / "manifest.json"
+    if manifest_path.is_file():
+        manifest = load_json(manifest_path)
+        if (
+            manifest.get("config_sha256") != config.config_sha256
+            or manifest.get("pzr_source_sha256") != pzr_source_sha256()
+        ):
+            raise ValueError("stale preflight manifest")
+        _validate_runtime_provenance(manifest, "preflight")
+        if manifest.get("status") != "completed" or manifest.get("skipped") != 0:
+            raise ValueError("preflight manifest is incomplete")
+        print("skip validated stage: preflight", flush=True)
+        return
+    stage_dir.mkdir(parents=True, exist_ok=True)
+    junit = stage_dir / "pytest.xml"
+    log = stage_dir / "pytest.log"
+    command = [sys.executable, "-m", "pytest", "-q", f"--junitxml={junit}"]
+    completed = subprocess.run(
+        command,
+        cwd=REPOSITORY_ROOT,
+        text=True,
+        stdout=subprocess.PIPE,
+        stderr=subprocess.STDOUT,
+        check=False,
+    )
+    log.write_text(completed.stdout)
+    print(completed.stdout, end="", flush=True)
+    if completed.returncode != 0:
+        raise RuntimeError(f"release validation failed; see {log}")
+    counts = _junit_counts(junit)
+    if counts["failures"] or counts["errors"] or counts["skipped"]:
+        raise RuntimeError(f"release validation was not pass-only: {counts}")
+    write_json_atomic({
+        "schema": "pzr.paper-evaluation-preflight.v1",
+        "status": "completed",
+        "config_sha256": config.config_sha256,
+        "pzr_source_sha256": pzr_source_sha256(),
+        **_runtime_provenance(),
+        "tests": counts["tests"],
+        "failures": counts["failures"],
+        "errors": counts["errors"],
+        "skipped": counts["skipped"],
+        "command": command,
+        "provenance": dict(provenance),
+    }, manifest_path)
+
+
+def _run_or_resume_parity(
+    config: PaperExperimentConfig,
+    *,
+    rlola_eval: Path,
+    smoke: bool,
+) -> None:
+    output = config.output_root / "parity"
+    with _stage_log(config, "parity"):
+        run_parity(ParityConfig(
+            rlola_eval=rlola_eval,
+            output=output,
+            trace_kinds=("figure8",) if smoke else tuple(ROBOT_ARM_TRACE_SHA256),
+            bounds=(PARITY_BOUNDS[0],) if smoke else PARITY_BOUNDS,
+            run_speed_gate=not smoke,
+            event_limit=config.event_count if smoke else None,
+        ))
+
+
+def _scientific_failure_count(config: PaperExperimentConfig) -> int:
+    count = 0
+    for stage in SCIENTIFIC_STAGES:
+        summary = config.output_root / stage / "summary.csv"
+        if summary.is_file():
+            frame = pd.read_csv(summary)
+            count += int((frame["status"] != RunState.COMPLETED.value).sum())
+    timing_manifest = config.output_root / "timing" / "manifest.json"
+    if timing_manifest.is_file():
+        count += int(load_json(timing_manifest).get("failure_count", 0))
+    return count
+
+
+def _run_provenance(config: PaperExperimentConfig) -> dict[str, object]:
+    revision = subprocess.run(
+        ["git", "rev-parse", "HEAD"], cwd=REPOSITORY_ROOT,
+        text=True, capture_output=True, check=True,
+    ).stdout.strip()
+    dirty = subprocess.run(
+        [
+            "git", "status", "--porcelain", "--untracked-files=all", "--",
+            "src/pzr", "experiments", "rlolapythonbinding", "pyproject.toml",
+            "tools/run_paper_evaluation.sh",
+        ],
+        cwd=REPOSITORY_ROOT, text=True, capture_output=True, check=True,
+    ).stdout.splitlines()
+    return {
+        "git_revision": revision,
+        "dirty_source_paths": dirty,
+        "config_sha256": config.config_sha256,
+        "pzr_source_sha256": pzr_source_sha256(),
+        **_runtime_provenance(),
+    }
+
+
+def _runtime_provenance() -> dict[str, str]:
+    return {
+        "spec_sha256": ROBOT_ARM_SPEC_SHA256,
+        "rlolaeval_revision": RLOLAEVAL_REVISION,
+        "binding_revision": BINDING_REVISION,
+        "interpreter_revision": INTERPRETER_REVISION,
+        "binding_build_profile": BINDING_BUILD_PROFILE,
+        "reference_cache_schema": REFERENCE_CACHE_SCHEMA,
+    }
+
+
+def _validate_runtime_provenance(
+    manifest: Mapping[str, object],
+    label: str,
+) -> None:
+    for key, expected in _runtime_provenance().items():
+        if manifest.get(key) != expected:
+            raise ValueError(f"stale {label} {key}")
+
+
+def _write_run_manifest(
+    config: PaperExperimentConfig,
+    *,
+    status: str,
+    failure_count: int,
+    extra: Mapping[str, object],
+) -> Path:
+    path = config.output_root / "run" / "manifest.json"
+    write_json_atomic({
+        "schema": PAPER_RUN_SCHEMA,
+        "experiment_id": config.experiment_id,
+        "status": status,
+        "updated_at": _utc_now(),
+        "config_sha256": config.config_sha256,
+        "pzr_source_sha256": pzr_source_sha256(),
+        "failure_count": failure_count,
+        "expected_scientific_cell_count": sum(
+            config.expected_cells(stage) for stage in SCIENTIFIC_STAGES
+        ),
+        **dict(extra),
+    }, path)
+    return path
+
+
+@contextmanager
+def _stage_log(config: PaperExperimentConfig, stage: str) -> Iterator[None]:
+    log_path = config.output_root / "logs" / f"{stage}.log"
+    log_path.parent.mkdir(parents=True, exist_ok=True)
+    with log_path.open("a", encoding="utf-8") as stream:
+        tee_out = _Tee(sys.stdout, stream)
+        tee_err = _Tee(sys.stderr, stream)
+        with redirect_stdout(tee_out), redirect_stderr(tee_err):
+            print(f"start stage: {stage}", flush=True)
+            yield
+            print(f"complete stage: {stage}", flush=True)
+
+
+def _junit_counts(path: Path) -> dict[str, int]:
+    root = ET.parse(path).getroot()
+    suites = [root] if root.tag == "testsuite" else list(root.findall("testsuite"))
+    return {
+        name: sum(int(suite.attrib.get(name, 0)) for suite in suites)
+        for name in ("tests", "failures", "errors", "skipped")
+    }
+
+
+def _utc_now() -> str:
+    return datetime.now(timezone.utc).isoformat()
 
 
 def _run_prepare(config: PaperExperimentConfig) -> Path:
@@ -848,23 +1273,28 @@ def _timed_call(
 
 
 def _run_report(config: PaperExperimentConfig) -> Path:
-    from pzr.rtlola.paper_artifacts import write_terminal_loss_reports
+    from pzr.rtlola.paper_artifacts import write_paper_evaluation_reports
 
     inputs = {
         stage: config.output_root / stage
-        for stage in ("headline", "generalization", "ablation", "timing")
+        for stage in (
+            "pilot", "objective-comparison", "headline", "generalization",
+            "ablation", "timing",
+        )
     }
     for stage, path in inputs.items():
         if not (path / "manifest.json").is_file():
             raise ValueError(f"report input stage is missing: {stage}")
     generalization_timeseries = pd.read_csv(inputs["generalization"] / "timeseries.csv")
-    output = write_terminal_loss_reports(
+    output = write_paper_evaluation_reports(
         config,
         headline_summary=pd.read_csv(inputs["headline"] / "summary.csv"),
         generalization_summary=pd.read_csv(inputs["generalization"] / "summary.csv"),
+        objective_summary=pd.read_csv(inputs["objective-comparison"] / "summary.csv"),
         ablation_summary=pd.read_csv(inputs["ablation"] / "summary.csv"),
         timing_summary=pd.read_csv(inputs["timing"] / "summary.csv"),
         composition_timeseries=generalization_timeseries,
+        pilot_projection=load_json(inputs["pilot"] / "projection.json"),
     )
     write_json_atomic(stage_manifest(
         config, stage="report", status="completed",
@@ -876,7 +1306,7 @@ def _run_report(config: PaperExperimentConfig) -> Path:
 def _run_validate(config: PaperExperimentConfig) -> Path:
     validations = {}
     evaluation_stages = ["pilot", "headline", "generalization", "ablation"]
-    if config.enforce_canonical_scope:
+    if (config.output_root / "objective-comparison" / "manifest.json").is_file():
         evaluation_stages.append("objective-comparison")
     current_source_hash = pzr_source_sha256()
     for stage in evaluation_stages:
@@ -886,6 +1316,7 @@ def _run_validate(config: PaperExperimentConfig) -> Path:
             raise ValueError(f"stale {stage} stage manifest")
         if manifest.get("pzr_source_sha256") != current_source_hash:
             raise ValueError(f"stale {stage} source manifest")
+        _validate_runtime_provenance(manifest, stage)
         summary = pd.read_csv(directory / "summary.csv")
         validate_summary_matrix(config, stage, summary)
         cell_manifests = tuple((directory / "cells").rglob("manifest.json"))
@@ -907,15 +1338,30 @@ def _run_validate(config: PaperExperimentConfig) -> Path:
             "cell_count": len(summary),
             "failure_count": int((summary["status"] != RunState.COMPLETED.value).sum()),
         }
+    timing_manifest = load_json(config.output_root / "timing" / "manifest.json")
+    _validate_runtime_provenance(timing_manifest, "timing")
+    timing_summary = pd.read_csv(config.output_root / "timing" / "summary.csv")
+    if timing_summary.empty:
+        raise ValueError("timing summary is empty")
+    validations["timing"] = {
+        "cell_count": int(timing_manifest.get("cell_count", 0)),
+        "failure_count": int(timing_manifest.get("failure_count", 0)),
+    }
     artifact_manifest = config.paper_artifact_dir / "artifact_hashes.json"
     if not artifact_manifest.is_file():
         raise ValueError("generated paper artifact hash manifest is missing")
     destination = config.output_root / "validate"
+    failure_count = sum(
+        int(stage["failure_count"]) for stage in validations.values()
+    )
     write_json_atomic(stage_manifest(
-        config,
-        stage="validate",
-        status="completed",
-        extra={"validated_stages": validations, "artifact_hash_manifest": str(artifact_manifest)},
+        config, stage="validate",
+        status="completed" if failure_count == 0 else "completed_with_failures",
+        failure_count=failure_count,
+        extra={
+            "validated_stages": validations,
+            "artifact_hash_manifest": str(artifact_manifest),
+        },
     ), destination / "manifest.json")
     return destination
 
@@ -931,13 +1377,14 @@ def _safe(value: str) -> str:
 
 def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
-        description="Run the versioned terminal-loss paper experiment",
+        description="Run the versioned paper evaluation",
     )
-    parser.add_argument("stage", choices=STAGES)
+    parser.add_argument("stage", choices=(*STAGES, "run", "status"))
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--paper-artifacts", type=Path)
     parser.add_argument("--workers", type=int)
+    parser.add_argument("--rlola-eval", type=Path, default=DEFAULT_RLOLA_EVAL)
     parser.add_argument(
         "--smoke", action="store_true",
         help="run the same stage contract with one short trace per scope",
@@ -953,7 +1400,7 @@ def main(argv: list[str] | None = None) -> None:
     args = build_parser().parse_args(argv)
     config = load_paper_experiment_config(args.config)
     if args.smoke:
-        smoke_root = args.output or Path("/tmp/pzr-terminal-loss-paper-smoke")
+        smoke_root = args.output or Path("/tmp/pzr-paper-evaluation-smoke")
         config = replace(
             config,
             output_root=smoke_root,
@@ -985,13 +1432,41 @@ def main(argv: list[str] | None = None) -> None:
         config = replace(config, output_root=args.output)
     if args.paper_artifacts is not None:
         config = replace(config, paper_artifact_dir=args.paper_artifacts)
+    if args.stage == "status":
+        print(json.dumps(paper_evaluation_status(config), indent=2, sort_keys=True))
+        return
+    if args.stage == "run":
+        try:
+            result = run_complete_paper_evaluation(
+                config,
+                rlola_eval=args.rlola_eval.resolve(),
+                approve_long_run=args.approve_long_run,
+                smoke=args.smoke,
+            )
+        except Exception as exc:
+            if config.output_root.is_dir():
+                _write_run_manifest(
+                    config,
+                    status="failed",
+                    failure_count=_scientific_failure_count(config),
+                    extra={
+                        "failure_type": type(exc).__name__,
+                        "failure_message": str(exc),
+                    },
+                )
+            raise
+        print(
+            f"Paper evaluation {result.status}: failures={result.failure_count}, "
+            f"manifest={result.manifest}",
+        )
+        raise SystemExit(result.exit_code)
     output = run_paper_stage(
         config,
         args.stage,
         workers=args.workers,
         approve_long_run=args.approve_long_run,
     )
-    print(f"Terminal-loss paper stage complete: {args.stage} -> {output}")
+    print(f"Paper-evaluation stage complete: {args.stage} -> {output}")
 
 
 if __name__ == "__main__":

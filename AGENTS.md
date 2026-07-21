@@ -37,8 +37,7 @@ pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
 tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
   --output /tmp/pzr-arm
 
-PZR_OUT_DIR=results/rtlola-arm-mpc-variants-01c92a2-2257d07-exact-metrics \
-  tools/run_rtlola_robot_arm_fpr_overnight.sh
+tools/run_paper_evaluation.sh run --smoke
 
 pzr-learning generate --output /tmp/pzr-learning/traces --event-count 10 \
   --conditions random_waypoint --seed-count 3
@@ -74,9 +73,8 @@ the binding-native transforms, counters, and approximation loss. PZR reports
 the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
-The last recorded full release-binding validation after the Pairwise Ranking Policy
-cleanup and bounded-exploration integration was 129 passing tests with no skips on
-2026-07-19.
+Release validation must record the current pass count and zero skips in the
+paper-evaluation preflight manifest; do not rely on a historical test count.
 
 The authoritative trace kinds and full lengths are:
 
@@ -92,39 +90,27 @@ conditions. Drift adds progressive tool-center drift; geofence conditions add
 progressive path rotation against waypoint-derived walls. Do not pool them
 without preserving `trace_kind`.
 
-The emitted MPC methods are:
+The paper-facing MPC methods are:
 
 - `mpc_terminal_beam`: multi-action beam search, terminal loss only;
+- `mpc_terminal_beam_predictive_linear`: causal linear prediction with the
+  terminal objective;
 - `mpc_cumulative_beam`: global beam search with undiscounted cumulative
-  explicit-horizon loss and no tail;
-- `mpc_terminal_girard_tail`: beam search scored at the end of a fixed Girard
-  tail;
-- `mpc_cumulative_girard_tail`: cumulative explicit-horizon and Girard-tail
-  loss;
-- `mpc_one_step_girard_rollout`: optimize the current reducer, then score a
-  Girard rollout.
+  explicit-horizon loss, used only for objective comparison;
+- `mpc_terminal_full_width`: exhaustive two-event terminal-loss teacher.
 
-The overnight defaults are horizon 4, beam width 4, Girard tail horizon 8,
-and one retained continuation per first-action root for stratified variants.
-The wrapper first prepares one exact reference cache per trace, then runs each
-trace/budget/method as a separately validated, source-aware resumable stage.
-Combined tables are built only after all stages finish.
+The canonical wrapper is `tools/run_paper_evaluation.sh`. It performs release
+tests, parity, training, pilot gating, all scientific matrices, reporting, and
+validation. It prepares one exact reference per trace and uses source-aware
+resumable cells. The H/W ablation uses one experiment worker so its throughput
+heatmap is contention-free; headline and generalization use four workers.
 
 ## Current Robot-Arm Results
 
-The previous robot-arm artifacts used the obsolete verdict-only reference and
-long metric-column schema and were removed on 2026-07-05. There is currently
-no active full-suite artifact. Do not quote the earlier partial sweep as a
-completed twelve-trace evaluation.
-
-The focused Girard-versus-MPC run started on 2026-07-06 was deliberately
-terminated before completing the square traces. Its partial artifact is not a
-completed evaluation. The next run must use a fresh output directory. Exact
-reference stages cache trigger verdicts and logical-row center/radius data once per
-trace. Method summaries report `fpr`, `fnr`, mean/final/max/summed native
-approximation loss, and mean/max `state_width`; `primary_metrics.csv` contains
-the compact completion table. `mpc_vs_static_metrics.csv` selects the best
-static method independently for each metric.
+There is currently no active canonical paper artifact. New results belong under
+`results/paper-evaluation-v1` and must validate through the versioned pipeline.
+Earlier robot-arm, four-budget learning, MPC-tail, and bounded-exploration
+outputs are historical and must not be quoted as the current evaluation.
 
 ## Coding and Testing
 
@@ -166,7 +152,7 @@ generator mass. It is strictly pre-event and does not use stream values,
 history, spectral statistics, or an inference-time preview rollout.
 
 Pairwise Ranking Policy is the primary paper-facing learned method. The
-versioned experiment in `experiments/terminal_loss_paper_v1.yaml` pre-generates
+versioned experiment in `experiments/paper_evaluation_v1.yaml` pre-generates
 26 independent 500-event nominal random-waypoint traces and collects one
 terminal full-width teacher dataset at budgets `40,80,120,150,200,250,500`.
 Clean teacher train/validation seeds are 0--19/20--25. The primary model uses
@@ -175,7 +161,7 @@ filtering that dataset to recorded budget-80 samples and is only an
 extrapolation diagnostic.
 
 The Phase 1 cleanup reset all prior learning result directories. There is no
-active primary, secondary, exploratory, or terminal-loss paper result artifact.
+active primary, secondary, exploratory, or paper-evaluation result artifact.
 New claims require the versioned 224-cell figure-8 headline and 5,040-cell
 held-out manifests, with every failed point explicitly unavailable.
 
@@ -189,36 +175,24 @@ targets the global per-budget novice-error rate, restricts alternatives to the
 Q90 normalized-regret radius, and forces one teacher recovery decision after
 every disturbance.
 
-The bounded exploration generates extra seeds 26--41 and collects those same 16
-traces as clean teacher and guarded-DART train-only datasets. It screens
-`pairwise_ranking_policy_clean20`, `pairwise_ranking_policy_clean36`, `pairwise_ranking_policy_dart36`, and
-`expected_regret_clean20` with Girard over all twelve fixed traces: 240 cells.
-Explicit comparisons are `data_scale`, `dart_effect`, and `objective`. At most
-one passing challenger receives a 144-cell full
-evaluation with its matched reference and Girard. Do not claim exploratory
-results until the screen, selection, and any required promotion manifests
-validate.
+The former Clean20/Clean36/DART36/expected-regret promotion workflow is not a
+current experiment entry point. Seeds 26--41 remain reserved so a future,
+explicitly versioned learning study cannot contaminate the paper splits.
 
 The four figure-8 headline traces always retain their full authoritative lengths.
 Held-out generalization uses seeds 100--119 under all four random-waypoint
 conditions at 500 events. Pilot seeds are 90--91, ablation seeds are 60--64,
 and reserved exploration/model-selection seeds remain 26--41.
-Teacher shards use ten spawned workers. Post-reference evaluation cells use
-four spawned workers with `max_tasks_per_child=1`; each worker owns its monitor
-and planner. BLAS, OpenMP, MKL, and NumExpr remain limited to one thread per worker.
+Teacher shards use ten spawned workers. Headline, pilot, objective comparison,
+and generalization use four spawned workers with `max_tasks_per_child=1`; each
+worker owns its monitor and planner. Ablation and timing are sequential. BLAS,
+OpenMP, MKL, and NumExpr remain limited to one thread per worker.
 
 The primary objective is tolerance-aware state-balanced pairwise ranking. Feasible
 cost gaps within `max(1e-15, 1e-9 * max(abs(cost_i), abs(cost_j)))` are ties;
 meaningful pair weights are divided by the largest meaningful gap in the state,
 and every feasible candidate ranks above every infeasible candidate. Scores are
 lower-is-better and uncalibrated.
-
-The `expected-regret-v1` challenger uses feasible normalized regret targets in
-`[0,1]`, an infeasible target of `2.0`, candidate-mean MSE within each state, and
-an equal mean over states with a feasible action. It uses no hyperparameter
-grid, selects checkpoints by clean-validation regression loss, and does not
-clamp predictions. Preserve stable ranking, native feasibility retries, and
-interval fallback accounting.
 
 `budget` is the binding transform bound. Never subtract a fresh-generator
 reserve or interpret post-event dense slots as a violation. Preserve the

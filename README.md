@@ -69,30 +69,46 @@ pzr-learning train --dataset clean=/tmp/pzr-learning/clean/dataset \
   --output /tmp/pzr-learning/model-pairwise-ranking-policy --objective pairwise --epochs 2
 ```
 
-The paper-facing terminal-loss evaluation is defined by
-`experiments/terminal_loss_paper_v1.yaml` and the staged `pzr-paper` command:
+The paper evaluation is defined by `experiments/paper_evaluation_v1.yaml`.
+Run or resume the complete release-checked bundle with:
 
 ```bash
-pzr-paper prepare
-pzr-paper train
-pzr-paper pilot
-pzr-paper headline
-pzr-paper generalization
-pzr-paper ablation
-pzr-paper timing
-pzr-paper report
-pzr-paper validate
+tools/run_paper_evaluation.sh run
 ```
 
-The pilot covers 216 cells and projects the unchanged 5,040-cell held-out
-generalization sweep. If the projection exceeds 72 hours with four one-thread
-workers, `generalization` stops until it is explicitly resumed with
-`--approve-long-run`. The four full figure-8 conditions contribute 224
-headline cells. `objective-comparison` is separate and requires a completed
-notebook-parity manifest; cumulative MPC is never promoted to the primary
-method. Raw cells remain under `results/terminal-loss-paper-v1`; compact source
-tables, TeX tables, PDF/PNG figures, and their hashes are written under
-`paper/corl2026/Zonotopes_at_CoRL/generated/terminal_loss_v1`.
+The command runs the full release-binding test suite, all 576 pinned RLolaEval
+parity cells, teacher preparation, both policy trainings, pilot, objective
+comparison, headline, held-out generalization, H/W ablation, sequential timing,
+reporting, and integrity validation. Inspect a running or interrupted evaluation
+with `tools/run_paper_evaluation.sh status`. Individual `pzr-paper` stages remain
+available for focused diagnostics.
+
+The 216-cell pilot projects the unchanged 5,040-cell held-out sweep. If it
+exceeds 72 four-worker hours, the run exits after recording the projection.
+After reviewing it, resume with:
+
+```bash
+tools/run_paper_evaluation.sh run --approve-long-run
+```
+
+Supplying approval before the pilot exists is rejected. Valid completed stages
+are skipped, partial cell matrices resume, and stale manifests require a fresh
+output directory. Raw cells and stage logs remain under
+`results/paper-evaluation-v1`; compact source tables, TeX tables, PDF/PNG
+figures, and their hashes are written under
+`paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v1`.
+
+For an unattended run, start the checked-in command in a detached session:
+
+```bash
+tmux new-session -d -s paper-evaluation \
+  'cd /home/vlkr/Faks/phd/ZONO2 && tools/run_paper_evaluation.sh run'
+```
+
+Exit status `0` means every required point completed, `2` means the artifact
+bundle validated with explicitly unavailable scientific or timing points, `75`
+means pilot approval is required, and `1` indicates an execution or integrity
+failure.
 
 `pairwise_ranking_policy` is trained from one seven-budget terminal full-width
 teacher dataset. `pairwise_ranking_policy_budget80` uses the same dataset with
@@ -101,65 +117,10 @@ study. Offline terminal beam uses recorded future inputs, while the linear
 predictive beam is causal and deployable. Exact caches are used only for
 offline metrics; selection and teaching retain native unreduced rollouts.
 
-The older four-budget Pairwise Ranking Policy wrapper remains available as a
-historical pipeline:
-
-```bash
-PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \
-  PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
-  tools/run_rtlola_learning_primary.sh
-```
-
-The primary run generates 26 independent 500-event random-waypoint traces. It
-uses seeds 0--19 for teacher training and 20--25 for clean validation, trains
-only `pairwise_ranking_policy`, and compares it with Girard, Scott, PCA,
-Combastel, and the two-event full-width MPC teacher. The completion criterion is
-exactly 288 validated cells: twelve full traces by four budgets by six methods.
-No revised primary result exists until the fresh manifest records all 288 cells
-without failures.
-
-The Phase 1 schema reset removed all prior learning result directories. No
-active primary, secondary, or exploratory learning result artifact exists;
-new Pairwise Ranking Policy claims require a fresh canonical 288-cell manifest.
-
 Soft-KL and guarded one-round DART remain available as completed secondary
 ablations. Their historical result artifact is no longer active. The observed
 DART improvement was marginal and is confounded by additional training data,
 so neither method appears in the default pipeline.
-
-Run the separate bounded exploration with:
-
-```bash
-PZR_PRIMARY_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \
-  PZR_OUT_DIR=results/rtlola-learning-bounded-exploration-v1-01c92a2-2724b05-2257d07 \
-  tools/run_rtlola_learning_exploration.sh
-```
-
-This workflow trains the data-matched Clean36 and DART36 controls plus an
-expected-regret Clean20 challenger. It screens four learned models and Girard
-over 240 full-length cells. At most one challenger can proceed to a 144-cell full
-evaluation; if none meets every safety, loss, cell-regression, and clean-
-validation gate, the workflow records that method expansion should stop.
-
-Use the same staged pipeline at smoke scale with:
-
-```bash
-PZR_OUT_DIR=/tmp/pzr-learning-pairwise-ranking-policy-smoke \
-PZR_EVENT_COUNT=20 PZR_EVAL_LENGTH=2 \
-PZR_CLEAN_TRAIN_SEEDS=2 PZR_CLEAN_VALIDATION_SEEDS=1 \
-PZR_EPOCHS=2 PZR_PATIENCE=2 \
-PZR_COLLECTION_WORKERS=2 PZR_EVALUATION_WORKERS=2 \
-tools/run_rtlola_learning_primary.sh
-```
-
-The separate online-MPC add-on reuses the frozen primary model and evaluates
-Girard and PRP anchors, horizon-3 oracle beam and full-width MPC, and causal
-hold/linear/quadratic beam MPC. Linear prediction is the predeclared headline
-online method. Run or resume primary, add-on, and joined CSV reporting with:
-
-```bash
-tools/run_rtlola_learning_paper.sh
-```
 
 Predictive MPC sees the exact arrived current event and causal input history;
 PRP remains strictly pre-event. Forecasts use scheduled times at 0.1-second
@@ -169,68 +130,6 @@ See `science/LEARNING_PIPELINE.md` for the feature contract, pairwise and
 expected-regret objectives, secondary DART calibration, seed schedules,
 promotion gate, exact evaluation, and artifact schemas.
 Learning runs are intentionally separate from `pzr-benchmark`.
-
-Prepare or resume the full FPR-first robot-arm sweep:
-
-```bash
-PZR_OUT_DIR=results/rtlola-arm-mpc-variants-01c92a2-2257d07-exact-metrics \
-  tools/run_rtlola_robot_arm_fpr_overnight.sh
-```
-
-The overnight wrapper evaluates all twelve packaged RLolaEval traces at their full
-authoritative lengths and at budgets `40,80,120,180`, with Girard, Scott,
-PCA, Combastel, legacy beam MPC, root-tail MPC, endpoint-tail
-MPC, and integrated-tail MPC. Tail variants default to an eight-event Girard
-tail and one beam continuation per first-action root. MPC and learning choose
-among Girard, Scott, PCA, and Combastel. Set
-`PZR_LENGTH` only when an intentional common truncation is required. Every
-trace/budget/method has its own command- and source-aware completion marker and
-log, so interrupted runs resume without repeating other methods. Successful
-stages are validated for complete rows; native method failures are accepted
-only when recorded explicitly. Before those cells, one resumable reference
-stage per trace caches exact trigger verdicts and compact state-loss data.
-Learned selection is deferred and skipped by default; set
-`PZR_SKIP_LEARNING=0` to run the pooled ranker explicitly.
-
-The emitted MPC method identifiers are:
-
-- `mpc_terminal_beam`: multi-action beam search with terminal loss only;
-- `mpc_terminal_girard_tail`: beam search scored after a fixed Girard tail;
-- `mpc_cumulative_girard_tail`: cumulative explicit and Girard-tail loss;
-- `mpc_one_step_girard_rollout`: one optimized reducer followed by Girard rollout.
-
-Prepare or resume the short exact-reference MPC objective study:
-
-```bash
-PZR_OUT_DIR=results/rtlola-arm-mpc-variants \
-  tools/run_rtlola_mpc_variant_study.sh
-```
-
-This compares the legacy terminal-loss beam with extended-endpoint,
-integrated Girard-tail, and root-only Girard-tail variants. The default tail
-scan is `0,4,8,16`; `PZR_TAIL_HORIZONS`, `PZR_ROOT_BEAM_WIDTH`, and the usual
-trace, budget, and length variables can override it.
-
-Run the 10-seed state-fidelity Omni pilot:
-
-```bash
-PZR_OUT_DIR=results/rtlola-omni-a143dd6-release \
-  tools/run_rtlola_omni_fidelity_overnight.sh
-```
-
-The Omni wrapper evaluates budgets `8,12,16,20`, all four trace kinds, the five
-static bounded comparators used by the primary experiments (including
-Combastel), the binding-native terminal objective, a horizon scan, and a
-held-out learned policy. Completion markers make the run resumable.
-
-Method sets are:
-
-- `core`: exact no-reduction baseline, Girard, Scott, PCA, Combastel, and
-  binding-loss beam MPC.
-- `static`: exact baseline plus the default bounded comparator set; excluded
-  transforms remain available through explicit `--methods` overrides.
-- `mpc`: the legacy beam and all three experimental tail variants.
-- `all`: `static` plus all MPC variants.
 
 The binding also exposes interval hull, Althoff A, colinear scale, and three
 clustering reducers. They remain opt-in through `--methods`; current robot-arm
@@ -252,12 +151,10 @@ transform bound. `interval` is an emergency fallback.
   reported as `post_event_over_bound`.
 - Dense dynamic slots, active nonzero dynamic generators, zero dynamic slots,
   and total generators including constant slack are reported separately.
-- Legacy MPC and teacher costs use binding-native terminal
-  `approx_loss_state`. Experimental tail variants use either the extended
-  endpoint loss or the undiscounted sum of binding-native state losses.
-- Tail variants evaluate a static Girard auxiliary policy after the optimized
-  horizon; tail actions are diagnostics and are not reported as committed
-  predicted actions.
+- Paper MPC and teacher costs use binding-native `approx_loss_state`.
+  `mpc_terminal_beam` and `mpc_terminal_full_width` use endpoint loss;
+  `mpc_cumulative_beam` uses the undiscounted explicit-horizon sum only in the
+  matched objective comparison.
 - The benchmark reference mode controls offline metrics and caching only;
   binding-loss MPC always constructs its own unreduced horizon rollout.
 - Learned inference uses 15 aggregate current-zonotope/budget features, scores
@@ -296,20 +193,18 @@ candidate-cost, target diagnostics, optional DART calibration, metadata, and hel
 under `learning/<scenario>/`. The staged pipeline instead writes versioned
 datasets, explicit PyTorch model directories, and generalization evaluation
 artifacts at the user-provided paths.
-The overnight wrapper additionally writes `combined_summary.csv`,
-`combined_trigger_confusion.csv`, `combined_reducer_counts.csv`,
-`combined_run_failures.csv`, `method_comparison.csv`,
-`mpc_action_composition.csv`, `mpc_vs_static_metrics.csv`, and the compact
-`primary_metrics.csv` at its output root. The compact primary table is printed
-when consolidation finishes. The metric comparison selects the best static
-method independently for FPR, FNR, approximation loss, and state width. The
-composition table reports both all-step and reduction-only MPC action shares.
+The paper pipeline writes source-aware cells, diagnostic time series, stage
+summaries, a top-level run manifest, and per-stage logs below
+`results/paper-evaluation-v1`. Its report stage writes compact CSV and TeX
+tables plus PDF/PNG figures and a complete hash manifest into the paper's
+generated-artifact directory.
 
 The packaged robot-arm assets come from RLolaEval commit
 `2257d074173a6dd475c042ef9a82cd8755a81ac3`. Each of `figure8`, `random`, and
 `square` has compliant, drift, geofence, and drift-geofence variants;
-`figure8_drift` is the default. Use `pzr-rtlola-parity` to validate all 576
-notebook cells and the production/oracle throughput gate before new full runs.
+`figure8_drift` is the default. The complete paper command validates all 576
+notebook cells and the production/oracle throughput gate before scientific
+stages.
 
 Generated files under `results/` must be regenerated through the CLI rather
 than edited manually.

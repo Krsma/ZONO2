@@ -1,8 +1,10 @@
 # Align headline metric and MPC objective with the rlola-eval notebook
 
-> Historical proposal. The terminal-loss paper configuration supersedes the
+> Historical proposal. The paper-evaluation configuration supersedes the
 > proposed cumulative-primary change. `mpc_cumulative_beam` is retained only as
 > a matched offline objective comparison; `mpc_terminal_beam` remains primary.
+> Script names below describe removed historical entry points, not commands to
+> run in the current repository.
 
 ## Context
 

@@ -78,6 +78,7 @@ class ParityConfig:
     trace_kinds: tuple[str, ...] = TRACE_KINDS
     bounds: tuple[int, ...] = PARITY_BOUNDS
     run_speed_gate: bool = True
+    event_limit: int | None = None
 
     def __post_init__(self) -> None:
         if not self.trace_kinds or not self.bounds:
@@ -88,6 +89,8 @@ class ParityConfig:
             raise ValueError("parity contains a non-canonical trace")
         if len(set(self.bounds)) != len(self.bounds) or min(self.bounds) < 0:
             raise ValueError("parity bounds must be unique and non-negative")
+        if self.event_limit is not None and self.event_limit < 2:
+            raise ValueError("parity event limit must contain at least two events")
 
 
 @dataclass
@@ -137,6 +140,7 @@ def run_parity(config: ParityConfig) -> pd.DataFrame:
         "beam_width": BEAM_WIDTH,
         "float_rtol": FLOAT_RTOL,
         "float_atol": FLOAT_ATOL,
+        "event_limit": config.event_limit,
     }
     fingerprint = _payload_sha256(fingerprint_payload)
     manifest_path = config.output / "manifest.json"
@@ -170,7 +174,10 @@ def run_parity(config: ParityConfig) -> pd.DataFrame:
         generated = scenario.generate_trace(
             0, 0, trace_kind=trace_kind,
         )
-        trace = generated.events
+        trace = (
+            generated.events[:config.event_limit]
+            if config.event_limit is not None else generated.events
+        )
         reference = load_or_compute_reference(
             trace,
             scenario=scenario,
@@ -925,6 +932,7 @@ def main(argv: list[str] | None = None) -> None:
         "--bounds", type=_parse_csv_ints, default=PARITY_BOUNDS,
     )
     parser.add_argument("--skip-speed-gate", action="store_true")
+    parser.add_argument("--length", type=int)
     args = parser.parse_args(argv)
     summary = run_parity(ParityConfig(
         rlola_eval=args.rlola_eval,
@@ -932,6 +940,7 @@ def main(argv: list[str] | None = None) -> None:
         trace_kinds=tuple(args.trace_kinds),
         bounds=tuple(args.bounds),
         run_speed_gate=not args.skip_speed_gate,
+        event_limit=args.length,
     ))
     print(f"RLolaEval parity complete: {len(summary)} cells at {args.output}")
 

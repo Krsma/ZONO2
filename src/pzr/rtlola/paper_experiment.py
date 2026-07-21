@@ -1,4 +1,4 @@
-"""Versioned contracts and statistics for the terminal-loss paper experiment."""
+"""Versioned contracts and statistics for the paper evaluation."""
 
 from __future__ import annotations
 
@@ -23,9 +23,10 @@ from pzr.rtlola.reference import REFERENCE_CACHE_SCHEMA
 from pzr.rtlola.robot_arm import RLOLAEVAL_REVISION, ROBOT_ARM_SPEC_SHA256
 
 
-PAPER_CONFIG_SCHEMA = "pzr.terminal-loss-paper-config.v1"
-PAPER_CELL_SCHEMA = "pzr.terminal-loss-paper-cell.v1"
-PAPER_STAGE_SCHEMA = "pzr.terminal-loss-paper-stage.v1"
+PAPER_CONFIG_SCHEMA = "pzr.paper-evaluation-config.v1"
+PAPER_CELL_SCHEMA = "pzr.paper-evaluation-cell.v1"
+PAPER_STAGE_SCHEMA = "pzr.paper-evaluation-stage.v1"
+PAPER_RUN_SCHEMA = "pzr.paper-evaluation-run.v1"
 BOOTSTRAP_REPLICATES = 10_000
 BOOTSTRAP_SEED = 20260721
 ORDINARY_REDUCERS = ("girard", "scott", "pca", "combastel")
@@ -132,6 +133,7 @@ class PaperExperimentConfig:
     figure8_conditions: tuple[str, ...]
     teacher_workers: int
     evaluation_workers: int
+    ablation_workers: int
     training_epochs: int
     train_seeds: tuple[int, ...]
     validation_seeds: tuple[int, ...]
@@ -183,6 +185,8 @@ class PaperExperimentConfig:
             raise ValueError("paper method catalog differs from the stable identities")
         if self.timing_workers != 1 or self.timing_native_threads != 1:
             raise ValueError("paper timing must be sequential with one native thread")
+        if self.ablation_workers != 1:
+            raise ValueError("paper ablation timing must use one experiment worker")
         if self.training_epochs < 1:
             raise ValueError("training epochs must be positive")
         if self.enforce_canonical_scope:
@@ -261,6 +265,7 @@ def load_paper_experiment_config(path: Path) -> PaperExperimentConfig:
         figure8_conditions=tuple(str(value) for value in raw["figure8_conditions"]),
         teacher_workers=int(raw["workers"]["teacher"]),
         evaluation_workers=int(raw["workers"]["evaluation"]),
+        ablation_workers=int(raw["workers"]["ablation"]),
         training_epochs=int(raw["training"]["epochs"]),
         train_seeds=tuple(int(value) for value in raw["training"]["train_seeds"]),
         validation_seeds=tuple(
@@ -360,14 +365,14 @@ def validate_cell_manifest(
 ) -> None:
     """Reject old cell schemas and any source/config mismatch."""
     if manifest.get("schema") != PAPER_CELL_SCHEMA:
-        raise ValueError("unsupported terminal-loss paper cell schema")
+        raise ValueError("unsupported paper-evaluation cell schema")
     identity = manifest.get("identity")
     if identity != dict(expected_identity):
-        raise ValueError("stale terminal-loss paper cell identity")
+        raise ValueError("stale paper-evaluation cell identity")
     try:
         RunState(str(manifest["status"]))
     except (KeyError, ValueError) as exc:
-        raise ValueError("invalid terminal-loss paper run state") from exc
+        raise ValueError("invalid paper-evaluation run state") from exc
 
 
 def trace_level_metrics(summary: pd.DataFrame) -> pd.DataFrame:

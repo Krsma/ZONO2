@@ -45,28 +45,27 @@ random-waypoint trajectories:
 | Primary clean | 0--19 | 20--25 | teacher |
 
 Validation trajectories never contribute gradients. The wrapper trains only
-`pairwise_ranking_policy` and evaluates it against Girard, Scott, PCA,
-Combastel, and `mpc_terminal_full_width`. The primary matrix therefore contains
-twelve fixed traces by four budgets by six methods, or 288 cells.
+`pairwise_ranking_policy` across all seven paper budgets and separately trains
+`pairwise_ranking_policy_budget80` from the recorded budget-80 subset. The
+all-budget policy is the only primary learned method; the budget-80 model is an
+extrapolation diagnostic.
 
-Exact references are prepared once per trace before parallel cells. Teacher
-collection uses ten spawned workers; post-reference evaluation uses four
-spawned workers with `max_tasks_per_child=1`. Every worker owns its binding
-monitor, while BLAS, OpenMP, MKL, and NumExpr remain limited to one native
-thread.
+Exact references are prepared once per trace. Teacher collection uses ten
+spawned workers; pilot, headline, objective comparison, and generalization use
+four spawned workers with `max_tasks_per_child=1`. Ablation and timing are
+sequential so their reported throughput is not contaminated by experiment-worker
+contention. Every worker owns its binding monitor, while BLAS, OpenMP, MKL, and
+NumExpr remain limited to one native thread.
 
-Run the primary experiment with:
+Run or resume the complete paper evaluation with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \
-PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
-tools/run_rtlola_learning_primary.sh
+tools/run_paper_evaluation.sh run
 ```
 
-The output must be fresh and source-aware. We do not claim a revised primary
-result until its manifest validates all 288 full-length cells without failures.
-The Phase 1 cleanup removed every prior learning result directory, so no active
-primary, secondary, or exploratory learning result artifact exists.
+The output must be fresh and source-aware. We do not claim a revised result
+until the 224-cell headline and 5,040-cell held-out manifests validate, with
+every failed point explicitly unavailable.
 
 ## Secondary Soft-KL and Guarded DART Ablations
 
@@ -106,13 +105,13 @@ different teacher states. Diagnostics report RMSE, MAE, per-candidate errors,
 and predictions outside ([0,2]), alongside selection regret, feasibility, and
 ranking metrics.
 
-## Bounded Exploration and Promotion Gate
+## Historical Bounded Exploration
 
-The separate exploration reuses the primary clean dataset and frozen Pairwise
-Clean model. It generates seeds 26--41 once and labels the same sixteen traces
-twice: clean teacher collection and guarded DART collection. Auxiliary datasets
-are train-only; all model selection uses the unchanged primary validation seeds
-20--25.
+The earlier proposed exploration would have reused the primary clean dataset
+and generated seeds 26--41 for Clean36, guarded DART36, and expected-regret
+challengers. That workflow is no longer an active entry point: the learning
+method decision is settled for the current paper and its wrapper was removed.
+The seeds remain reserved for a future explicitly versioned study.
 
 We screen four models:
 
@@ -123,36 +122,8 @@ We screen four models:
 | `pairwise_ranking_policy_dart36` | primary clean + 16 extra DART | pairwise |
 | `expected_regret_clean20` | primary clean | expected regret |
 
-The evaluation manifest stores three explicit comparisons: `data_scale`
-compares Clean36 with Clean20, `dart_effect` compares DART36 with Clean36, and
-`objective` compares expected regret with Clean20. The screen covers full-length
-all twelve fixed traces at four budgets, plus Girard: 240 cells.
-
-A challenger passes only if it completes without native failures or non-finite
-artifacts; adds no false positives, false negatives, infeasible selections, or
-fallbacks; reduces total summed loss by at least 2%; lowers macro mean loss; has
-no cell above 110% of its reference's summed loss; and does not worsen mean
-selected normalized regret on clean validation. We select the largest summed-
-loss reduction. Within 0.5 percentage points, we prefer Clean36, then expected
-regret, then DART.
-
-At most one challenger receives a full evaluation. That evaluation contains the
-winner, its matched reference, and Girard over twelve traces and four budgets,
-or 144 cells. If no challenger passes, the selection manifest records that method
-expansion stops and Pairwise Ranking Policy remains the only proposed method. We do not
-modify DART further unless DART36 passes its data-matched comparison.
-
-Run the exploration with:
-
-```bash
-PZR_PRIMARY_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \
-PZR_OUT_DIR=results/rtlola-learning-bounded-exploration-v1-01c92a2-2724b05-2257d07 \
-tools/run_rtlola_learning_exploration.sh
-```
-
-No exploratory result is reportable before the 240-cell screen manifest and the
-selection manifest validate. If a challenger is promoted, its result additionally
-requires the complete 144-cell manifest.
+The old promotion thresholds and model definitions remain here only as
+scientific history; they do not authorize claims or a new run.
 
 ## Artifacts
 
@@ -167,15 +138,11 @@ provenance, histories, seed, weights, normalizer, and source fingerprint.
 Evaluation reports retain complete time series and summaries, macro
 loss/width/runtime, micro FPR/FNR, fallback and infeasible accounting, candidate
 composition, `method_comparisons.csv`, and independently selected
-`best_static_metrics.csv`. The evaluator uses schema
+`best_static_metrics.csv`. The low-level evaluator uses schema
 `pzr.policy-evaluation.v2`. Version 2 records the configured predictor, fixed
-schedule, horizon, beam width, and exact-reference identity. The separate MPC
-add-on contains 168 cells: Girard and frozen-PRP anchors, horizon-3 oracle beam
-and full width, and horizon-3 hold/linear/quadratic predictive beams. Joined
-reporting rejects anchor or provenance mismatches and emits a 240-cell paper
-dataset, a linear-prediction main table, a predictor ablation, and explicit
-safety/accounting tables. Predictive MPC is causal but current-event-aware;
-the learned policy remains strictly pre-event.
+schedule, horizon, beam width, and exact-reference identity. The paper pipeline
+uses its stricter source-aware cell schema. Predictive MPC is causal but
+current-event-aware; the learned policy remains strictly pre-event.
 
 Exploratory runs additionally write validated
 `policy_comparisons.csv`, `challenger_assessments.csv`, and `selection.json`.
