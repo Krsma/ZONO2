@@ -14,6 +14,12 @@ stages. A projection above 72 hours requires a later
 `run --approve-long-run` invocation; approval cannot be supplied before the
 pilot exists.
 
+For a preliminary run, `tools/run_paper_evaluation.sh explore` executes only
+release preflight, teacher preparation, both policy trainings, and the formal
+216-cell pilot. It explicitly excludes parity and every paper-scale matrix,
+including the unrelated historical bounded-exploration study. These stages are
+source-aware and are reused by a later complete `run`.
+
 ## Method identities
 
 - `mpc_terminal_beam` is an offline terminal-loss beam with recorded future

@@ -104,6 +104,10 @@ tests, parity, training, pilot gating, all scientific matrices, reporting, and
 validation. It prepares one exact reference per trace and uses source-aware
 resumable cells. The H/W ablation uses one experiment worker so its throughput
 heatmap is contention-free; headline and generalization use four workers.
+`tools/run_paper_evaluation.sh explore` is the preliminary entrypoint: it runs
+only release preflight, teacher preparation, both policy trainings, and the
+formal pilot. It does not run parity, paper-scale matrices, or the historical
+bounded-exploration study.
 
 ## Current Robot-Arm Results
 

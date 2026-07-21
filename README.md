@@ -70,6 +70,18 @@ pzr-learning train --dataset clean=/tmp/pzr-learning/clean/dataset \
 ```
 
 The paper evaluation is defined by `experiments/paper_evaluation_v1.yaml`.
+Run or resume only the release-checked teacher/training/formal-pilot bundle with:
+
+```bash
+tools/run_paper_evaluation.sh explore
+```
+
+`explore` includes preflight, `prepare`, `train`, and the 216-cell pilot. It
+does not run parity, objective comparison, headline, held-out generalization,
+ablation, timing, reporting, validation, or the historical bounded-exploration
+study. Its outputs are source-compatible with a later complete `run` and will
+be validated and skipped when that run resumes.
+
 Run or resume the complete release-checked bundle with:
 
 ```bash
@@ -103,6 +115,13 @@ For an unattended run, start the checked-in command in a detached session:
 ```bash
 tmux new-session -d -s paper-evaluation \
   'cd /home/vlkr/Faks/phd/ZONO2 && tools/run_paper_evaluation.sh run'
+```
+
+For the exploratory bundle only:
+
+```bash
+tmux new-session -d -s paper-exploration \
+  'cd /home/vlkr/Faks/phd/ZONO2 && tools/run_paper_evaluation.sh explore'
 ```
 
 Exit status `0` means every required point completed, `2` means the artifact

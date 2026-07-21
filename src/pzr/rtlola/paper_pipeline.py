@@ -253,6 +253,56 @@ def run_complete_paper_evaluation(
     )
 
 
+def run_exploratory_bundle(
+    config: PaperExperimentConfig,
+    *,
+    smoke: bool = False,
+) -> PaperRunResult:
+    """Prepare data, train both policies, and run only the formal pilot."""
+    config.output_root.mkdir(parents=True, exist_ok=True)
+    provenance = _run_provenance(config)
+    if provenance["dirty_source_paths"] and not smoke:
+        raise ValueError(
+            "exploratory bundle requires clean scientific sources; dirty paths: "
+            f"{provenance['dirty_source_paths']}"
+        )
+    _run_preflight(config, provenance)
+    for stage in ("prepare", "train", "pilot"):
+        _run_or_skip_stage(config, stage)
+
+    projection = load_json(config.output_root / "pilot" / "projection.json")
+    failure_count = _stage_failure_count(config, "pilot")
+    status = (
+        "exploration_completed"
+        if failure_count == 0 else "exploration_completed_with_failures"
+    )
+    manifest = config.output_root / "explore" / "manifest.json"
+    write_json_atomic({
+        "schema": "pzr.paper-evaluation-exploration.v1",
+        "experiment_id": config.experiment_id,
+        "status": status,
+        "updated_at": _utc_now(),
+        "config_sha256": config.config_sha256,
+        "pzr_source_sha256": pzr_source_sha256(),
+        **_runtime_provenance(),
+        "provenance": provenance,
+        "failure_count": failure_count,
+        "projection": projection,
+        "included_stages": ["preflight", "prepare", "train", "pilot"],
+        "excluded_stages": [
+            "parity", "objective-comparison", "headline", "generalization",
+            "ablation", "timing", "report", "validate",
+            "bounded-exploration",
+        ],
+    }, manifest)
+    return PaperRunResult(
+        status,
+        RUN_EXIT_COMPLETE if failure_count == 0 else RUN_EXIT_FAILED_POINTS,
+        failure_count,
+        manifest,
+    )
+
+
 def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
     """Return a non-mutating summary of the current paper-evaluation output."""
     stages: dict[str, object] = {}
@@ -273,12 +323,25 @@ def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
             stages[stage] = {"status": "stale_or_invalid", "message": str(exc)}
     projection_path = config.output_root / "pilot" / "projection.json"
     run_manifest = config.output_root / "run" / "manifest.json"
+    exploration_manifest = config.output_root / "explore" / "manifest.json"
+    exploration: dict[str, object] = {"status": "missing"}
+    if exploration_manifest.is_file():
+        try:
+            exploration = load_json(exploration_manifest)
+            if exploration.get("config_sha256") != config.config_sha256:
+                raise ValueError("stale exploration config manifest")
+            if exploration.get("pzr_source_sha256") != pzr_source_sha256():
+                raise ValueError("stale exploration source manifest")
+            _validate_runtime_provenance(exploration, "exploration")
+        except (OSError, ValueError) as exc:
+            exploration = {"status": "stale_or_invalid", "message": str(exc)}
     return {
         "schema": "pzr.paper-evaluation-status.v1",
         "experiment_id": config.experiment_id,
         "output_root": str(config.output_root),
         "paper_artifact_dir": str(config.paper_artifact_dir),
         "run": load_json(run_manifest) if run_manifest.is_file() else {"status": "missing"},
+        "exploration": exploration,
         "projection": (
             load_json(projection_path) if projection_path.is_file() else None
         ),
@@ -441,6 +504,14 @@ def _scientific_failure_count(config: PaperExperimentConfig) -> int:
     if timing_manifest.is_file():
         count += int(load_json(timing_manifest).get("failure_count", 0))
     return count
+
+
+def _stage_failure_count(config: PaperExperimentConfig, stage: str) -> int:
+    summary = config.output_root / stage / "summary.csv"
+    if not summary.is_file():
+        raise ValueError(f"{stage} summary is missing")
+    frame = pd.read_csv(summary)
+    return int((frame["status"] != RunState.COMPLETED.value).sum())
 
 
 def _run_provenance(config: PaperExperimentConfig) -> dict[str, object]:
@@ -1379,7 +1450,7 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the versioned paper evaluation",
     )
-    parser.add_argument("stage", choices=(*STAGES, "run", "status"))
+    parser.add_argument("stage", choices=(*STAGES, "explore", "run", "status"))
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--paper-artifacts", type=Path)
@@ -1435,6 +1506,35 @@ def main(argv: list[str] | None = None) -> None:
     if args.stage == "status":
         print(json.dumps(paper_evaluation_status(config), indent=2, sort_keys=True))
         return
+    if args.stage == "explore":
+        if args.approve_long_run:
+            raise ValueError("explore never starts the approval-gated held-out sweep")
+        if args.workers not in {None, config.evaluation_workers}:
+            raise ValueError(
+                "explore uses the configured pilot worker count so its projection "
+                "retains the declared semantics"
+            )
+        try:
+            result = run_exploratory_bundle(config, smoke=args.smoke)
+        except Exception as exc:
+            if config.output_root.is_dir():
+                write_json_atomic({
+                    "schema": "pzr.paper-evaluation-exploration.v1",
+                    "experiment_id": config.experiment_id,
+                    "status": "failed",
+                    "updated_at": _utc_now(),
+                    "config_sha256": config.config_sha256,
+                    "pzr_source_sha256": pzr_source_sha256(),
+                    **_runtime_provenance(),
+                    "failure_type": type(exc).__name__,
+                    "failure_message": str(exc),
+                }, config.output_root / "explore" / "manifest.json")
+            raise
+        print(
+            f"Exploratory bundle {result.status}: failures={result.failure_count}, "
+            f"manifest={result.manifest}",
+        )
+        raise SystemExit(result.exit_code)
     if args.stage == "run":
         try:
             result = run_complete_paper_evaluation(

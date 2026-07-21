@@ -41,6 +41,7 @@ from pzr.rtlola.paper_pipeline import (
     _validate_runtime_provenance,
     build_parser,
     run_complete_paper_evaluation,
+    run_exploratory_bundle,
     run_paper_stage,
 )
 from pzr.rtlola.parity import ParityConfig
@@ -421,9 +422,52 @@ def test_cli_exposes_all_staged_commands_and_long_run_approval():
         args = parser.parse_args([stage])
         assert args.stage == stage
     assert parser.parse_args(["run"]).stage == "run"
+    assert parser.parse_args(["explore"]).stage == "explore"
     assert parser.parse_args(["status"]).stage == "status"
     assert parser.parse_args(["generalization", "--approve-long-run"]).approve_long_run
     assert BOOTSTRAP_REPLICATES == 10_000
+
+
+def test_exploratory_bundle_runs_only_preflight_training_and_formal_pilot(
+    tmp_path, monkeypatch,
+):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path / "results",
+        paper_artifact_dir=tmp_path / "generated",
+    )
+    calls = []
+    preflight = []
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._run_provenance",
+        lambda _config: {"dirty_source_paths": []},
+    )
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._run_preflight",
+        lambda *_args: preflight.append(True),
+    )
+
+    def fake_stage(_config, stage, **_kwargs):
+        calls.append(stage)
+        if stage == "pilot":
+            path = config.output_root / "pilot" / "projection.json"
+            path.parent.mkdir(parents=True)
+            path.write_text('{"approval_required": false}')
+
+    monkeypatch.setattr("pzr.rtlola.paper_pipeline._run_or_skip_stage", fake_stage)
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._stage_failure_count", lambda *_args: 0,
+    )
+
+    result = run_exploratory_bundle(config, smoke=True)
+
+    assert preflight == [True]
+    assert calls == ["prepare", "train", "pilot"]
+    assert result.status == "exploration_completed"
+    manifest = json.loads(result.manifest.read_text())
+    assert manifest["included_stages"] == ["preflight", "prepare", "train", "pilot"]
+    assert "parity" in manifest["excluded_stages"]
+    assert "bounded-exploration" in manifest["excluded_stages"]
 
 
 def test_ablation_rejects_concurrent_worker_override():
