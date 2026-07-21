@@ -29,6 +29,7 @@ dev = [
 pzr-benchmark = "pzr.rtlola.cli:main"
 pzr-learning = "pzr.learning.cli:main"
 pzr-rtlola-parity = "pzr.rtlola.parity:main"
+pzr-paper = "pzr.rtlola.paper_pipeline:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

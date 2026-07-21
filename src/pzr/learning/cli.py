@@ -137,6 +137,11 @@ def build_parser() -> argparse.ArgumentParser:
     train.add_argument("--weight-decay", type=float, default=1e-4)
     train.add_argument("--patience", type=int, default=10)
     train.add_argument("--seed", type=int, default=42)
+    train.add_argument(
+        "--budget-filter",
+        type=_csv_ints,
+        help="Train only on samples at these recorded transform bounds",
+    )
 
     calibrate = subparsers.add_parser(
         "calibrate-dart", help="secondary: fit guarded-DART disturbance calibration",
@@ -250,6 +255,9 @@ def _dispatch_train(args: argparse.Namespace) -> None:
         weight_decay=args.weight_decay,
         patience=args.patience,
         seed=args.seed,
+        budget_filter=(
+            tuple(args.budget_filter) if args.budget_filter is not None else None
+        ),
     ))
     print(f"Reducer scorer complete: {output}")
 

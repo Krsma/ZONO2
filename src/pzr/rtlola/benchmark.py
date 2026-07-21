@@ -84,6 +84,7 @@ RTLOLA_AGGREGATE_METRICS = [
     "mean_zero_dynamic_generator_count",
     "total_reductions",
     "total_time_ms",
+    "event_loop_time_ms",
     "mean_approx_loss",
     "final_approx_loss",
     "max_approx_loss",
@@ -214,6 +215,7 @@ class RtlolaRunResult:
     budget: int | None = None
     trace_kind: str = "default"
     prediction_diagnostics: tuple[InputPredictionDiagnostic, ...] = ()
+    event_loop_time_ms: float = float("nan")
 
     @property
     def total_reductions(self) -> int:
@@ -238,6 +240,14 @@ class RtlolaRunFailure:
     message: str
 
 
+@dataclass(frozen=True)
+class RtlolaFailedRun:
+    """A native failure plus every scientifically useful pre-failure step."""
+
+    failure: RtlolaRunFailure
+    partial: RtlolaRunResult
+
+
 @dataclass
 class RtlolaBenchmarkResult:
     config: RtlolaBenchmarkConfig
@@ -248,6 +258,7 @@ class RtlolaBenchmarkResult:
     prediction_diagnostics: pd.DataFrame
     prediction_error_summary: pd.DataFrame
     failures: tuple[RtlolaRunFailure, ...] = ()
+    failed_timeseries: pd.DataFrame = field(default_factory=pd.DataFrame)
 
 
 def methods_for_config(config: RtlolaBenchmarkConfig) -> tuple[str, ...]:
@@ -346,6 +357,63 @@ def run_direct_policy_benchmark(
     )
 
 
+def run_event_trace_benchmark(
+    config: RtlolaBenchmarkConfig,
+    events: Sequence[RtlolaEvent],
+    *,
+    trace_kind: str,
+    seed: int,
+    method: str,
+    policy: DirectRtlolaPolicy | None = None,
+    reference_steps: Sequence[RtlolaReferenceStep] | None = None,
+) -> RtlolaBenchmarkResult:
+    """Evaluate one supplied trace while retaining normal native accounting."""
+    methods = (method,)
+    direct_policies = {method: policy} if policy is not None else {}
+    _validate_benchmark_config(config, methods, direct_policies)
+    if len(events) != config.length:
+        raise ValueError(
+            f"supplied trace has {len(events)} events, expected {config.length}"
+        )
+    scenario = scenario_by_name(config.scenario)
+    catalog = default_action_catalog(tuple(config.mpc_candidate_names))
+    if reference_steps is not None:
+        if config.reference_mode == "off":
+            raise ValueError("supplied exact reference cannot be used with reference_mode=off")
+        if len(reference_steps) != len(events):
+            raise ValueError("supplied exact reference length differs from trace")
+        reference = tuple(reference_steps)
+    else:
+        reference = (
+            load_or_compute_reference(
+                events,
+                scenario=scenario,
+                trace_kind=trace_kind,
+                seed=seed,
+                cache_path=reference_cache_path(config.reference_cache, seed, 1),
+                include_approximation=config.reference_mode == "exact",
+            )
+            if config.reference_mode != "off" else None
+        )
+    outcome = _run_single(
+        config,
+        scenario,
+        events,
+        method,
+        catalog.mpc_candidates,
+        catalog.by_name,
+        catalog.fallback,
+        seed,
+        trace_kind,
+        reference,
+        direct_policy=policy,
+    )
+    raw = () if isinstance(outcome, RtlolaFailedRun) else (outcome,)
+    failures = (outcome.failure,) if isinstance(outcome, RtlolaFailedRun) else ()
+    partial = (outcome.partial,) if isinstance(outcome, RtlolaFailedRun) else ()
+    return _build_benchmark_result(config, raw, failures, partial)
+
+
 def _run_benchmark_loop(
     config: RtlolaBenchmarkConfig,
     *,
@@ -353,36 +421,7 @@ def _run_benchmark_loop(
     direct_policies: Mapping[str, DirectRtlolaPolicy],
 ) -> RtlolaBenchmarkResult:
     """Run built-in and direct policies with identical trace/reference accounting."""
-    if not methods or len(set(methods)) != len(methods):
-        raise ValueError("benchmark methods must be non-empty and unique")
-    if not set(direct_policies) <= set(methods):
-        raise ValueError("direct policies must correspond to requested methods")
-    if config.reference_mode not in {"exact", "verdict", "off"}:
-        raise ValueError("reference_mode must be one of: exact, verdict, off")
-    if config.mpc_reference not in {"rollout", "cache"}:
-        raise ValueError("mpc_reference must be one of: rollout, cache")
-    if config.mpc_reference == "cache" and config.reference_mode != "exact":
-        raise ValueError("mpc_reference=cache requires reference_mode=exact")
-    if config.mpc_reference == "cache" and set(methods) & set(PREDICTIVE_MPC_METHODS):
-        raise ValueError(
-            "predictive MPC cannot use exact-cache references for predicted inputs"
-        )
-    if config.length < 1:
-        raise ValueError("length must be >= 1")
-    if config.seeds < 1:
-        raise ValueError("seeds must be >= 1")
-    if config.budget < 0:
-        raise ValueError("budget must be non-negative")
-    if config.horizon < 0:
-        raise ValueError("horizon must be non-negative")
-    if config.beam_width < 1:
-        raise ValueError("beam_width must be >= 1")
-    if not np.isfinite(config.prediction_step_seconds) or config.prediction_step_seconds <= 0.0:
-        raise ValueError("prediction_step_seconds must be positive and finite")
-    if config.mpc_tail_horizon < 0:
-        raise ValueError("mpc_tail_horizon must be non-negative")
-    if config.mpc_root_beam_width < 1:
-        raise ValueError("mpc_root_beam_width must be >= 1")
+    _validate_benchmark_config(config, methods, direct_policies)
     scenario = scenario_by_name(config.scenario)
     catalog = default_action_catalog(tuple(config.mpc_candidate_names))
     by_name = catalog.by_name
@@ -390,6 +429,7 @@ def _run_benchmark_loop(
     mpc_candidates = catalog.mpc_candidates
     raw: list[RtlolaRunResult] = []
     failures: list[RtlolaRunFailure] = []
+    partial: list[RtlolaRunResult] = []
     for seed in range(config.seeds):
         generated = scenario.generate_trace(
             config.length,
@@ -426,10 +466,60 @@ def _run_benchmark_loop(
                 reference,
                 direct_policy=direct_policies.get(method),
             )
-            if isinstance(outcome, RtlolaRunFailure):
-                failures.append(outcome)
+            if isinstance(outcome, RtlolaFailedRun):
+                failures.append(outcome.failure)
+                partial.append(outcome.partial)
             else:
                 raw.append(outcome)
+    return _build_benchmark_result(
+        config, tuple(raw), tuple(failures), tuple(partial),
+    )
+
+
+def _validate_benchmark_config(
+    config: RtlolaBenchmarkConfig,
+    methods: Sequence[str],
+    direct_policies: Mapping[str, DirectRtlolaPolicy],
+) -> None:
+    if not methods or len(set(methods)) != len(methods):
+        raise ValueError("benchmark methods must be non-empty and unique")
+    if not set(direct_policies) <= set(methods):
+        raise ValueError("direct policies must correspond to requested methods")
+    if config.reference_mode not in {"exact", "verdict", "off"}:
+        raise ValueError("reference_mode must be one of: exact, verdict, off")
+    if config.mpc_reference not in {"rollout", "cache"}:
+        raise ValueError("mpc_reference must be one of: rollout, cache")
+    if config.mpc_reference == "cache" and config.reference_mode != "exact":
+        raise ValueError("mpc_reference=cache requires reference_mode=exact")
+    if config.mpc_reference == "cache" and set(methods) & set(PREDICTIVE_MPC_METHODS):
+        raise ValueError(
+            "predictive MPC cannot use exact-cache references for predicted inputs"
+        )
+    if config.length < 1:
+        raise ValueError("length must be >= 1")
+    if config.seeds < 1:
+        raise ValueError("seeds must be >= 1")
+    if config.budget < 0:
+        raise ValueError("budget must be non-negative")
+    if config.horizon < 0:
+        raise ValueError("horizon must be non-negative")
+    if config.beam_width < 1:
+        raise ValueError("beam_width must be >= 1")
+    if not np.isfinite(config.prediction_step_seconds) or config.prediction_step_seconds <= 0.0:
+        raise ValueError("prediction_step_seconds must be positive and finite")
+    if config.mpc_tail_horizon < 0:
+        raise ValueError("mpc_tail_horizon must be non-negative")
+    if config.mpc_root_beam_width < 1:
+        raise ValueError("mpc_root_beam_width must be >= 1")
+
+
+def _build_benchmark_result(
+    config: RtlolaBenchmarkConfig,
+    raw: tuple[RtlolaRunResult, ...],
+    failures: tuple[RtlolaRunFailure, ...],
+    partial: tuple[RtlolaRunResult, ...] = (),
+) -> RtlolaBenchmarkResult:
+    """Build aligned dataframes for generated and caller-supplied traces."""
     timeseries = results_to_dataframe(raw)
     summary = summarize_results(raw)
     aggregate = aggregate_summary(summary)
@@ -466,7 +556,8 @@ def _run_benchmark_loop(
         aggregate=aggregate,
         prediction_diagnostics=prediction_rows,
         prediction_error_summary=prediction_summary,
-        failures=tuple(failures),
+        failures=failures,
+        failed_timeseries=results_to_dataframe(partial),
     )
 
 
@@ -482,7 +573,7 @@ def _run_single(
     trace_kind: str,
     reference: Sequence[RtlolaReferenceStep] | None,
     direct_policy: DirectRtlolaPolicy | None = None,
-) -> RtlolaRunResult | RtlolaRunFailure:
+) -> RtlolaRunResult | RtlolaFailedRun:
     engine = RtlolaEngine(
         scenario.spec,
         event_arity=scenario.event_arity,
@@ -490,6 +581,7 @@ def _run_single(
     )
     steps: list[RtlolaStepRecord] = []
     run_prediction_diagnostics: list[InputPredictionDiagnostic] = []
+    run_start = time.perf_counter()
     for index, event in enumerate(trace):
         state = engine.snapshot(step=index, time=event.time)
         try:
@@ -505,6 +597,9 @@ def _run_single(
                 event,
                 "inspect",
                 exc,
+                steps=steps,
+                prediction_diagnostics=run_prediction_diagnostics,
+                event_loop_time_ms=(time.perf_counter() - run_start) * 1000.0,
             )
         predictor = PREDICTIVE_MPC_METHODS.get(method)
         if predictor is None:
@@ -548,6 +643,9 @@ def _run_single(
                 event,
                 "select",
                 exc,
+                steps=steps,
+                prediction_diagnostics=run_prediction_diagnostics,
+                event_loop_time_ms=(time.perf_counter() - run_start) * 1000.0,
             )
 
         if prediction is not None:
@@ -578,6 +676,9 @@ def _run_single(
                 event,
                 "commit",
                 exc,
+                steps=steps,
+                prediction_diagnostics=run_prediction_diagnostics,
+                event_loop_time_ms=(time.perf_counter() - run_start) * 1000.0,
             )
         elapsed_ms = (time.perf_counter() - start) * 1000.0
         executed = RtlolaExecutedStep(
@@ -608,6 +709,9 @@ def _run_single(
                 event,
                 "measure",
                 exc,
+                steps=steps,
+                prediction_diagnostics=run_prediction_diagnostics,
+                event_loop_time_ms=(time.perf_counter() - run_start) * 1000.0,
             )
     return RtlolaRunResult(
         method=method,
@@ -616,6 +720,7 @@ def _run_single(
         budget=config.budget,
         trace_kind=trace_kind,
         prediction_diagnostics=tuple(run_prediction_diagnostics),
+        event_loop_time_ms=(time.perf_counter() - run_start) * 1000.0,
     )
 
 
@@ -790,18 +895,27 @@ def _run_failure(
     event: RtlolaEvent,
     phase: str,
     error: Exception,
-) -> RtlolaRunFailure:
-    return RtlolaRunFailure(
-        scenario=scenario.name,
-        trace_kind=trace_kind,
-        method=method,
-        seed=seed,
-        budget=config.budget,
-        step=step,
-        time=event.time,
-        phase=phase,
-        failure_type=type(error).__name__,
-        message=str(error),
+    *,
+    steps: Sequence[RtlolaStepRecord],
+    prediction_diagnostics: Sequence[InputPredictionDiagnostic],
+    event_loop_time_ms: float,
+) -> RtlolaFailedRun:
+    failure = RtlolaRunFailure(
+        scenario=scenario.name, trace_kind=trace_kind, method=method, seed=seed,
+        budget=config.budget, step=step, time=event.time, phase=phase,
+        failure_type=type(error).__name__, message=str(error),
+    )
+    return RtlolaFailedRun(
+        failure=failure,
+        partial=RtlolaRunResult(
+            method=method,
+            seed=seed,
+            steps=tuple(steps),
+            budget=config.budget,
+            trace_kind=trace_kind,
+            prediction_diagnostics=tuple(prediction_diagnostics),
+            event_loop_time_ms=event_loop_time_ms,
+        ),
     )
 
 
@@ -1133,6 +1247,7 @@ def summarize_results(results: Sequence[RtlolaRunResult]) -> pd.DataFrame:
             "max_logical_dynamic_dimension": int(np.max(logical_dims)),
             "total_reductions": run.total_reductions,
             "total_time_ms": run.total_time_ms,
+            "event_loop_time_ms": run.event_loop_time_ms,
             "mean_approx_loss": _nanmean(approx_losses),
             "final_approx_loss": _nanfinal(approx_losses),
             "max_approx_loss": _nanmax(approx_losses),

@@ -1,0 +1,101 @@
+schema: pzr.terminal-loss-paper-config.v1
+experiment_id: terminal-loss-paper-v1
+output_root: results/terminal-loss-paper-v1
+paper_artifact_dir: paper/corl2026/Zonotopes_at_CoRL/generated/terminal_loss_v1
+event_count: 500
+budgets: [40, 80, 120, 150, 200, 250, 500]
+candidate_names: [girard, scott, pca, combastel]
+conditions:
+  - random_waypoint
+  - random_waypoint_drift
+  - random_waypoint_geofence
+  - random_waypoint_drift_geofence
+figure8_conditions:
+  - figure8
+  - figure8_drift
+  - figure8_geofence
+  - figure8_drift_geofence
+workers:
+  teacher: 10
+  evaluation: 4
+training:
+  epochs: 100
+  train_seeds: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  validation_seeds: [20, 21, 22, 23, 24, 25]
+reserved_exploration_seeds: [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]
+pilot:
+  seeds: [90, 91]
+  budgets: [40, 150, 500]
+  maximum_projected_wall_hours: 72
+generalization_seeds: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119]
+ablation:
+  seeds: [60, 61, 62, 63, 64]
+  budget: 150
+  horizons: [1, 2, 4, 8]
+  widths: [1, 2, 4, 8]
+timing:
+  warmup_events: 100
+  repetitions: 3
+  workers: 1
+  native_threads: 1
+methods:
+  girard:
+    execution_regime: static_online
+    predictor: none
+    horizon: 0
+    beam_width: 1
+    objective: not_applicable
+  scott:
+    execution_regime: static_online
+    predictor: none
+    horizon: 0
+    beam_width: 1
+    objective: not_applicable
+  pca:
+    execution_regime: static_online
+    predictor: none
+    horizon: 0
+    beam_width: 1
+    objective: not_applicable
+  combastel:
+    execution_regime: static_online
+    predictor: none
+    horizon: 0
+    beam_width: 1
+    objective: not_applicable
+  mpc_terminal_beam:
+    execution_regime: offline_recorded
+    predictor: recorded_future
+    horizon: 4
+    beam_width: 4
+    objective: terminal
+  mpc_terminal_beam_predictive_linear:
+    execution_regime: online_predictive
+    predictor: causal_linear
+    horizon: 4
+    beam_width: 4
+    objective: terminal
+  mpc_terminal_full_width:
+    execution_regime: offline_teacher
+    predictor: recorded_future
+    horizon: 1
+    beam_width: 0
+    objective: terminal
+  mpc_cumulative_beam:
+    execution_regime: offline_comparison
+    predictor: recorded_future
+    horizon: 4
+    beam_width: 4
+    objective: cumulative
+  pairwise_ranking_policy:
+    execution_regime: learned_online
+    predictor: none
+    horizon: 0
+    beam_width: 1
+    objective: learned_terminal_teacher
+  pairwise_ranking_policy_budget80:
+    execution_regime: learned_online
+    predictor: none
+    horizon: 0
+    beam_width: 1
+    objective: learned_terminal_teacher_budget80

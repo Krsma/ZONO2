@@ -52,12 +52,20 @@ class ReducerTrainingConfig:
     weight_decay: float = 1e-4
     patience: int = 10
     seed: int = 42
+    budget_filter: tuple[int, ...] | None = None
 
     def __post_init__(self) -> None:
         if not self.datasets:
             raise ValueError("at least one named training dataset is required")
         if len({item.name for item in self.datasets}) != len(self.datasets):
             raise ValueError("named training datasets must have unique names")
+        if self.budget_filter is not None:
+            if not self.budget_filter:
+                raise ValueError("budget filter must not be empty")
+            if len(set(self.budget_filter)) != len(self.budget_filter):
+                raise ValueError("budget filter values must be unique")
+            if min(self.budget_filter) < 0:
+                raise ValueError("budget filter values must be non-negative")
 
 
 def run_reducer_training(config: ReducerTrainingConfig) -> Path:
@@ -71,6 +79,9 @@ def run_reducer_training(config: ReducerTrainingConfig) -> Path:
         frame.insert(0, "dataset_label", named_input.name)
         metadata_frames.append(frame)
     sample_metadata = pd.concat(metadata_frames, ignore_index=True)
+    dataset, sample_metadata = filter_training_budgets(
+        dataset, sample_metadata, config.budget_filter,
+    )
     temperatures, temperature_source_hash = _training_temperatures(config, dataset)
     candidates: list[tuple[float | None, ReducerPolicy, ReducerTrainingResult]] = []
     for temperature in temperatures:
@@ -128,6 +139,13 @@ def run_reducer_training(config: ReducerTrainingConfig) -> Path:
         "temperature_candidates": [value for value, _, _ in candidates],
         "temperature_source_model_sha256": temperature_source_hash,
         "checkpoint_selection": "minimum_clean_validation_objective_loss",
+        "budget_filter": (
+            list(config.budget_filter) if config.budget_filter is not None else None
+        ),
+        "training_budgets": sorted(
+            sample_metadata["budget"].astype(int).unique().tolist()
+        ),
+        "filtered_sample_count": dataset.num_samples,
         "temperature_selection": (
             "infeasible_count_mean_regret_max_regret_kl_lower_temperature"
             if config.objective == "soft-kl" else None
@@ -165,6 +183,35 @@ def run_reducer_training(config: ReducerTrainingConfig) -> Path:
         config.output / "candidate_diagnostics.csv",
     )
     return config.output
+
+
+def filter_training_budgets(
+    dataset: ReducerCostDataset,
+    sample_metadata: pd.DataFrame,
+    budgets: tuple[int, ...] | None,
+) -> tuple[ReducerCostDataset, pd.DataFrame]:
+    """Return an aligned dataset restricted to explicitly recorded budgets."""
+    if len(sample_metadata) != dataset.num_samples:
+        raise ValueError("training metadata and dataset sample counts differ")
+    if "budget" not in sample_metadata:
+        raise ValueError("training metadata lacks budget provenance")
+    if budgets is None:
+        return dataset, sample_metadata.reset_index(drop=True)
+    requested = set(budgets)
+    available = set(sample_metadata["budget"].astype(int))
+    missing = requested - available
+    if missing:
+        raise ValueError(f"training budget filter is unavailable: {sorted(missing)}")
+    selected = np.flatnonzero(
+        sample_metadata["budget"].astype(int).isin(requested).to_numpy()
+    )
+    filtered = dataset.subset(selected)
+    metadata = sample_metadata.iloc[selected].reset_index(drop=True)
+    if filtered.indices_for_split("train").size == 0:
+        raise ValueError("budget-filtered dataset has no training samples")
+    if filtered.indices_for_split("validation").size == 0:
+        raise ValueError("budget-filtered dataset has no validation samples")
+    return filtered, metadata
 
 
 def dataset_sha256(path: Path) -> str:
