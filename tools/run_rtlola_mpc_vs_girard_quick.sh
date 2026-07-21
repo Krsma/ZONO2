@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-arm-mpc-vs-girard-four-actions-b60-80-100-20260706}"
-REFERENCE_DIR="${PZR_REFERENCE_DIR:-$ROOT_DIR/results/rtlola-arm-mpc-variants-b4cfbf4-e6ecd0b-exact-metrics/references}"
+REFERENCE_DIR="${PZR_REFERENCE_DIR:-$ROOT_DIR/results/rtlola-arm-mpc-variants-01c92a2-2257d07-exact-metrics/references}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 
 if [[ -z "${PZR_REFERENCE_NAMESPACE:-}" ]]; then
@@ -27,7 +27,7 @@ export PZR_REFERENCE_DIR="$REFERENCE_DIR"
 export PZR_BUDGETS="${PZR_BUDGETS:-60,80,100}"
 export PZR_METHODS="${PZR_METHODS:-girard,mpc_terminal_beam}"
 export PZR_MPC_CANDIDATES="${PZR_MPC_CANDIDATES:-scott,girard,combastel,pca}"
-export PZR_EVAL_TRACES="${PZR_EVAL_TRACES:-figure8,figure8_drift,random,random_drift,square,square_drift}"
+export PZR_EVAL_TRACES="${PZR_EVAL_TRACES:-figure8,figure8_drift,figure8_geofence,figure8_drift_geofence,random,random_drift,random_geofence,random_drift_geofence,square,square_drift,square_geofence,square_drift_geofence}"
 export PZR_SEEDS="${PZR_SEEDS:-1}"
 export PZR_HORIZON="${PZR_HORIZON:-4}"
 export PZR_BEAM_WIDTH="${PZR_BEAM_WIDTH:-4}"

@@ -31,6 +31,8 @@ from pzr.rtlola.omni import (
     OMNI_SPEC,
     generate_omni_events,
 )
+from pzr.rtlola.parity import _run_beam_oracle, _run_beam_production
+from pzr.rtlola.reference import load_or_compute_reference
 from pzr.rtlola.robot_arm import (
     ARM_PUBLIC_STREAM_KEYS,
     ARM_SPEC,
@@ -82,7 +84,7 @@ def test_binding_accepts_none_for_asynchronous_input():
     assert "held" not in verdict
 
 
-def test_binding_returns_symbolic_verdicts_as_strings():
+def test_binding_returns_public_affine_verdicts_as_intervals():
     monitor = rlola.RLolaMonitor("""
         input value: Float64
         output epsilon: Variable @true
@@ -92,8 +94,7 @@ def test_binding_returns_symbolic_verdicts_as_strings():
 
     uncertain = monitor.accept_event([1.0], 0.0)["uncertain"]
 
-    assert isinstance(uncertain, str)
-    assert "s" in uncertain
+    assert uncertain == pytest.approx((0.5, 1.5))
 
 
 def test_repeated_branching_from_same_snapshot_is_deterministic():
@@ -291,8 +292,8 @@ def test_benchmark_writes_rtlola_native_artifacts(tmp_path):
     assert result.config.mpc_objective == "terminal_binding_approx_loss"
     config_text = (tmp_path / "config.yaml").read_text()
     assert "mpc_objective: terminal_binding_approx_loss" in config_text
-    assert "source_revision: e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5" in config_text
-    assert "interpreter_revision: b4cfbf4680e6641f131a64d6d9e9ef57ec228976" in config_text
+    assert "source_revision: 2257d074173a6dd475c042ef9a82cd8755a81ac3" in config_text
+    assert "interpreter_revision: 2724b05ae6c62ed0df14f1401ed8db89472725a6" in config_text
     assert "binding_build_profile: release" in config_text
 
 
@@ -314,6 +315,74 @@ def test_robot_arm_mpc_uses_binding_terminal_loss():
     assert np.isfinite(result.timeseries["approx_loss"]).all()
     assert result.config.mpc_objective == "terminal_binding_approx_loss"
     assert not any(column.endswith(("_lower", "_upper")) for column in result.timeseries)
+
+
+def test_cumulative_mpc_can_score_absolute_dynamic_cache_rows(tmp_path):
+    result = run_benchmark(RtlolaBenchmarkConfig(
+        scenario="robot_arm",
+        trace_kind=DEFAULT_TRACE_KIND,
+        length=8,
+        seeds=1,
+        budget=40,
+        horizon=2,
+        beam_width=2,
+        methods=["mpc_cumulative_beam"],
+        reference_mode="exact",
+        reference_cache=str(tmp_path / "exact.json"),
+        mpc_reference="cache",
+    ))
+
+    assert not result.failures
+    reduced = result.timeseries[result.timeseries["reducer_used"] != "none"]
+    assert not reduced.empty
+    assert set(reduced["mpc_objective"]) == {
+        "cumulative_binding_approx_loss",
+    }
+    assert np.isfinite(reduced["predicted_cost"]).all()
+
+
+def test_cached_mpc_requires_exact_non_predictive_reference():
+    with pytest.raises(ValueError, match="requires reference_mode=exact"):
+        run_benchmark(RtlolaBenchmarkConfig(
+            scenario="robot_arm",
+            trace_kind=DEFAULT_TRACE_KIND,
+            length=2,
+            seeds=1,
+            methods=["mpc_cumulative_beam"],
+            reference_mode="verdict",
+            mpc_reference="cache",
+        ))
+
+
+def test_short_notebook_cumulative_beam_matches_production_search(tmp_path):
+    scenario = benchmark_module.scenario_by_name("robot_arm")
+    trace = scenario.generate_trace(
+        12, 0, trace_kind=DEFAULT_TRACE_KIND,
+    ).events
+    reference = load_or_compute_reference(
+        trace,
+        scenario=scenario,
+        trace_kind=DEFAULT_TRACE_KIND,
+        seed=0,
+        cache_path=tmp_path / "reference.json",
+        include_approximation=True,
+    )
+
+    oracle = _run_beam_oracle(trace, reference, bound=15, horizon=5)
+    production = _run_beam_production(trace, reference, bound=15, horizon=5)
+
+    assert oracle.failed == production.failed
+    np.testing.assert_allclose(
+        oracle.losses, production.losses, rtol=1e-12, atol=1e-15,
+    )
+    assert oracle.triggers == production.triggers
+    assert oracle.state_hashes == production.state_hashes
+    assert [
+        left == right
+        for left, right, reduced in zip(
+            oracle.choices, production.choices, oracle.reduction_required,
+        ) if reduced
+    ] == [True] * sum(oracle.reduction_required)
 
 
 def test_robot_arm_tail_mpc_variants_emit_root_diagnostics():
@@ -351,7 +420,7 @@ def test_robot_arm_tail_mpc_variants_emit_root_diagnostics():
 
 
 def test_robot_arm_sparse_trigger_outputs_are_normalized():
-    events = generate_robot_arm_events(80, trace_kind="random_drift")
+    events = generate_robot_arm_events(300, trace_kind="random_drift")
     monitor = rlola.RLolaMonitor(ARM_SPEC)
     verdicts = [
         monitor.accept_event(
@@ -365,22 +434,22 @@ def test_robot_arm_sparse_trigger_outputs_are_normalized():
     assert not any(
         key in verdicts[index]
         for key in ARM_TRIGGER_KEYS
-        for index in range(58)
+        for index in range(296)
     )
-    assert verdicts[58]["Trigger#3"] == "Cannot stop before +Y boundary"
+    assert verdicts[296]["Trigger#0"] == "Toolhead drift detected"
 
     result = run_benchmark(RtlolaBenchmarkConfig(
         scenario="robot_arm",
         trace_kind="random_drift",
-        length=80,
+        length=5,
         seeds=1,
         budget=80,
         methods=["none"],
         reference_mode="verdict",
     ))
-    assert result.timeseries["Trigger#3"].sum() == 21
-    assert result.timeseries["exact_Trigger#3"].sum() == 21
-    assert result.timeseries.loc[58, "Trigger#3"]
+    assert result.timeseries["Trigger#0"].sum() == 0
+    assert result.timeseries["exact_Trigger#0"].sum() == 0
+    assert not result.timeseries.loc[0, "Trigger#0"]
 
 
 @pytest.mark.parametrize(
@@ -494,10 +563,11 @@ def test_cached_exact_loss_matches_direct_binding_state_loss(tmp_path):
     for index, event in enumerate(events, start=1):
         exact = engine.branch_step(exact_state, event, catalog["none"], budget=40)
         candidate = engine.live_step(event, catalog["girard"], budget=40, step=index)
-        total = engine.matrices(exact.state)[1]
+        dynamic, total = engine.matrices(exact.state)
         reference = RtlolaApproximationReference(
             center=total[:, 0],
-            radius=np.abs(total[:, 1:]).sum(axis=1),
+            dynamic_radius=np.abs(dynamic[:, 1:]).sum(axis=1),
+            total_radius=np.abs(total[:, 1:]).sum(axis=1),
             spec_id=engine.spec_id,
             step=index,
         )
@@ -532,9 +602,13 @@ def test_cached_exact_loss_matches_direct_binding_state_loss(tmp_path):
     payload = json.loads(cache.read_text())
     assert payload["metadata"]["capabilities"] == [
         "trigger_verdicts",
-        "approx_loss",
+        "approx_loss_dynamic",
+        "approx_loss_total",
     ]
-    assert all({"verdicts", "center", "radius"} == set(row) for row in payload["steps"])
+    assert all(
+        {"verdicts", "center", "dynamic_radius", "total_radius"} == set(row)
+        for row in payload["steps"]
+    )
     assert np.isfinite(result.timeseries["approx_loss"]).all()
     assert {"state_width", "approx_loss"} <= set(result.timeseries)
     assert {
@@ -591,10 +665,11 @@ def test_logical_zero_rows_do_not_inflate_reducer_dimension_or_cached_loss():
         metrics = candidate.metrics
         assert metrics.logical_dynamic_dimension > metrics.dimension
 
-        total = engine.matrices(exact.state)[1]
+        dynamic, total = engine.matrices(exact.state)
         reference = RtlolaApproximationReference(
             center=total[:, 0],
-            radius=np.abs(total[:, 1:]).sum(axis=1),
+            dynamic_radius=np.abs(dynamic[:, 1:]).sum(axis=1),
+            total_radius=np.abs(total[:, 1:]).sum(axis=1),
             spec_id=engine.spec_id,
             step=index,
         )

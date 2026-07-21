@@ -28,6 +28,7 @@ from pzr.rtlola.binding import (
     INTERPRETER_REVISION,
 )
 from pzr.rtlola.engine import (
+    RtlolaApproximationReference,
     RtlolaBindingError,
     RtlolaEngine,
     RtlolaEvent,
@@ -129,6 +130,7 @@ class RtlolaBenchmarkConfig:
     method_set: str = "core"
     methods: list[str] | None = None
     reference_mode: str = "exact"
+    mpc_reference: str = "rollout"
     reference_cache: str | None = None
     output_dir: str = "results/rtlola"
     mpc_objective: str = field(
@@ -357,6 +359,14 @@ def _run_benchmark_loop(
         raise ValueError("direct policies must correspond to requested methods")
     if config.reference_mode not in {"exact", "verdict", "off"}:
         raise ValueError("reference_mode must be one of: exact, verdict, off")
+    if config.mpc_reference not in {"rollout", "cache"}:
+        raise ValueError("mpc_reference must be one of: rollout, cache")
+    if config.mpc_reference == "cache" and config.reference_mode != "exact":
+        raise ValueError("mpc_reference=cache requires reference_mode=exact")
+    if config.mpc_reference == "cache" and set(methods) & set(PREDICTIVE_MPC_METHODS):
+        raise ValueError(
+            "predictive MPC cannot use exact-cache references for predicted inputs"
+        )
     if config.length < 1:
         raise ValueError("length must be >= 1")
     if config.seeds < 1:
@@ -525,6 +535,7 @@ def _run_single(
                 mpc_candidates=mpc_candidates,
                 by_name=by_name,
                 fallback=fallback,
+                reference=reference,
             )
         except (RtlolaBindingError, RtlolaNoFeasibleAction) as exc:
             return _run_failure(
@@ -621,6 +632,7 @@ def _select_method_decision(
     mpc_candidates: tuple[RtlolaAction, ...],
     by_name: dict[str, RtlolaAction],
     fallback: RtlolaAction,
+    reference: Sequence[RtlolaReferenceStep] | None,
 ) -> RtlolaSearchResult:
     """Select a native action for one benchmark event without committing it."""
     if method == EXACT_BASELINE_ACTION_NAME:
@@ -636,6 +648,12 @@ def _select_method_decision(
             pruned_branches=0,
         )
     if method == "mpc_terminal_beam" or method in PREDICTIVE_MPC_METHODS:
+        explicit_reference = _mpc_reference_steps(
+            config,
+            reference,
+            start=step,
+            count=1 + len(future),
+        )
         decision = beam_search(
             engine,
             state,
@@ -648,6 +666,7 @@ def _select_method_decision(
             none_action=by_name[EXACT_BASELINE_ACTION_NAME],
             use_reference_loss=True,
             configured_horizon=config.horizon,
+            reference_steps=explicit_reference,
         )
         if method in PREDICTIVE_MPC_METHODS:
             return replace(
@@ -658,6 +677,12 @@ def _select_method_decision(
             )
         return decision
     if method == FULL_WIDTH_MPC_METHOD:
+        explicit_reference = _mpc_reference_steps(
+            config,
+            reference,
+            start=step,
+            count=1 + len(future),
+        )
         return full_width_terminal_search(
             engine,
             state,
@@ -668,6 +693,7 @@ def _select_method_decision(
             fallback=fallback,
             none_action=by_name[EXACT_BASELINE_ACTION_NAME],
             configured_horizon=config.horizon,
+            reference_steps=explicit_reference,
         )
     if method in MPC_VARIANTS:
         variant = MPC_VARIANTS[method]
@@ -678,7 +704,16 @@ def _select_method_decision(
             trace[step + 1:step + 1 + optimized_future_count]
         )
         tail_start = step + 1 + optimized_future_count
-        tail = tuple(trace[tail_start:tail_start + config.mpc_tail_horizon])
+        tail = (
+            tuple(trace[tail_start:tail_start + config.mpc_tail_horizon])
+            if variant.uses_tail else ()
+        )
+        explicit_reference = _mpc_reference_steps(
+            config,
+            reference,
+            start=step,
+            count=1 + len(optimized_future) + len(tail),
+        )
         return search_mpc_variant(
             engine,
             state,
@@ -695,6 +730,7 @@ def _select_method_decision(
             tail_action=by_name["girard"],
             configured_horizon=config.horizon,
             configured_tail_horizon=config.mpc_tail_horizon,
+            reference_steps=explicit_reference,
         )
     return choose_static_action(
         engine,
@@ -705,6 +741,27 @@ def _select_method_decision(
         fallback=fallback,
         none_action=by_name[EXACT_BASELINE_ACTION_NAME],
     )
+
+
+def _mpc_reference_steps(
+    config: RtlolaBenchmarkConfig,
+    reference: Sequence[RtlolaReferenceStep] | None,
+    *,
+    start: int,
+    count: int,
+) -> tuple[RtlolaApproximationReference, ...] | None:
+    """Select absolute exact rows for cache-referenced MPC scoring."""
+    if config.mpc_reference == "rollout":
+        return None
+    if reference is None:
+        raise ValueError("exact MPC references are unavailable")
+    selected = tuple(reference[start:start + count])
+    if len(selected) != count:
+        raise ValueError("exact MPC reference slice is shorter than the rollout")
+    compact = tuple(step.approximation for step in selected)
+    if any(item is None for item in compact):
+        raise ValueError("exact MPC reference lacks approximation intervals")
+    return compact  # type: ignore[return-value]
 
 
 def _commit_decision(

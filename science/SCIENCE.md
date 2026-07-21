@@ -93,23 +93,23 @@ was removed by the Phase 1 schema reset and is not an active result.
 
 ## Evaluation Claims
 
-The primary completion criterion is 144 validated cells: six authoritative
+The primary completion criterion is 288 validated cells: twelve authoritative
 traces, four transform bounds, Pairwise Ranking Policy, four static reducers, and the
-two-event MPC teacher. A separate 60-cell screen compares data scale, guarded
+two-event MPC teacher. A separate 240-cell screen compares data scale, guarded
 DART, and expected-regret challengers under explicit matched references. At
-most one challenger can proceed to a 72-cell full evaluation.
+most one challenger can proceed to a 144-cell full evaluation.
 
 These matrices define experimental contracts, not results. We do not claim new
 primary or exploratory findings before the corresponding source-aware manifests
 validate every required cell without native failures or non-finite artifacts.
 In particular, no active learning result artifact exists after the Phase 1
-cleanup; a new Pairwise Ranking Policy claim requires the canonical 144 cells.
+cleanup; a new Pairwise Ranking Policy claim requires the canonical 288 cells.
 
 ## Scenarios
 
 - `omni_robot`: stochastic seeded acceleration/direction traces with one
   persistent constant calibration variable and fresh measurement uncertainty.
-- `robot_arm`: six deterministic recorded 5-DOF RLolaEval traces evaluated by
+- `robot_arm`: twelve deterministic recorded 5-DOF RLolaEval traces evaluated by
   the packaged RTLola forward kinematics, running-average drift detector,
   alpha-beta observer, and safe-stopping geofence. Five constant calibration
   variables remain outside dynamic reduction.

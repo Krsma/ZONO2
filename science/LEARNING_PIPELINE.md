@@ -47,7 +47,7 @@ random-waypoint trajectories:
 Validation trajectories never contribute gradients. The wrapper trains only
 `pairwise_ranking_policy` and evaluates it against Girard, Scott, PCA,
 Combastel, and `mpc_terminal_full_width`. The primary matrix therefore contains
-six fixed traces by four budgets by six methods, or 144 cells.
+twelve fixed traces by four budgets by six methods, or 288 cells.
 
 Exact references are prepared once per trace before parallel cells. Teacher
 collection uses ten spawned workers; post-reference evaluation uses four
@@ -58,13 +58,13 @@ thread.
 Run the primary experiment with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \
 PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
 tools/run_rtlola_learning_primary.sh
 ```
 
 The output must be fresh and source-aware. We do not claim a revised primary
-result until its manifest validates all 144 full-length cells without failures.
+result until its manifest validates all 288 full-length cells without failures.
 The Phase 1 cleanup removed every prior learning result directory, so no active
 primary, secondary, or exploratory learning result artifact exists.
 
@@ -126,7 +126,7 @@ We screen four models:
 The evaluation manifest stores three explicit comparisons: `data_scale`
 compares Clean36 with Clean20, `dart_effect` compares DART36 with Clean36, and
 `objective` compares expected regret with Clean20. The screen covers full-length
-`figure8`, `random`, and `square_drift` at four budgets, plus Girard: 60 cells.
+all twelve fixed traces at four budgets, plus Girard: 240 cells.
 
 A challenger passes only if it completes without native failures or non-finite
 artifacts; adds no false positives, false negatives, infeasible selections, or
@@ -137,22 +137,22 @@ loss reduction. Within 0.5 percentage points, we prefer Clean36, then expected
 regret, then DART.
 
 At most one challenger receives a full evaluation. That evaluation contains the
-winner, its matched reference, and Girard over six traces and four budgets, or
-72 cells. If no challenger passes, the selection manifest records that method
+winner, its matched reference, and Girard over twelve traces and four budgets,
+or 144 cells. If no challenger passes, the selection manifest records that method
 expansion stops and Pairwise Ranking Policy remains the only proposed method. We do not
 modify DART further unless DART36 passes its data-matched comparison.
 
 Run the exploration with:
 
 ```bash
-PZR_PRIMARY_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b \
-PZR_OUT_DIR=results/rtlola-learning-bounded-exploration-v1-7371495-b4cfbf4-e6ecd0b \
+PZR_PRIMARY_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \
+PZR_OUT_DIR=results/rtlola-learning-bounded-exploration-v1-01c92a2-2724b05-2257d07 \
 tools/run_rtlola_learning_exploration.sh
 ```
 
-No exploratory result is reportable before the 60-cell screen manifest and the
+No exploratory result is reportable before the 240-cell screen manifest and the
 selection manifest validate. If a challenger is promoted, its result additionally
-requires the complete 72-cell manifest.
+requires the complete 144-cell manifest.
 
 ## Artifacts
 

@@ -16,7 +16,9 @@ from pzr.rtlola.policy_evaluation import POLICY_EVALUATION_SCHEMA
 STATIC_METHODS = ("girard", "scott", "pca", "combastel")
 LEARNED_METHOD = "pairwise_ranking_policy"
 PRIMARY_TEACHER = "mpc_terminal_full_width"
-ORACLE_METHODS = ("mpc_terminal_beam", "mpc_terminal_full_width")
+ORACLE_METHODS = (
+    "mpc_terminal_beam", "mpc_cumulative_beam", "mpc_terminal_full_width",
+)
 PREDICTIVE_METHODS = (
     "mpc_terminal_beam_predictive_hold",
     "mpc_terminal_beam_predictive_linear",

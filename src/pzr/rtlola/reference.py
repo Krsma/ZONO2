@@ -21,12 +21,12 @@ from pzr.rtlola.engine import RtlolaApproximationReference, RtlolaEvent
 from pzr.rtlola.scenarios import RtlolaScenario
 
 
-REFERENCE_CACHE_SCHEMA = 2
+REFERENCE_CACHE_SCHEMA = 3
 
 
 @dataclass(frozen=True)
 class RtlolaReferenceStep:
-    """Exact verdicts and optional logical-row native-loss reference."""
+    """Exact verdicts and optional dynamic/total native-loss reference."""
 
     verdicts: dict[str, bool]
     approximation: RtlolaApproximationReference | None = None
@@ -160,7 +160,9 @@ def _load_reference_cache(
         raise ValueError(
             f"RTLola reference capabilities are invalid: {cache_path}"
         )
-    if include_approximation and "approx_loss" not in capabilities:
+    if include_approximation and not {
+        "approx_loss_dynamic", "approx_loss_total",
+    } <= set(capabilities):
         raise ValueError(
             f"RTLola reference cache lacks approximation data: {cache_path}"
         )
@@ -185,7 +187,12 @@ def _load_reference_cache(
             if include_approximation:
                 approximation = RtlolaApproximationReference(
                     center=np.asarray(row["center"], dtype=np.float64),
-                    radius=np.asarray(row["radius"], dtype=np.float64),
+                    dynamic_radius=np.asarray(
+                        row["dynamic_radius"], dtype=np.float64,
+                    ),
+                    total_radius=np.asarray(
+                        row["total_radius"], dtype=np.float64,
+                    ),
                     spec_id=str(base_metadata["spec_sha256"]),
                     step=index + 1,
                 )
@@ -219,14 +226,29 @@ def _compute_reference(
         )
         approximation = None
         if include_approximation:
-            matrix = np.asarray(monitor.current_zonotope(True), dtype=np.float64)
-            if matrix.ndim != 2 or matrix.shape[1] < 1:
+            dynamic = np.asarray(
+                monitor.current_zonotope(False), dtype=np.float64,
+            )
+            total = np.asarray(monitor.current_zonotope(True), dtype=np.float64)
+            if (
+                dynamic.ndim != 2
+                or total.ndim != 2
+                or dynamic.shape[1] < 1
+                or total.shape[1] < 1
+                or dynamic.shape[0] != total.shape[0]
+            ):
                 raise RuntimeError(
-                    f"invalid exact RTLola zonotope shape at step {index}: {matrix.shape}"
+                    "invalid exact RTLola zonotope shapes at step "
+                    f"{index}: dynamic={dynamic.shape}, total={total.shape}"
+                )
+            if not np.array_equal(dynamic[:, 0], total[:, 0]):
+                raise RuntimeError(
+                    f"dynamic/total exact centers differ at step {index}"
                 )
             approximation = RtlolaApproximationReference(
-                center=matrix[:, 0],
-                radius=np.abs(matrix[:, 1:]).sum(axis=1),
+                center=total[:, 0],
+                dynamic_radius=np.abs(dynamic[:, 1:]).sum(axis=1),
+                total_radius=np.abs(total[:, 1:]).sum(axis=1),
                 spec_id=str(base_metadata["spec_sha256"]),
                 step=index + 1,
             )
@@ -253,7 +275,10 @@ def _write_reference_cache(
             **base_metadata,
             "capabilities": [
                 "trigger_verdicts",
-                *(["approx_loss"] if include_approximation else []),
+                *(
+                    ["approx_loss_dynamic", "approx_loss_total"]
+                    if include_approximation else []
+                ),
             ],
         },
         "steps": [
@@ -262,7 +287,10 @@ def _write_reference_cache(
                 **(
                     {
                         "center": step.approximation.center.tolist(),
-                        "radius": step.approximation.radius.tolist(),
+                        "dynamic_radius": (
+                            step.approximation.dynamic_radius.tolist()
+                        ),
+                        "total_radius": step.approximation.total_radius.tolist(),
                     }
                     if step.approximation is not None else {}
                 ),

@@ -17,6 +17,7 @@ from pzr.rtlola.policy_reporting import (
     comparison_to_reference,
     explicit_policy_comparisons,
 )
+from pzr.rtlola.robot_arm import TRACE_KINDS
 
 
 MODEL_NAMES = (
@@ -307,7 +308,7 @@ def test_best_static_reports_undefined_trigger_metrics_without_dropping_cells():
     assert pd.isna(fpr["best_static_value"])
 
 
-def test_primary_evaluation_matrix_contains_144_validated_cells(tmp_path, monkeypatch):
+def test_primary_evaluation_matrix_contains_288_validated_cells(tmp_path, monkeypatch):
     monkeypatch.setattr(evaluation, "prepare_reference_cache", _mock_prepare_reference)
     monkeypatch.setattr(
         evaluation, "run_benchmark",
@@ -321,15 +322,12 @@ def test_primary_evaluation_matrix_contains_144_validated_cells(tmp_path, monkey
     config = FixedPolicyEvaluationConfig(
         output=tmp_path,
         model_names=("pairwise_ranking_policy",),
-        trace_kinds=(
-            "figure8", "figure8_drift", "random", "random_drift",
-            "square", "square_drift",
-        ),
+        trace_kinds=TRACE_KINDS,
         budgets=(40, 80, 120, 180),
         benchmark_methods=("girard", "scott", "pca", "combastel", "mpc_terminal_full_width"),
         candidate_names=("girard", "scott", "pca", "combastel"),
         length=1,
-        expected_cell_count=144,
+        expected_cell_count=288,
     )
 
     _, summary = run_fixed_policy_evaluation(
@@ -341,14 +339,14 @@ def test_primary_evaluation_matrix_contains_144_validated_cells(tmp_path, monkey
         source_sha256="source",
     )
 
-    assert len(summary) == 144
+    assert len(summary) == 288
 
 
 def test_exploratory_and_promoted_matrix_cell_counts_are_declared():
     screen = FixedPolicyEvaluationConfig(
         output=Path("screen"),
         model_names=("clean20", "clean36", "dart36", "expected20"),
-        trace_kinds=("figure8", "random", "square_drift"),
+        trace_kinds=TRACE_KINDS,
         budgets=(40, 80, 120, 180), benchmark_methods=("girard",),
         candidate_names=("girard", "scott", "pca", "combastel"),
         comparisons=(
@@ -356,30 +354,25 @@ def test_exploratory_and_promoted_matrix_cell_counts_are_declared():
             PolicyComparison("dart_effect", "dart36", "clean36"),
             PolicyComparison("objective", "expected20", "clean20"),
         ),
-        expected_cell_count=60,
+        expected_cell_count=240,
     )
-    assert screen.expected_cell_count == 60
+    assert screen.expected_cell_count == 240
     promoted = FixedPolicyEvaluationConfig(
         output=Path("promoted"), model_names=("winner", "reference"),
-        trace_kinds=(
-            "figure8", "figure8_drift", "random", "random_drift", "square", "square_drift",
-        ),
+        trace_kinds=TRACE_KINDS,
         budgets=(40, 80, 120, 180), benchmark_methods=("girard",),
         candidate_names=("girard", "scott", "pca", "combastel"),
         comparisons=(PolicyComparison("promotion", "winner", "reference"),),
-        expected_cell_count=72,
+        expected_cell_count=144,
     )
-    assert promoted.expected_cell_count == 72
+    assert promoted.expected_cell_count == 144
 
 
-def test_mpc_addon_matrix_declares_168_cells_and_prediction_schedule():
+def test_mpc_addon_matrix_declares_336_cells_and_prediction_schedule():
     config = FixedPolicyEvaluationConfig(
         output=Path("mpc-addon"),
         model_names=("pairwise_ranking_policy",),
-        trace_kinds=(
-            "figure8", "figure8_drift", "random", "random_drift",
-            "square", "square_drift",
-        ),
+        trace_kinds=TRACE_KINDS,
         budgets=(40, 80, 120, 180),
         benchmark_methods=(
             "girard", "mpc_terminal_beam", "mpc_terminal_full_width",
@@ -391,9 +384,9 @@ def test_mpc_addon_matrix_declares_168_cells_and_prediction_schedule():
         horizon=3,
         beam_width=4,
         prediction_step_seconds=0.1,
-        expected_cell_count=168,
+        expected_cell_count=336,
     )
-    assert config.expected_cell_count == 168
+    assert config.expected_cell_count == 336
 
 
 def test_evaluation_rejects_invalid_explicit_comparisons_and_cell_counts(tmp_path):
@@ -407,5 +400,5 @@ def test_evaluation_rejects_invalid_explicit_comparisons_and_cell_counts(tmp_pat
         FixedPolicyEvaluationConfig(
             output=tmp_path, model_names=("clean",), trace_kinds=("figure8",),
             budgets=(40,), benchmark_methods=("girard",), candidate_names=("girard",),
-            expected_cell_count=144,
+            expected_cell_count=288,
         )

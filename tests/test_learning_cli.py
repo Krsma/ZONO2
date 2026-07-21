@@ -186,7 +186,9 @@ def test_evaluate_defaults_to_all_fixed_traces_and_benchmark_methods(tmp_path):
         "--output", str(tmp_path / "evaluation"), "--budgets", "40,80",
     ])
     assert args.trace_kinds == (
-        "figure8", "figure8_drift", "random", "random_drift", "square", "square_drift",
+        "figure8", "figure8_drift", "figure8_geofence", "figure8_drift_geofence",
+        "random", "random_drift", "random_geofence", "random_drift_geofence",
+        "square", "square_drift", "square_geofence", "square_drift_geofence",
     )
     assert args.benchmark_methods == ("girard", "scott", "pca", "combastel", "mpc_terminal_full_width")
     assert args.length is None

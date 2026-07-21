@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b}"
+OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07}"
 TRACE_STORE="${PZR_TRACE_STORE:-$OUT_DIR/traces}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
@@ -10,7 +10,7 @@ EVENT_COUNT="${PZR_EVENT_COUNT:-500}"
 BUDGETS="${PZR_BUDGETS:-40,80,120,180}"
 CANDIDATES="${PZR_CANDIDATES:-girard,scott,pca,combastel}"
 CONDITIONS="${PZR_CONDITIONS:-random_waypoint}"
-TRACE_KINDS="${PZR_TRACE_KINDS:-figure8,figure8_drift,random,random_drift,square,square_drift}"
+TRACE_KINDS="${PZR_TRACE_KINDS:-figure8,figure8_drift,figure8_geofence,figure8_drift_geofence,random,random_drift,random_geofence,random_drift_geofence,square,square_drift,square_geofence,square_drift_geofence}"
 EPOCHS="${PZR_EPOCHS:-100}"
 BATCH_SIZE="${PZR_BATCH_SIZE:-256}"
 PATIENCE="${PZR_PATIENCE:-10}"
@@ -87,7 +87,7 @@ run_logged evaluate_fixed \
     --trace-kinds "$TRACE_KINDS" \
     --benchmark-methods girard,scott,pca,combastel,mpc_terminal_full_width \
     --horizon 1 \
-    --expected-cell-count 144 \
+    --expected-cell-count 288 \
     --workers "$EVALUATION_WORKERS" \
     "${length_args[@]}"
 

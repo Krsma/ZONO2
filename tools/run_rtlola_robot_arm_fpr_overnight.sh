@@ -3,13 +3,13 @@ set -u
 set -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-arm-mpc-variants-b4cfbf4-e6ecd0b-exact-metrics}"
+OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-arm-mpc-variants-01c92a2-2257d07-exact-metrics}"
 REFERENCE_DIR="${PZR_REFERENCE_DIR:-$OUT_DIR/references}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
 LENGTH_OVERRIDE="${PZR_LENGTH:-}"
 BUDGETS="${PZR_BUDGETS:-40,80,120,180}"
-EVAL_TRACES="${PZR_EVAL_TRACES:-figure8,figure8_drift,random,random_drift,square,square_drift}"
+EVAL_TRACES="${PZR_EVAL_TRACES:-figure8,figure8_drift,figure8_geofence,figure8_drift_geofence,random,random_drift,random_geofence,random_drift_geofence,square,square_drift,square_geofence,square_drift_geofence}"
 METHODS="${PZR_METHODS:-girard,scott,pca,combastel,mpc_terminal_beam,mpc_terminal_girard_tail,mpc_cumulative_girard_tail,mpc_one_step_girard_rollout}"
 HORIZON="${PZR_HORIZON:-4}"
 BEAM_WIDTH="${PZR_BEAM_WIDTH:-4}"

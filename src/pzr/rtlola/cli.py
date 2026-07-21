@@ -43,8 +43,8 @@ def main(argv: list[str] | None = None) -> None:
         "--trace-kind",
         default="default",
         help=(
-            "RTLola trace kind; robot_arm supports figure8, figure8_drift, "
-            "random, random_drift, square, square_drift"
+            "RTLola trace kind; robot_arm supports the compliant, drift, "
+            "geofence, and drift-geofence variants of figure8, random, and square"
         ),
     )
     parser.add_argument(
@@ -72,6 +72,15 @@ def main(argv: list[str] | None = None) -> None:
         type=Path,
         default=None,
         help="Optional JSON cache for exact trigger and approximation references",
+    )
+    parser.add_argument(
+        "--mpc-reference",
+        choices=["rollout", "cache"],
+        default="rollout",
+        help=(
+            "score MPC against an unreduced local rollout (default) or the "
+            "absolute compact exact-reference cache"
+        ),
     )
     parser.add_argument(
         "--reference-only",
@@ -110,6 +119,7 @@ def main(argv: list[str] | None = None) -> None:
             str(args.reference_cache)
             if args.reference_cache is not None else None
         ),
+        "mpc_reference": args.mpc_reference,
         "output_dir": str(args.output),
         "mpc_tail_horizon": args.mpc_tail_horizon,
         "mpc_root_beam_width": args.mpc_root_beam_width,

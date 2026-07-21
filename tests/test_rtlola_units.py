@@ -891,6 +891,54 @@ def test_tail_variants_preserve_roots_and_score_distinct_objectives():
     assert "girard" not in endpoint.predicted_sequence
 
 
+def test_cumulative_beam_preserves_candidate_order_for_exact_ties():
+    none = RtlolaAction("none", lambda _budget: object(), explicit_budget=False)
+    fallback = RtlolaAction(
+        "interval", lambda _budget: object(), explicit_budget=False,
+    )
+    first = RtlolaAction("z_first", lambda _budget: object(), explicit_budget=False)
+    second = RtlolaAction("a_second", lambda _budget: object(), explicit_budget=False)
+
+    class FakeEngine:
+        def metrics(self, _state):
+            return SimpleNamespace(dynamic_generator_count=99, dimension=1)
+
+        def branch_step(self, state, event, action, config_budget):
+            del event, config_budget
+            next_state = SimpleNamespace(
+                depth=state.depth + 1,
+                path=(*state.path, action.name),
+            )
+            return SimpleNamespace(
+                verdict={}, state=next_state, action_name=action.name,
+                metrics=SimpleNamespace(state_width=0.0),
+            )
+
+        def approx_loss(self, reference, candidate):
+            del reference, candidate
+            return 1.0
+
+    result = search_mpc_variant(
+        FakeEngine(),
+        SimpleNamespace(depth=0, path=()),
+        object(),
+        (object(),),
+        (),
+        (first, second),
+        budget=10,
+        beam_width=4,
+        variant=MPC_VARIANTS["mpc_cumulative_beam"],
+        root_beam_width=4,
+        fallback=fallback,
+        none_action=none,
+        tail_action=first,
+    )
+
+    assert result.first_action.name == "z_first"
+    assert result.predicted_cost == pytest.approx(2.0)
+    assert result.mpc_objective == "cumulative_binding_approx_loss"
+
+
 def test_root_tail_branches_only_at_current_event():
     none = RtlolaAction("none", lambda _budget: object(), explicit_budget=False)
     girard = RtlolaAction("girard", lambda _budget: object(), explicit_budget=False)

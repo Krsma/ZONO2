@@ -1,15 +1,15 @@
 # RTLola Binding-Native Reference Notes
 
-Date: 2026-07-09
+Updated: 2026-07-20
 
 ## Context
 
 PZR now uses the zero-row-aware RTLola stack:
 
-- binding revision `7371495a113694ebb9958061f93910e7f65e84f3`
-- interpreter revision `b4cfbf4680e6641f131a64d6d9e9ef57ec228976`
+- binding revision `01c92a2bfac58755e3b832bb0094816f3f36e1d1`
+- interpreter revision `2724b05ae6c62ed0df14f1401ed8db89472725a6`
 
-Interpreter `b4cfbf4` exposes logical all-zero dynamic rows when exporting
+The current interpreter retains the `b4cfbf4` logical-zero-row fix when exporting
 evaluator states. Native transformations still construct compact nonzero-row
 zonotopes for reduction. That split is useful for PZR: exact-reference caches
 can compare full logical rows, while reducer budget checks must continue to use
@@ -111,10 +111,10 @@ search scoring, and exact-reference reporting.
 
 ## Current Decision
 
-Adopt `b4cfbf4` with a narrow PZR compatibility fix:
+Retain the logical-zero-row contract with a narrow PZR compatibility fix:
 
-- exact-reference caches continue storing full logical center/radius vectors
-  from `current_zonotope(True)`;
+- exact-reference caches store one full logical center plus dynamic and total
+  radius vectors from `current_zonotope(False/True)`;
 - cached exact-reference comparison continues checking full logical dimensions
   and centers before invoking binding-native approximation loss;
 - `RtlolaMatrixMetrics.dimension` remains the compact reducer dimension, derived
@@ -127,3 +127,7 @@ The binding-native reference/statistics redesign remains the preferred later
 cleanup. PZR still should not infer stable row identities for semantic decisions,
 and only `rlola_python_binding.ZonotopeConfig` transforms may mutate monitor
 state.
+
+Binding `01c92a2` additionally exposes public affine verdict intervals and
+volume-ratio methods. PZR accepts affine intervals but intentionally does not
+use volume ratios in objectives, caches, reports, or learning targets.

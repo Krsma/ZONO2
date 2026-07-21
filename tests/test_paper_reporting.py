@@ -65,7 +65,9 @@ def _write_evaluation(root: Path, methods, *, anchor_offset: float = 0.0):
             "method": method,
             "candidate_names": ["girard", "scott", "pca", "combastel"],
             "reference_mode": "exact",
-            "exact_reference_contract": "trigger_booleans_and_logical_row_center_radius_v1",
+            "exact_reference_contract": (
+                "trigger_booleans_and_logical_row_center_dynamic_total_radius_v2"
+            ),
             "model_sha256": "model-hash" if method == "pairwise_ranking_policy" else None,
             "pzr_source_sha256": "source-hash",
             "exact_reference_sha256": "reference-hash",
@@ -97,12 +99,12 @@ def test_paper_reporting_joins_unique_methods_and_checks_anchors(tmp_path):
 
     joined = write_paper_reports(PaperReportConfig(primary, addon, output))
 
-    assert len(joined) == 10
-    assert len(pd.read_csv(output / "main_table.csv")) == 8
+    assert len(joined) == 11
+    assert len(pd.read_csv(output / "main_table.csv")) == 9
     assert len(pd.read_csv(output / "prediction_ablation.csv")) == 3
-    assert len(pd.read_csv(output / "safety_accounting.csv")) == 10
+    assert len(pd.read_csv(output / "safety_accounting.csv")) == 11
     manifest = json.loads((output / "manifest.json").read_text())
-    assert manifest["cell_count"] == 10
+    assert manifest["cell_count"] == 11
     assert manifest["headline_online_mpc"] == "mpc_terminal_beam_predictive_linear"
 
 

@@ -6,6 +6,7 @@ import pytest
 from pzr.rtlola.robot_arm_random import (
     RANDOM_WAYPOINT_CONDITIONS,
     RandomWaypointConfig,
+    _compute_waypoint_geofence,
     _make_waypoint_path,
     _nearest_neighbor_sort,
     generate_random_waypoint_trace,
@@ -42,6 +43,22 @@ def test_random_waypoint_conditions_have_expected_fault_flags():
         config = RandomWaypointConfig(seed=1, condition=condition, event_count=2)
         assert config.has_drift == ("drift" in condition)
         assert config.has_geofence_fault == ("geofence" in condition)
+
+
+def test_geofence_fault_defaults_and_walls_match_new_upstream_generator():
+    config = RandomWaypointConfig(
+        seed=1, condition="random_waypoint_geofence", event_count=2,
+    )
+    assert config.effective_sv_threshold == 2.0
+    assert config.fault_rotation == 0.5
+    waypoints = np.asarray([
+        [-1.0, 0.5, 0.0],
+        [2.0, -3.0, 0.0],
+        [0.0, 1.0, 0.0],
+    ])
+    assert _compute_waypoint_geofence(waypoints, 0.25) == (
+        -1.25, 2.25, -3.25, 1.25,
+    )
 
 
 def test_random_waypoint_generation_is_deterministic_and_persistable(tmp_path):

@@ -2,8 +2,8 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRIMARY_DIR="${PZR_PRIMARY_DIR:-$ROOT_DIR/results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b}"
-OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-bounded-exploration-v1-7371495-b4cfbf4-e6ecd0b}"
+PRIMARY_DIR="${PZR_PRIMARY_DIR:-$ROOT_DIR/results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07}"
+OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-bounded-exploration-v1-01c92a2-2724b05-2257d07}"
 TRACE_STORE="${PZR_EXTRA_TRACE_STORE:-$OUT_DIR/traces-extra-clean16}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
@@ -11,8 +11,8 @@ EVENT_COUNT="${PZR_EVENT_COUNT:-500}"
 BUDGETS="${PZR_BUDGETS:-40,80,120,180}"
 CANDIDATES="${PZR_CANDIDATES:-girard,scott,pca,combastel}"
 CONDITIONS="${PZR_CONDITIONS:-random_waypoint}"
-SCREEN_TRACE_KINDS="${PZR_SCREEN_TRACE_KINDS:-figure8,random,square_drift}"
-FULL_TRACE_KINDS="${PZR_FULL_TRACE_KINDS:-figure8,figure8_drift,random,random_drift,square,square_drift}"
+SCREEN_TRACE_KINDS="${PZR_SCREEN_TRACE_KINDS:-figure8,figure8_drift,figure8_geofence,figure8_drift_geofence,random,random_drift,random_geofence,random_drift_geofence,square,square_drift,square_geofence,square_drift_geofence}"
+FULL_TRACE_KINDS="${PZR_FULL_TRACE_KINDS:-figure8,figure8_drift,figure8_geofence,figure8_drift_geofence,random,random_drift,random_geofence,random_drift_geofence,square,square_drift,square_geofence,square_drift_geofence}"
 EPOCHS="${PZR_EPOCHS:-100}"
 BATCH_SIZE="${PZR_BATCH_SIZE:-256}"
 PATIENCE="${PZR_PATIENCE:-10}"
@@ -153,7 +153,7 @@ run_logged evaluate_screen \
     --candidates "$CANDIDATES" \
     --trace-kinds "$SCREEN_TRACE_KINDS" \
     --benchmark-methods girard \
-    --expected-cell-count 60 \
+    --expected-cell-count 240 \
     --workers "$EVALUATION_WORKERS" \
     "${length_args[@]}"
 
@@ -165,7 +165,7 @@ run_logged select_challenger \
     --model "pairwise_ranking_policy_dart36=$OUT_DIR/model-pairwise-ranking-policy-dart36" \
     --model "expected_regret_clean20=$OUT_DIR/model-expected-regret-clean20" \
     --output "$OUT_DIR/selection" \
-    --expected-cell-count 60
+    --expected-cell-count 240
 
 WINNER="$("$PYTHON" -c 'import json, sys; value=json.load(open(sys.argv[1]))["winner"]; print("" if value is None else value["challenger"])' "$OUT_DIR/selection/selection.json")"
 if [[ -z "$WINNER" ]]; then
@@ -196,7 +196,7 @@ run_logged evaluate_promoted \
     --candidates "$CANDIDATES" \
     --trace-kinds "$FULL_TRACE_KINDS" \
     --benchmark-methods girard \
-    --expected-cell-count 72 \
+    --expected-cell-count 144 \
     --workers "$EVALUATION_WORKERS" \
     "${length_args[@]}"
 

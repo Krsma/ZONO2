@@ -72,7 +72,7 @@ pzr-learning train --dataset clean=/tmp/pzr-learning/clean/dataset \
 Run the paper-facing Pairwise Ranking Policy experiment with:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b \
+PZR_OUT_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \
   PZR_COLLECTION_WORKERS=10 PZR_EVALUATION_WORKERS=4 \
   tools/run_rtlola_learning_primary.sh
 ```
@@ -81,13 +81,13 @@ The primary run generates 26 independent 500-event random-waypoint traces. It
 uses seeds 0--19 for teacher training and 20--25 for clean validation, trains
 only `pairwise_ranking_policy`, and compares it with Girard, Scott, PCA,
 Combastel, and the two-event full-width MPC teacher. The completion criterion is
-exactly 144 validated cells: six full traces by four budgets by six methods.
-No revised primary result exists until the fresh manifest records all 144 cells
+exactly 288 validated cells: twelve full traces by four budgets by six methods.
+No revised primary result exists until the fresh manifest records all 288 cells
 without failures.
 
 The Phase 1 schema reset removed all prior learning result directories. No
 active primary, secondary, or exploratory learning result artifact exists;
-new Pairwise Ranking Policy claims require a fresh canonical 144-cell manifest.
+new Pairwise Ranking Policy claims require a fresh canonical 288-cell manifest.
 
 Soft-KL and guarded one-round DART remain available as completed secondary
 ablations. Their historical result artifact is no longer active. The observed
@@ -97,14 +97,14 @@ so neither method appears in the default pipeline.
 Run the separate bounded exploration with:
 
 ```bash
-PZR_PRIMARY_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b \
-  PZR_OUT_DIR=results/rtlola-learning-bounded-exploration-v1-7371495-b4cfbf4-e6ecd0b \
+PZR_PRIMARY_DIR=results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07 \
+  PZR_OUT_DIR=results/rtlola-learning-bounded-exploration-v1-01c92a2-2724b05-2257d07 \
   tools/run_rtlola_learning_exploration.sh
 ```
 
 This workflow trains the data-matched Clean36 and DART36 controls plus an
 expected-regret Clean20 challenger. It screens four learned models and Girard
-over 60 full-length cells. At most one challenger can proceed to a 72-cell full
+over 240 full-length cells. At most one challenger can proceed to a 144-cell full
 evaluation; if none meets every safety, loss, cell-regression, and clean-
 validation gate, the workflow records that method expansion should stop.
 
@@ -140,11 +140,11 @@ Learning runs are intentionally separate from `pzr-benchmark`.
 Prepare or resume the full FPR-first robot-arm sweep:
 
 ```bash
-PZR_OUT_DIR=results/rtlola-arm-mpc-variants-a143dd6-e6ecd0b-exact-metrics \
+PZR_OUT_DIR=results/rtlola-arm-mpc-variants-01c92a2-2257d07-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 ```
 
-The overnight wrapper evaluates all six packaged RLolaEval traces at their full
+The overnight wrapper evaluates all twelve packaged RLolaEval traces at their full
 authoritative lengths and at budgets `40,80,120,180`, with Girard, Scott,
 PCA, Combastel, legacy beam MPC, root-tail MPC, endpoint-tail
 MPC, and integrated-tail MPC. Tail variants default to an eight-event Girard
@@ -273,9 +273,10 @@ method independently for FPR, FNR, approximation loss, and state width. The
 composition table reports both all-step and reduction-only MPC action shares.
 
 The packaged robot-arm assets come from RLolaEval commit
-`e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5`. Supported traces are `figure8`,
-`figure8_drift`, `random`, `random_drift`, `square`, and `square_drift`;
-`figure8_drift` is the default.
+`2257d074173a6dd475c042ef9a82cd8755a81ac3`. Each of `figure8`, `random`, and
+`square` has compliant, drift, geofence, and drift-geofence variants;
+`figure8_drift` is the default. Use `pzr-rtlola-parity` to validate all 576
+notebook cells and the production/oracle throughput gate before new full runs.
 
 Generated files under `results/` must be regenerated through the CLI rather
 than edited manually.

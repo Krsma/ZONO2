@@ -15,31 +15,49 @@ from pzr.rtlola.engine import RtlolaEvent
 TRACE_KINDS = (
     "figure8",
     "figure8_drift",
+    "figure8_geofence",
+    "figure8_drift_geofence",
     "random",
     "random_drift",
+    "random_geofence",
+    "random_drift_geofence",
     "square",
     "square_drift",
+    "square_geofence",
+    "square_drift_geofence",
 )
 DEFAULT_TRACE_KIND = "figure8_drift"
-RLOLAEVAL_REVISION = "e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5"
+RLOLAEVAL_REVISION = "2257d074173a6dd475c042ef9a82cd8755a81ac3"
 ROBOT_ARM_SPEC_SHA256 = (
     "aab5b768d872bc4f5b6dc11b96805c2d451cc5c91eb573225f6b0e246cee6acc"
 )
 ROBOT_ARM_TRACE_SHA256 = {
     "figure8": "fa07293b1a30c409ede95162f359f087f8c2e77e0df07a333d0045978150f309",
     "figure8_drift": "1a9def5a128a236f0e246f9d7403869ec676e62617a3cf4edf9c904e841362f7",
-    "random": "a1cf0171ae217de251ee988ec6f8997b74acc9dde4e4c631a649f4d69597a898",
-    "random_drift": "2496816715303b30d1bb393d0d3c834e584a0fe1c7e008e100822418072caddc",
+    "figure8_geofence": "f2d68199baadd956ccfa5b43688cbb973956d7367aa2dc986123f6bb25d28ede",
+    "figure8_drift_geofence": "e055f7faeade23f9f30952f7c0871bf3803bb87a09c3a16ba3ef09f2bba9cd03",
+    "random": "1c93cebfd7b2b3169d8e8eba7922bce742b68eeef17f53231c38d65be80198ff",
+    "random_drift": "9a71cfdb8caa9da63c5fb9dd0f8be45f75e9cee2889b10d0efe4b60447823175",
+    "random_geofence": "b4d6bb57a3cf39975b5db287c0df69abc7611be71ac289de5a9017dac0295879",
+    "random_drift_geofence": "c010201e0985b950912377c08e882942546ff5add73d9e3614389b01d23a8936",
     "square": "c53282d3cbb5cbe25752215e5a5bc329ccd94e290aa449b932dc776a7ca3dc5c",
     "square_drift": "335c3c2a40e43ca87fca9fe1a68fe6d9a62dfbaee6af863e227a40d8a8766356",
+    "square_geofence": "85bfbe0419ead65ccfd7746cf38997f76dc1903911121bdaa6f6229c7a818be2",
+    "square_drift_geofence": "783840ab31f9469b9b49868f08ebbbbfc2ac184e2cba3f5d851dd4cb604f5285",
 }
 ROBOT_ARM_TRACE_ROWS = {
     "figure8": 2340,
     "figure8_drift": 2340,
+    "figure8_geofence": 2340,
+    "figure8_drift_geofence": 2340,
     "random": 1495,
     "random_drift": 1433,
+    "random_geofence": 1063,
+    "random_drift_geofence": 1105,
     "square": 1983,
     "square_drift": 1983,
+    "square_geofence": 1983,
+    "square_drift_geofence": 1983,
 }
 
 MODEL_DIR = Path(__file__).parents[1] / "envs" / "mujoco_models" / "low_cost_robot_arm"

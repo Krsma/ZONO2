@@ -2,14 +2,14 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PRIMARY_DIR="${PZR_PRIMARY_DIR:-$ROOT_DIR/results/rtlola-learning-pairwise-ranking-policy-v2-7371495-b4cfbf4-e6ecd0b}"
-OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-online-mpc-addon-v1-7371495-b4cfbf4-e6ecd0b}"
+PRIMARY_DIR="${PZR_PRIMARY_DIR:-$ROOT_DIR/results/rtlola-learning-pairwise-ranking-policy-v2-01c92a2-2724b05-2257d07}"
+OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-learning-online-mpc-addon-v1-01c92a2-2724b05-2257d07}"
 MODEL_DIR="${PZR_MODEL_DIR:-$PRIMARY_DIR/model-pairwise-ranking-policy}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
 BUDGETS="${PZR_BUDGETS:-40,80,120,180}"
 CANDIDATES="${PZR_CANDIDATES:-girard,scott,pca,combastel}"
-TRACE_KINDS="${PZR_TRACE_KINDS:-figure8,figure8_drift,random,random_drift,square,square_drift}"
+TRACE_KINDS="${PZR_TRACE_KINDS:-figure8,figure8_drift,figure8_geofence,figure8_drift_geofence,random,random_drift,random_geofence,random_drift_geofence,square,square_drift,square_geofence,square_drift_geofence}"
 EVAL_LENGTH="${PZR_EVAL_LENGTH:-}"
 EVALUATION_WORKERS="${PZR_EVALUATION_WORKERS:-4}"
 PREDICTION_STEP_SECONDS="${PZR_PREDICTION_STEP_SECONDS:-0.1}"
@@ -41,11 +41,11 @@ fi
     --budgets "$BUDGETS" \
     --candidates "$CANDIDATES" \
     --trace-kinds "$TRACE_KINDS" \
-    --benchmark-methods girard,mpc_terminal_beam,mpc_terminal_full_width,mpc_terminal_beam_predictive_hold,mpc_terminal_beam_predictive_linear,mpc_terminal_beam_predictive_quadratic \
+    --benchmark-methods girard,mpc_terminal_beam,mpc_cumulative_beam,mpc_terminal_full_width,mpc_terminal_beam_predictive_hold,mpc_terminal_beam_predictive_linear,mpc_terminal_beam_predictive_quadratic \
     --horizon 3 \
     --beam-width 4 \
     --prediction-step-seconds "$PREDICTION_STEP_SECONDS" \
-    --expected-cell-count 168 \
+    --expected-cell-count 384 \
     --workers "$EVALUATION_WORKERS" \
     "${length_args[@]}" \
     2>&1 | tee "$OUT_DIR/logs/evaluate_mpc_addon.log"

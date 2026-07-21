@@ -403,7 +403,9 @@ def _cell_identity(
         "prediction_step_seconds": config.prediction_step_seconds,
         "prediction_schedule": "current_event_time_plus_fixed_step_multiples",
         "reference_mode": "exact",
-        "exact_reference_contract": "trigger_booleans_and_logical_row_center_radius_v1",
+        "exact_reference_contract": (
+            "trigger_booleans_and_logical_row_center_dynamic_total_radius_v2"
+        ),
         "model_sha256": model_sha256 if method in config.model_names else None,
         "pzr_source_sha256": source_sha256,
         "exact_reference_sha256": exact_reference_sha256,

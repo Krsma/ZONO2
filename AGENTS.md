@@ -37,7 +37,7 @@ pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
 tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
   --output /tmp/pzr-arm
 
-PZR_OUT_DIR=results/rtlola-arm-mpc-variants-b4cfbf4-e6ecd0b-exact-metrics \
+PZR_OUT_DIR=results/rtlola-arm-mpc-variants-01c92a2-2257d07-exact-metrics \
   tools/run_rtlola_robot_arm_fpr_overnight.sh
 
 pzr-learning generate --output /tmp/pzr-learning/traces --event-count 10 \
@@ -53,16 +53,16 @@ pzr-learning train --dataset clean=/tmp/pzr-learning/dataset \
 ## Current RTLola Experiment Configuration
 
 The packaged robot-arm specification is
-`src/pzr/rtlola/specs/robot_arm.lola`. It and the six trace CSVs were imported
-from RLolaEval revision `e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5`;
+`src/pzr/rtlola/specs/robot_arm.lola`. It and the twelve trace CSVs were imported
+from RLolaEval revision `2257d074173a6dd475c042ef9a82cd8755a81ac3`;
 the expected specification SHA-256 is
 `aab5b768d872bc4f5b6dc11b96805c2d451cc5c91eb573225f6b0e246cee6acc`.
 Do not substitute an older local robot-arm specification.
 
 The required native stack is:
 
-- binding revision `7371495a113694ebb9958061f93910e7f65e84f3`;
-- interpreter revision `b4cfbf4680e6641f131a64d6d9e9ef57ec228976`;
+- binding revision `01c92a2bfac58755e3b832bb0094816f3f36e1d1`;
+- interpreter revision `2724b05ae6c62ed0df14f1401ed8db89472725a6`;
 - a `maturin build --release`/release-profile binding.
 
 `src/pzr/rtlola/binding.py` rejects a mismatched interpreter or debug build.
@@ -80,19 +80,23 @@ cleanup and bounded-exploration integration was 129 passing tests with no skips 
 
 The authoritative trace kinds and full lengths are:
 
-- `figure8` and `figure8_drift`: 2,340 events each;
+- all four `figure8` variants: 2,340 events each;
 - `random`: 1,495 events;
 - `random_drift`: 1,433 events;
-- `square` and `square_drift`: 1,983 events each.
+- `random_geofence`: 1,063 events;
+- `random_drift_geofence`: 1,105 events;
+- all four `square` variants: 1,983 events each.
 
-`figure8` and `square` are nominal structured paths, their `_drift` variants
-add progressive tool-center drift, `random` explores the geofence broadly, and
-`random_drift` combines random exploration with progressive drift. Do not pool
-them without preserving `trace_kind`.
+Each path family has compliant, `_drift`, `_geofence`, and `_drift_geofence`
+conditions. Drift adds progressive tool-center drift; geofence conditions add
+progressive path rotation against waypoint-derived walls. Do not pool them
+without preserving `trace_kind`.
 
 The emitted MPC methods are:
 
 - `mpc_terminal_beam`: multi-action beam search, terminal loss only;
+- `mpc_cumulative_beam`: global beam search with undiscounted cumulative
+  explicit-horizon loss and no tail;
 - `mpc_terminal_girard_tail`: beam search scored at the end of a fixed Girard
   tail;
 - `mpc_cumulative_girard_tail`: cumulative explicit-horizon and Girard-tail
@@ -111,7 +115,7 @@ Combined tables are built only after all stages finish.
 The previous robot-arm artifacts used the obsolete verdict-only reference and
 long metric-column schema and were removed on 2026-07-05. There is currently
 no active full-suite artifact. Do not quote the earlier partial sweep as a
-completed six-trace evaluation.
+completed twelve-trace evaluation.
 
 The focused Girard-versus-MPC run started on 2026-07-06 was deliberately
 terminated before completing the square traces. Its partial artifact is not a
@@ -165,12 +169,12 @@ Pairwise Ranking Policy is the sole paper-facing learned method. The primary exp
 pre-generates 26 independent 500-event nominal random-waypoint traces. Clean
 teacher train/validation seeds are 0--19/20--25. It evaluates
 `pairwise_ranking_policy` against Girard, Scott, PCA, Combastel, and the two-event
-`mpc_terminal_full_width` teacher: 144 cells in total. Do not claim a revised
-primary result until a fresh source-aware manifest validates all 144 cells.
+`mpc_terminal_full_width` teacher: 288 cells in total. Do not claim a revised
+primary result until a fresh source-aware manifest validates all 288 cells.
 
 The Phase 1 cleanup reset all prior learning result directories. There is no
 active primary, secondary, or exploratory learning result artifact. New
-Pairwise Ranking Policy claims require a fresh canonical 144-cell manifest.
+Pairwise Ranking Policy claims require a fresh canonical 288-cell manifest.
 
 Soft-KL and guarded DART remain completed secondary ablations and are not part
 of the default wrapper. Their historical result artifact was removed during the
@@ -185,14 +189,14 @@ every disturbance.
 The bounded exploration generates extra seeds 26--41 and collects those same 16
 traces as clean teacher and guarded-DART train-only datasets. It screens
 `pairwise_ranking_policy_clean20`, `pairwise_ranking_policy_clean36`, `pairwise_ranking_policy_dart36`, and
-`expected_regret_clean20` with Girard over `figure8`, `random`, and
-`square_drift`: 60 cells. Explicit comparisons are `data_scale`, `dart_effect`,
-and `objective`. At most one passing challenger receives a 72-cell full
+`expected_regret_clean20` with Girard over all twelve fixed traces: 240 cells.
+Explicit comparisons are `data_scale`, `dart_effect`, and `objective`. At most
+one passing challenger receives a 144-cell full
 evaluation with its matched reference and Girard. Do not claim exploratory
 results until the screen, selection, and any required promotion manifests
 validate.
 
-The six fixed evaluation traces always retain their full authoritative lengths.
+The twelve fixed evaluation traces always retain their full authoritative lengths.
 Teacher shards use ten spawned workers. Post-reference evaluation cells use
 four spawned workers with `max_tasks_per_child=1`; each worker owns its monitor
 and planner. BLAS, OpenMP, MKL, and NumExpr remain limited to one thread per worker.
@@ -224,11 +228,16 @@ Benchmark reference mode controls offline metrics and caching only. MPC and
 teacher searches construct their own unreduced horizon rollouts.
 
 Offline exact references remain specification-independent. Each cache row
-contains exact trigger booleans and total-state logical-row center/radius
-vectors. The engine reconstructs an interval matrix and invokes the existing native
-`approx_loss` while the candidate is applied only to the planner monitor. It
+contains exact trigger booleans, a shared logical-row center, and separate
+dynamic and total-state radii. The engine reconstructs an interval matrix and
+invokes the existing native `approx_loss` while the candidate is applied only to the planner monitor. It
 must restore the planner in `finally` and must never mutate the live monitor.
 Do not edit the RTLola binding to implement these metrics.
+
+The binding exposes affine verdict intervals and volume-ratio methods. Affine
+verdict intervals are supported. Volume methods remain available only as an
+upstream diagnostic and must not be used in objectives, reports, caches, or
+learning targets.
 
 Robot-arm trigger labels and public metrics come from
 `rtlola/specs/robot_arm.lola`. Constant encoder-calibration slack must remain

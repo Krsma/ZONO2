@@ -1,6 +1,7 @@
 """Deterministic random-waypoint traces for robot-arm learning.
 
-The trajectory construction follows RLolaEval revision e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5.
+The trajectory construction follows RLolaEval revision
+2257d074173a6dd475c042ef9a82cd8755a81ac3.
 """
 
 from __future__ import annotations
@@ -20,7 +21,7 @@ from pzr.rtlola.engine import RtlolaEvent
 from pzr.rtlola.robot_arm import RobotArmTraceRow, SCENE_PATH
 
 
-RANDOM_WAYPOINT_SOURCE_REVISION = "e6ecd0b2f60263e0a4270bd76a71cd9c90e685e5"
+RANDOM_WAYPOINT_SOURCE_REVISION = "2257d074173a6dd475c042ef9a82cd8755a81ac3"
 RANDOM_WAYPOINT_CONDITIONS = (
     "random_waypoint",
     "random_waypoint_drift",
@@ -43,7 +44,7 @@ class RandomWaypointConfig:
     xy_min: float = 0.05
     wall_margin: float = 0.025
     drift_z: float = 0.08
-    fault_rotation: float = 0.3
+    fault_rotation: float = 0.5
     fault_onset_fraction: float = 0.5
     fault_full_fraction: float = 0.8
     max_tracking_error: float = 0.02
@@ -81,7 +82,7 @@ class RandomWaypointConfig:
     def effective_sv_threshold(self) -> float:
         if self.sv_threshold is not None:
             return float(self.sv_threshold)
-        return 3.0 if self.has_geofence_fault else 1.7
+        return 2.0 if self.has_geofence_fault else 1.7
 
 
 @dataclass(frozen=True)
@@ -182,8 +183,7 @@ def generate_random_waypoint_trace(config: RandomWaypointConfig) -> RandomWaypoi
         )
     waypoints, perimeter, singular_values, simulation = accepted
     center = np.mean(waypoints, axis=0)
-    path, _ = _make_waypoint_path(waypoints)
-    walls = _compute_geofence(path, perimeter, config.wall_margin)
+    walls = _compute_waypoint_geofence(waypoints, config.wall_margin)
     rows = tuple(
         RobotArmTraceRow(
             time=float(time),
@@ -457,20 +457,18 @@ def _make_waypoint_path(
     return path, perimeter
 
 
-def _compute_geofence(
-    path: PathFunction,
-    perimeter: float,
+def _compute_waypoint_geofence(
+    waypoints: NDArray[np.float64],
     margin: float,
 ) -> tuple[float, float, float, float]:
-    points = np.asarray([
-        path(distance)
-        for distance in np.linspace(0.0, perimeter, 500, endpoint=False)
-    ])
+    """Return the upstream waypoint-derived x/y walls."""
+    if waypoints.ndim != 2 or waypoints.shape[1] != 3 or len(waypoints) < 2:
+        raise ValueError(f"invalid waypoint matrix for geofence: {waypoints.shape}")
     return (
-        float(np.min(points[:, 0]) - margin),
-        float(np.max(points[:, 0]) + margin),
-        float(np.min(points[:, 1]) - margin),
-        float(np.max(points[:, 1]) + margin),
+        float(np.min(waypoints[:, 0]) - margin),
+        float(np.max(waypoints[:, 0]) + margin),
+        float(np.min(waypoints[:, 1]) - margin),
+        float(np.max(waypoints[:, 1]) + margin),
     )
 
 

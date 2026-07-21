@@ -3,7 +3,7 @@ set -u
 set -o pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-omni-b4cfbf4-release}"
+OUT_DIR="${PZR_OUT_DIR:-$ROOT_DIR/results/rtlola-omni-2724b05-release}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
 ENV_PREFIX="${PZR_ENV_PREFIX:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm}"
 LENGTH="${PZR_LENGTH:-250}"

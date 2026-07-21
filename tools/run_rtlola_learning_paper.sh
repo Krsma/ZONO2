@@ -2,7 +2,7 @@
 set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
-PAPER_DIR="${PZR_PAPER_DIR:-$ROOT_DIR/results/rtlola-learning-paper-v2-7371495-b4cfbf4-e6ecd0b}"
+PAPER_DIR="${PZR_PAPER_DIR:-$ROOT_DIR/results/rtlola-learning-paper-v2-01c92a2-2724b05-2257d07}"
 PRIMARY_DIR="${PZR_PRIMARY_DIR:-$PAPER_DIR/primary}"
 MPC_ADDON_DIR="${PZR_MPC_ADDON_DIR:-$PAPER_DIR/mpc-addon}"
 PYTHON="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"

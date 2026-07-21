@@ -28,6 +28,7 @@ dev = [
 [project.scripts]
 pzr-benchmark = "pzr.rtlola.cli:main"
 pzr-learning = "pzr.learning.cli:main"
+pzr-rtlola-parity = "pzr.rtlola.parity:main"
 
 [tool.setuptools.packages.find]
 where = ["src"]

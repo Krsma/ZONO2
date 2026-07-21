@@ -8,6 +8,7 @@ from typing import Callable, Sequence
 
 from pzr.rtlola.actions import RtlolaAction
 from pzr.rtlola.engine import (
+    RtlolaApproximationReference,
     RtlolaBindingError,
     RtlolaEngine,
     RtlolaEvent,
@@ -26,6 +27,7 @@ class MpcObjective(str, Enum):
     """Binding-native objective used to rank complete MPC rollouts."""
 
     TERMINAL = "terminal_binding_approx_loss"
+    CUMULATIVE = "cumulative_binding_approx_loss"
     EXTENDED_ENDPOINT = "extended_terminal_binding_approx_loss"
     INTEGRATED_TAIL = "integrated_binding_approx_loss_with_girard_tail"
 
@@ -47,6 +49,7 @@ class MpcVariant:
     root_strategy: MpcRootStrategy
     uses_configured_horizon: bool
     uses_tail: bool
+    stable_candidate_ties: bool = False
 
 
 MPC_VARIANTS = {
@@ -58,6 +61,14 @@ MPC_VARIANTS = {
             MpcRootStrategy.GLOBAL,
             uses_configured_horizon=True,
             uses_tail=False,
+        ),
+        MpcVariant(
+            "mpc_cumulative_beam",
+            MpcObjective.CUMULATIVE,
+            MpcRootStrategy.GLOBAL,
+            uses_configured_horizon=True,
+            uses_tail=False,
+            stable_candidate_ties=True,
         ),
         MpcVariant(
             "mpc_terminal_girard_tail",
@@ -229,6 +240,8 @@ def full_width_terminal_search(
     fallback: RtlolaAction,
     none_action: RtlolaAction,
     configured_horizon: int | None = None,
+    reference_steps: Sequence[RtlolaApproximationReference] | None = None,
+    include_constant_slack: bool = True,
 ) -> RtlolaSearchResult:
     """Exhaustively score all feasible action sequences by terminal native loss."""
     if not actions:
@@ -260,13 +273,24 @@ def full_width_terminal_search(
         )
 
     rollout_events = (current_event, *future_events)
-    reference = _reference_rollout(
-        engine,
-        state,
-        rollout_events,
-        none_action,
-        budget,
-    )
+    if reference_steps is not None:
+        reference: tuple[
+            RtlolaStateRef | RtlolaApproximationReference, ...
+        ] = tuple(reference_steps)
+        if len(reference) != len(rollout_events):
+            raise ValueError(
+                "full-width reference count differs from rollout event count"
+            )
+    else:
+        if not include_constant_slack:
+            raise ValueError("dynamic-only loss requires compact exact references")
+        reference = _reference_rollout(
+            engine,
+            state,
+            rollout_events,
+            none_action,
+            budget,
+        )
     leaves: list[FullWidthLeaf] = []
     root_rows: list[MpcRootEvaluation] = []
     total_failures = 0
@@ -314,7 +338,12 @@ def full_width_terminal_search(
         root_leaves = [
             replace(
                 leaf,
-                cost=engine.approx_loss(reference[-1], leaf.terminal_step.state),
+                cost=_reference_loss(
+                    engine,
+                    reference[-1],
+                    leaf.terminal_step.state,
+                    include_constant_slack=include_constant_slack,
+                ),
             )
             for leaf in root_leaves
         ]
@@ -368,7 +397,12 @@ def full_width_terminal_search(
         leaves = [
             replace(
                 leaf,
-                cost=engine.approx_loss(reference[-1], leaf.terminal_step.state),
+                cost=_reference_loss(
+                    engine,
+                    reference[-1],
+                    leaf.terminal_step.state,
+                    include_constant_slack=include_constant_slack,
+                ),
             )
             for leaf in fallback_leaves
         ]
@@ -474,6 +508,9 @@ def beam_search(
     use_reference_loss: bool = False,
     forced_first_action: RtlolaAction | None = None,
     configured_horizon: int | None = None,
+    reference_steps: Sequence[RtlolaApproximationReference] | None = None,
+    include_constant_slack: bool = True,
+    automatic_none: bool = True,
 ) -> RtlolaSearchResult:
     """Run the historical terminal-loss beam search."""
     return _search_mpc(
@@ -495,6 +532,9 @@ def beam_search(
         forced_first_action=forced_first_action,
         configured_horizon=configured_horizon,
         configured_tail_horizon=0,
+        reference_steps=reference_steps,
+        include_constant_slack=include_constant_slack,
+        automatic_none=automatic_none,
     )
 
 
@@ -515,6 +555,9 @@ def search_mpc_variant(
     tail_action: RtlolaAction,
     configured_horizon: int | None = None,
     configured_tail_horizon: int | None = None,
+    reference_steps: Sequence[RtlolaApproximationReference] | None = None,
+    include_constant_slack: bool = True,
+    automatic_none: bool = True,
 ) -> RtlolaSearchResult:
     """Run one named MPC variant with binding-native reference losses."""
     optimized_future = tuple(future_events) if variant.uses_configured_horizon else ()
@@ -538,6 +581,9 @@ def search_mpc_variant(
             configured_horizon if variant.uses_configured_horizon else 0
         ),
         configured_tail_horizon=configured_tail_horizon,
+        reference_steps=reference_steps,
+        include_constant_slack=include_constant_slack,
+        automatic_none=automatic_none,
     )
 
 
@@ -561,6 +607,9 @@ def _search_mpc(
     forced_first_action: RtlolaAction | None = None,
     configured_horizon: int | None = None,
     configured_tail_horizon: int | None = None,
+    reference_steps: Sequence[RtlolaApproximationReference] | None = None,
+    include_constant_slack: bool = True,
+    automatic_none: bool = True,
 ) -> RtlolaSearchResult:
     """Bounded-width deterministic search over RTLola action sequences."""
     if beam_width < 1:
@@ -573,6 +622,10 @@ def _search_mpc(
         raise ValueError("reference-loss search requires a none_action")
     if variant.uses_tail and tail_action is None:
         raise ValueError("tail MPC variant requires a tail action")
+    if reference_steps is not None and not use_reference_loss:
+        raise ValueError("explicit MPC references require reference-loss scoring")
+    if reference_steps is None and not include_constant_slack:
+        raise ValueError("dynamic-only MPC loss requires explicit references")
     cost = cost_fn or _default_cost
     recorded_horizon = (
         len(future_events) if configured_horizon is None else configured_horizon
@@ -583,7 +636,7 @@ def _search_mpc(
     )
     pre_metrics = engine.metrics(state)
 
-    if none_action is not None:
+    if automatic_none and none_action is not None:
         if pre_metrics.dynamic_generator_count <= budget:
             none_step = _branch_none(engine, state, current_event, none_action, budget)
             return RtlolaSearchResult(
@@ -608,10 +661,20 @@ def _search_mpc(
 
     explicit_events = (current_event, *tuple(future_events))
     events = (*explicit_events, *tuple(tail_events))
-    reference_states = (
-        _reference_rollout(engine, state, events, none_action, budget)
-        if use_reference_loss and none_action is not None else ()
-    )
+    if reference_steps is not None:
+        reference_states: tuple[
+            RtlolaStateRef | RtlolaApproximationReference, ...
+        ] = tuple(reference_steps)
+        if len(reference_states) != len(events):
+            raise ValueError(
+                "explicit MPC reference count differs from rollout event count "
+                f"({len(reference_states)} != {len(events)})"
+            )
+    else:
+        reference_states = (
+            _reference_rollout(engine, state, events, none_action, budget)
+            if use_reference_loss and none_action is not None else ()
+        )
 
     action_budget = int(budget)
     beam: list[BeamItem] = []
@@ -633,6 +696,7 @@ def _search_mpc(
             cost,
             reference_states=reference_states,
             depth=0,
+            include_constant_slack=include_constant_slack,
         )
         feasible_roots.add(action.name)
         beam.append(BeamItem(
@@ -658,6 +722,7 @@ def _search_mpc(
                 cost,
                 reference_states=reference_states,
                 depth=0,
+                include_constant_slack=include_constant_slack,
             )
             beam.append(BeamItem(
                 first_action=fallback,
@@ -688,7 +753,7 @@ def _search_mpc(
     for depth, event in enumerate(tuple(future_events), start=1):
         expanded: list[BeamItem] = []
         for item in beam:
-            if none_action is not None:
+            if automatic_none and none_action is not None:
                 rollout_metrics = engine.metrics(item.rollout_state)
                 if rollout_metrics.dynamic_generator_count <= budget:
                     none_step = _branch_none(engine, item.rollout_state, event, none_action, budget)
@@ -698,6 +763,7 @@ def _search_mpc(
                         cost,
                         reference_states=reference_states,
                         depth=depth,
+                        include_constant_slack=include_constant_slack,
                     )
                     expanded.append(BeamItem(
                         first_action=item.first_action,
@@ -733,6 +799,7 @@ def _search_mpc(
                     cost,
                     reference_states=reference_states,
                     depth=depth,
+                    include_constant_slack=include_constant_slack,
                 )
                 children.append(BeamItem(
                     first_action=item.first_action,
@@ -758,6 +825,7 @@ def _search_mpc(
                         cost,
                         reference_states=reference_states,
                         depth=depth,
+                        include_constant_slack=include_constant_slack,
                     )
                     children.append(BeamItem(
                         first_action=item.first_action,
@@ -805,6 +873,7 @@ def _search_mpc(
             tail_action=tail_action,
             fallback=fallback,
             variant=variant,
+            include_constant_slack=include_constant_slack,
         )
         failures += tail_failures
         root_name = item.first_action.name
@@ -816,12 +885,15 @@ def _search_mpc(
             f"no RTLola branch completed the tail with bound={budget}"
         )
 
-    best = min(completed, key=_sort_key)
+    best = min(completed, key=lambda item: _sort_key(item, variant))
     best_by_root: dict[str, BeamItem] = {}
     for item in completed:
         root_name = item.first_action.name
         retained = best_by_root.get(root_name)
-        if retained is None or _sort_key(item) < _sort_key(retained):
+        if (
+            retained is None
+            or _sort_key(item, variant) < _sort_key(retained, variant)
+        ):
             best_by_root[root_name] = item
     root_names = [action.name for action in root_actions]
     if first_fallback_used and fallback.name not in root_names:
@@ -871,7 +943,9 @@ def _prefix_cost(
     explicit_path_loss: float,
     explicit_terminal_loss: float,
 ) -> float:
-    if variant.objective is MpcObjective.INTEGRATED_TAIL:
+    if variant.objective in {
+        MpcObjective.CUMULATIVE, MpcObjective.INTEGRATED_TAIL,
+    }:
         return explicit_path_loss
     return explicit_terminal_loss
 
@@ -884,14 +958,16 @@ def _prune_beam(
     root_beam_width: int,
 ) -> tuple[list[BeamItem], int]:
     if variant.root_strategy is MpcRootStrategy.GLOBAL:
-        ordered = sorted(items, key=_sort_key)
+        ordered = sorted(items, key=lambda item: _sort_key(item, variant))
         return ordered[:beam_width], max(0, len(ordered) - beam_width)
     groups: dict[str, list[BeamItem]] = {}
     for item in items:
         groups.setdefault(item.first_action.name, []).append(item)
     retained: list[BeamItem] = []
     for name in sorted(groups):
-        retained.extend(sorted(groups[name], key=_sort_key)[:root_beam_width])
+        retained.extend(sorted(
+            groups[name], key=lambda item: _sort_key(item, variant),
+        )[:root_beam_width])
     return retained, len(items) - len(retained)
 
 
@@ -899,7 +975,9 @@ def _evaluate_tail(
     engine: RtlolaEngine,
     item: BeamItem,
     tail_events: tuple[RtlolaEvent, ...],
-    reference_states: tuple[RtlolaStateRef, ...],
+    reference_states: tuple[
+        RtlolaStateRef | RtlolaApproximationReference, ...
+    ],
     *,
     explicit_depth: int,
     budget: int,
@@ -907,6 +985,7 @@ def _evaluate_tail(
     tail_action: RtlolaAction | None,
     fallback: RtlolaAction,
     variant: MpcVariant,
+    include_constant_slack: bool,
 ) -> tuple[BeamItem | None, int]:
     if not tail_events:
         return replace(
@@ -942,7 +1021,12 @@ def _evaluate_tail(
             failures += 1
             return None, failures
         reference = reference_states[explicit_depth + offset]
-        terminal_loss = engine.approx_loss(reference, step.state)
+        terminal_loss = _reference_loss(
+            engine,
+            reference,
+            step.state,
+            include_constant_slack=include_constant_slack,
+        )
         path_loss += terminal_loss
         state = step.state
         realized_steps += 1
@@ -977,6 +1061,8 @@ def _complete_cost(
             tail_terminal_loss
             if tail_terminal_loss == tail_terminal_loss else explicit_terminal_loss
         )
+    if variant.objective is MpcObjective.CUMULATIVE:
+        return explicit_path_loss
     return explicit_path_loss + tail_path_loss
 
 
@@ -1059,13 +1145,44 @@ def _score_step(
     step: RtlolaStepResult,
     cost: CostFunction,
     *,
-    reference_states: tuple[RtlolaStateRef, ...],
+    reference_states: tuple[
+        RtlolaStateRef | RtlolaApproximationReference, ...
+    ],
     depth: int,
+    include_constant_slack: bool,
 ) -> float:
     if reference_states:
-        return engine.approx_loss(reference_states[depth], step.state)
+        return _reference_loss(
+            engine,
+            reference_states[depth],
+            step.state,
+            include_constant_slack=include_constant_slack,
+        )
     return cost(engine, step)
 
 
-def _sort_key(item: BeamItem) -> tuple[float, tuple[str, ...]]:
+def _reference_loss(
+    engine: RtlolaEngine,
+    reference: RtlolaStateRef | RtlolaApproximationReference,
+    candidate: RtlolaStateRef,
+    *,
+    include_constant_slack: bool,
+) -> float:
+    if isinstance(reference, RtlolaApproximationReference):
+        return engine.approx_loss_reference(
+            reference,
+            candidate,
+            include_constant_slack=include_constant_slack,
+        )
+    if not include_constant_slack:
+        raise ValueError("dynamic-only loss requires a compact exact reference")
+    return engine.approx_loss(reference, candidate)
+
+
+def _sort_key(
+    item: BeamItem,
+    variant: MpcVariant,
+) -> tuple[float] | tuple[float, tuple[str, ...]]:
+    if variant.stable_candidate_ties:
+        return (item.predicted_cost,)
     return item.predicted_cost, item.predicted_sequence

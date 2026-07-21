@@ -37,26 +37,42 @@ class RtlolaStateRef:
 
 @dataclass(frozen=True)
 class RtlolaApproximationReference:
-    """Exact logical-row state data sufficient for the binding-native loss."""
+    """Exact logical-row intervals for dynamic and total native losses."""
 
     center: np.ndarray
-    radius: np.ndarray
+    dynamic_radius: np.ndarray
+    total_radius: np.ndarray
     spec_id: str
     step: int
 
     def __post_init__(self) -> None:
         center = np.asarray(self.center, dtype=np.float64).copy()
-        radius = np.asarray(self.radius, dtype=np.float64).copy()
-        if center.ndim != 1 or radius.ndim != 1 or center.shape != radius.shape:
+        dynamic_radius = np.asarray(self.dynamic_radius, dtype=np.float64).copy()
+        total_radius = np.asarray(self.total_radius, dtype=np.float64).copy()
+        if (
+            center.ndim != 1
+            or dynamic_radius.ndim != 1
+            or total_radius.ndim != 1
+            or center.shape != dynamic_radius.shape
+            or center.shape != total_radius.shape
+        ):
             raise ValueError("approximation reference center/radius shapes differ")
-        if not np.all(np.isfinite(center)) or not np.all(np.isfinite(radius)):
+        if not (
+            np.all(np.isfinite(center))
+            and np.all(np.isfinite(dynamic_radius))
+            and np.all(np.isfinite(total_radius))
+        ):
             raise ValueError("approximation reference contains non-finite values")
-        if np.any(radius < 0.0):
+        if np.any(dynamic_radius < 0.0) or np.any(total_radius < 0.0):
             raise ValueError("approximation reference radius must be non-negative")
+        if np.any(dynamic_radius > total_radius):
+            raise ValueError("dynamic radius cannot exceed total radius")
         center.setflags(write=False)
-        radius.setflags(write=False)
+        dynamic_radius.setflags(write=False)
+        total_radius.setflags(write=False)
         object.__setattr__(self, "center", center)
-        object.__setattr__(self, "radius", radius)
+        object.__setattr__(self, "dynamic_radius", dynamic_radius)
+        object.__setattr__(self, "total_radius", total_radius)
 
 
 @dataclass(frozen=True)
@@ -197,6 +213,8 @@ class RtlolaEngine:
         self,
         reference: RtlolaApproximationReference,
         candidate: RtlolaStateRef,
+        *,
+        include_constant_slack: bool = True,
     ) -> float:
         """Evaluate native loss against a logical-row exact interval reference."""
         self._validate_state(candidate)
@@ -212,7 +230,9 @@ class RtlolaEngine:
 
         try:
             candidate_matrix = np.asarray(
-                self.planner.state_zonotope(candidate.state, True),
+                self.planner.state_zonotope(
+                    candidate.state, include_constant_slack,
+                ),
                 dtype=np.float64,
             )
         except BaseException as exc:
@@ -240,12 +260,18 @@ class RtlolaEngine:
         dimension = reference.center.size
         exact_interval = np.zeros((dimension, dimension + 1), dtype=np.float64)
         exact_interval[:, 0] = reference.center
-        exact_interval[np.arange(dimension), np.arange(dimension) + 1] = reference.radius
+        radius = (
+            reference.total_radius
+            if include_constant_slack else reference.dynamic_radius
+        )
+        exact_interval[np.arange(dimension), np.arange(dimension) + 1] = radius
 
         previous = self.planner.state()
         try:
             self.planner.apply_state(candidate.state)
-            loss = float(self.planner.approx_loss(exact_interval, True))
+            loss = float(self.planner.approx_loss(
+                exact_interval, include_constant_slack,
+            ))
         except BaseException as exc:
             if isinstance(exc, (KeyboardInterrupt, SystemExit)):
                 raise
