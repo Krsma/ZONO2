@@ -3,7 +3,7 @@ set -euo pipefail
 
 ROOT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON_BIN="${PZR_PYTHON:-$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/bin/python}"
-CONFIG="${PZR_PAPER_CONFIG:-$ROOT_DIR/experiments/paper_evaluation_v1.yaml}"
+CONFIG="${PZR_PAPER_CONFIG:-$ROOT_DIR/experiments/paper_evaluation_v2.yaml}"
 STAGE="${1:?usage: tools/run_paper_evaluation.sh COMMAND [pzr-paper options]}"
 shift
 

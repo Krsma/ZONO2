@@ -25,8 +25,10 @@ An experiment is ready only when:
 - interval fallback changes the run state to `fallback_failed`, makes headline
   FPR and completed-run throughput unavailable, and retains pre-fallback
   diagnostics;
-- the 54-cell nominal pilot projection is at most 72 hours with four one-thread
-  workers, or explicit approval is recorded before the 1,260-cell nominal
+- every learned evaluation row records a model trained only at the same exact
+  budget, and all seven specialist trainings use the shared fixed hyperparameters;
+- the 112-cell nominal pilot projection is at most 72 hours with four one-thread
+  workers, or explicit approval is recorded before the 1,120-cell nominal
   held-out sweep; the gate excludes fixed headline/objective/timing work;
 - headline aggregation is trace-level, paired bootstrap intervals use 10,000
   deterministic seed-level replicates, and failed points are not connected;
@@ -46,8 +48,8 @@ fallback obscures standalone behavior. Althoff A, colinear scale, and the
 randomized/diverse clustering reducers are excluded because they are not
 tractable or robust at robot-arm sweep length.
 
-Use `/tmp` for smoke outputs. Serious paper outputs belong under a new
-`results/paper-evaluation-v1` directory and must be generated through
+Use `/tmp` for smoke outputs. Serious paper outputs belong under
+`results/paper-evaluation-v2` and must be generated through
 `tools/run_paper_evaluation.sh`; ordinary benchmark diagnostics still use
 `pzr-benchmark`.
 

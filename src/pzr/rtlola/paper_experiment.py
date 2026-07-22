@@ -23,10 +23,10 @@ from pzr.rtlola.reference import REFERENCE_CACHE_SCHEMA
 from pzr.rtlola.robot_arm import RLOLAEVAL_REVISION, ROBOT_ARM_SPEC_SHA256
 
 
-PAPER_CONFIG_SCHEMA = "pzr.paper-evaluation-config.v2"
-PAPER_CELL_SCHEMA = "pzr.paper-evaluation-cell.v2"
-PAPER_STAGE_SCHEMA = "pzr.paper-evaluation-stage.v2"
-PAPER_RUN_SCHEMA = "pzr.paper-evaluation-run.v2"
+PAPER_CONFIG_SCHEMA = "pzr.paper-evaluation-config.v3"
+PAPER_CELL_SCHEMA = "pzr.paper-evaluation-cell.v3"
+PAPER_STAGE_SCHEMA = "pzr.paper-evaluation-stage.v3"
+PAPER_RUN_SCHEMA = "pzr.paper-evaluation-run.v3"
 BOOTSTRAP_REPLICATES = 10_000
 BOOTSTRAP_SEED = 20260721
 ORDINARY_REDUCERS = ("girard", "scott", "pca", "combastel")
@@ -37,8 +37,8 @@ HEADLINE_METHODS = (
     "mpc_terminal_full_width",
     "pairwise_ranking_policy",
 )
-PILOT_METHODS = (*HEADLINE_METHODS, "pairwise_ranking_policy_budget80")
-GENERALIZATION_METHODS = PILOT_METHODS
+PILOT_METHODS = HEADLINE_METHODS
+GENERALIZATION_METHODS = HEADLINE_METHODS
 OBJECTIVE_METHODS = ("mpc_terminal_beam", "mpc_cumulative_beam")
 COMPOSITION_METHODS = (
     "mpc_terminal_beam",
@@ -54,6 +54,8 @@ STAGES = (
     "generalization",
     "ablation",
     "timing",
+    "science-report",
+    "science-validate",
     "report",
     "validate",
 )
@@ -79,7 +81,6 @@ class Objective(str, Enum):
     TERMINAL = "terminal"
     CUMULATIVE = "cumulative"
     LEARNED_TERMINAL_TEACHER = "learned_terminal_teacher"
-    LEARNED_TERMINAL_TEACHER_BUDGET80 = "learned_terminal_teacher_budget80"
 
 
 class RunState(str, Enum):
@@ -141,6 +142,13 @@ class PaperExperimentConfig:
     evaluation_workers: int
     ablation_workers: int
     training_epochs: int
+    training_batch_size: int
+    training_learning_rate: float
+    training_weight_decay: float
+    training_patience: int
+    training_seed: int
+    teacher_dataset_parent: Path | None
+    teacher_dataset_parent_sha256: str | None
     train_seeds: tuple[int, ...]
     validation_seeds: tuple[int, ...]
     reserved_exploration_seeds: tuple[int, ...]
@@ -206,7 +214,7 @@ class PaperExperimentConfig:
                 raise ValueError("canonical fixed patterned source must be rlolaeval")
             if self.event_count != 500:
                 raise ValueError("canonical generated trace event count must be 500")
-            if self.pilot_budgets != (40, 150, 500):
+            if self.pilot_budgets != self.budgets:
                 raise ValueError("canonical pilot budgets differ")
             if (
                 self.ablation_budget != 150
@@ -247,12 +255,22 @@ class PaperExperimentConfig:
             raise ValueError("paper timing must be sequential with one native thread")
         if self.ablation_workers != 1:
             raise ValueError("paper ablation timing must use one experiment worker")
-        if self.training_epochs < 1:
-            raise ValueError("training epochs must be positive")
+        if (
+            self.training_epochs < 1
+            or self.training_batch_size < 1
+            or self.training_learning_rate <= 0.0
+            or self.training_weight_decay < 0.0
+            or self.training_patience < 1
+        ):
+            raise ValueError("invalid shared specialist training hyperparameters")
+        if (self.teacher_dataset_parent is None) != (
+            self.teacher_dataset_parent_sha256 is None
+        ):
+            raise ValueError("teacher parent path and hash must be configured together")
         if self.enforce_canonical_scope:
             expected_counts = {
-                "pilot": 54,
-                "generalization": 1_260,
+                "pilot": 112,
+                "generalization": 1_120,
                 "headline": 224,
                 "objective-comparison": 56,
                 "ablation": 80,
@@ -344,6 +362,19 @@ def load_paper_experiment_config(path: Path) -> PaperExperimentConfig:
         evaluation_workers=int(raw["workers"]["evaluation"]),
         ablation_workers=int(raw["workers"]["ablation"]),
         training_epochs=int(raw["training"]["epochs"]),
+        training_batch_size=int(raw["training"]["batch_size"]),
+        training_learning_rate=float(raw["training"]["learning_rate"]),
+        training_weight_decay=float(raw["training"]["weight_decay"]),
+        training_patience=int(raw["training"]["patience"]),
+        training_seed=int(raw["training"]["seed"]),
+        teacher_dataset_parent=(
+            Path(raw["teacher_dataset"]["reuse_from"])
+            if raw.get("teacher_dataset", {}).get("reuse_from") else None
+        ),
+        teacher_dataset_parent_sha256=(
+            str(raw["teacher_dataset"]["sha256"])
+            if raw.get("teacher_dataset", {}).get("sha256") else None
+        ),
         train_seeds=tuple(int(value) for value in raw["training"]["train_seeds"]),
         validation_seeds=tuple(
             int(value) for value in raw["training"]["validation_seeds"]
@@ -396,6 +427,7 @@ def cell_identity(
     method: MethodConfig,
     reference_path: Path,
     model_sha256: str | None,
+    model_training_budget: int | None = None,
     source_sha256: str | None = None,
 ) -> dict[str, object]:
     """Build a complete source-aware identity for a resumable paper cell."""
@@ -432,6 +464,7 @@ def cell_identity(
             "metrics": method.metric_reference,
         },
         "model_sha256": model_sha256,
+        "model_training_budget": model_training_budget,
         "seed_lists": {
             "train": list(config.train_seeds),
             "validation": list(config.validation_seeds),
@@ -628,6 +661,7 @@ def pilot_projection(
     worker_count: int,
     disk_bytes: int,
     threshold_hours: float,
+    observed_pilot_wall_seconds: float | None = None,
     gated_stage: str = "generalization",
     trace_scope: str = TraceSource.GENERATED_NOMINAL.value,
     separate_fixed_workloads: Mapping[str, int] | None = None,
@@ -635,38 +669,63 @@ def pilot_projection(
     """Project the held-out run from observed pilot cells and expose its gate."""
     if target_cell_count < 1 or worker_count < 1 or disk_bytes < 0:
         raise ValueError("invalid pilot projection inputs")
-    data = trace_level_metrics(summary)
-    completed = data[data["status"] == RunState.COMPLETED.value]
-    if completed.empty:
-        raise ValueError("pilot has no completed cells")
-    timing_column = (
-        "event_loop_time_ms" if "event_loop_time_ms" in completed
-        else "total_time_ms"
-    )
-    seconds = completed[timing_column].astype(float) / 1000.0
-    mean_seconds = float(seconds.mean())
-    cpu_hours = mean_seconds * target_cell_count / 3600.0
-    wall_hours = cpu_hours / worker_count
-    per_method = {
-        str(method): {
-            "completed_cells": len(frame),
-            "mean_seconds_per_cell": float(
-                frame[timing_column].astype(float).mean() / 1000.0
+    required = {"method", "budget", "status", "event_loop_time_ms", "cell_elapsed_ms"}
+    missing = required - set(summary.columns)
+    if missing:
+        raise ValueError(f"pilot projection lacks timing columns: {sorted(missing)}")
+    data = summary.copy()
+    completed = data["status"] == RunState.COMPLETED.value
+    event_seconds = pd.to_numeric(data["event_loop_time_ms"], errors="coerce") / 1000.0
+    cell_seconds = pd.to_numeric(data["cell_elapsed_ms"], errors="coerce") / 1000.0
+    data["projection_seconds"] = np.where(completed, event_seconds, cell_seconds)
+    if bool((~np.isfinite(data["projection_seconds"])).any()) or bool(
+        (data["projection_seconds"] <= 0.0).any()
+    ):
+        raise ValueError("pilot projection contains unusable cell timings")
+    strata = data.groupby(["method", "budget"], sort=True)
+    stratum_sizes = {len(frame) for _, frame in strata}
+    if len(stratum_sizes) != 1:
+        raise ValueError("pilot method/budget strata are not seed-aligned")
+    pilot_seed_count = next(iter(stratum_sizes))
+    stratum_count = len(strata)
+    if target_cell_count % stratum_count:
+        raise ValueError("target cells do not align with pilot method/budget strata")
+    target_seed_count = target_cell_count // stratum_count
+    scaling = target_seed_count / pilot_seed_count
+    per_stratum = {}
+    projected_cpu_seconds = 0.0
+    for (method, budget), frame in strata:
+        mean_seconds = float(frame["projection_seconds"].mean())
+        projected_cpu_seconds += mean_seconds * target_seed_count
+        per_stratum[f"{method}/budget-{int(budget)}"] = {
+            "pilot_cells": len(frame),
+            "completed_cells": int(
+                (frame["status"] == RunState.COMPLETED.value).sum()
             ),
+            "mean_seconds_per_cell": mean_seconds,
         }
-        for method, frame in completed.groupby("method")
-    }
+    cpu_hours = projected_cpu_seconds / 3600.0
+    ideal_wall_hours = cpu_hours / worker_count
+    observed_scaled_wall_hours = (
+        float(observed_pilot_wall_seconds) * scaling / 3600.0
+        if observed_pilot_wall_seconds is not None else ideal_wall_hours
+    )
+    wall_hours = max(ideal_wall_hours, observed_scaled_wall_hours)
     return {
         "pilot_cell_count": len(data),
-        "completed_pilot_cell_count": len(completed),
+        "completed_pilot_cell_count": int(completed.sum()),
         "target_cell_count": target_cell_count,
+        "pilot_seed_count": pilot_seed_count,
+        "target_seed_count": target_seed_count,
         "gated_stage": gated_stage,
         "trace_scope": trace_scope,
         "worker_count": worker_count,
         "projected_cpu_hours": cpu_hours,
+        "projected_ideal_wall_hours": ideal_wall_hours,
+        "projected_observed_scaled_wall_hours": observed_scaled_wall_hours,
         "projected_wall_hours": wall_hours,
         "projected_disk_bytes": int(round(disk_bytes * target_cell_count / len(data))),
-        "per_method_scaling": per_method,
+        "per_method_budget_scaling": per_stratum,
         "maximum_wall_hours": threshold_hours,
         "approval_required": wall_hours > threshold_hours,
         "gate_covers": [gated_stage],
@@ -699,6 +758,19 @@ def validate_summary_matrix(
     states = set(summary["status"].astype(str))
     if not states <= {state.value for state in RunState}:
         raise ValueError(f"{stage} contains an invalid run state")
+    if "model_training_budget" not in summary.columns:
+        raise ValueError(f"{stage} summary lacks model_training_budget")
+    learned = summary["method"] == "pairwise_ranking_policy"
+    learned_budgets = pd.to_numeric(
+        summary.loc[learned, "model_training_budget"], errors="coerce",
+    )
+    evaluated_budgets = pd.to_numeric(summary.loc[learned, "budget"], errors="raise")
+    if bool(learned_budgets.isna().any()) or not bool(
+        np.array_equal(learned_budgets.to_numpy(), evaluated_budgets.to_numpy())
+    ):
+        raise ValueError(f"{stage} learned-policy training budgets are not matched")
+    if bool(summary.loc[~learned, "model_training_budget"].notna().any()):
+        raise ValueError(f"{stage} non-learned methods record a training budget")
     trace_level_metrics(summary)
 
 
@@ -811,7 +883,7 @@ def artifact_hash_manifest(directory: Path) -> dict[str, object]:
         if path.is_file() and path.name != "artifact_hashes.json"
     ))
     return {
-        "schema": "pzr.paper-generated-artifact-hashes.v2",
+        "schema": "pzr.paper-generated-artifact-hashes.v3",
         "files": [
             {
                 "path": str(path.relative_to(directory)),

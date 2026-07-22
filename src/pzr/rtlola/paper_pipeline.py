@@ -12,8 +12,10 @@ import json
 from multiprocessing import get_context
 import os
 from pathlib import Path
+import shutil
 import subprocess
 import sys
+from time import perf_counter
 from typing import IO, Iterator, Mapping, Sequence
 import xml.etree.ElementTree as ET
 
@@ -28,7 +30,12 @@ from pzr.learning.provenance import (
     sha256_files,
 )
 from pzr.learning.ranker import ReducerPolicy
-from pzr.learning.training import NamedDataset, ReducerTrainingConfig, run_reducer_training
+from pzr.learning.training import (
+    NamedDataset,
+    ReducerTrainingConfig,
+    dataset_sha256,
+    run_reducer_training,
+)
 from pzr.rtlola.actions import default_action_catalog
 from pzr.rtlola.benchmark import RtlolaBenchmarkConfig, run_event_trace_benchmark
 from pzr.rtlola.binding import (
@@ -78,19 +85,20 @@ from pzr.rtlola.robot_arm_random import RANDOM_WAYPOINT_SOURCE_REVISION
 from pzr.rtlola.scenarios import scenario_by_name
 
 
-DEFAULT_CONFIG = Path("experiments/paper_evaluation_v1.yaml")
+DEFAULT_CONFIG = Path("experiments/paper_evaluation_v2.yaml")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 RUN_EXIT_COMPLETE = 0
 RUN_EXIT_FAILED_POINTS = 2
 RUN_EXIT_APPROVAL_REQUIRED = 75
+RUN_EXIT_PRIMARY_READINESS_FAILED = 76
 PAPER_PREFLIGHT_MARKER_EXPRESSION = "not rlola_parity"
 SCIENTIFIC_STAGES = (
     "pilot", "objective-comparison", "headline", "generalization", "ablation",
 )
-LEARNED_METHODS = {
-    "pairwise_ranking_policy": "model-all-budgets",
-    "pairwise_ranking_policy_budget80": "model-budget80",
-}
+PRIMARY_EVALUATION_STAGES = (
+    "headline", "objective-comparison", "generalization", "ablation",
+)
+LEARNED_METHODS = {"pairwise_ranking_policy"}
 
 
 @dataclass(frozen=True)
@@ -116,6 +124,7 @@ class EvaluationCellJob:
     reference_path: Path
     identity: dict[str, object]
     model_directory: Path | None
+    model_training_budget: int | None = None
 
 
 @dataclass(frozen=True)
@@ -162,6 +171,8 @@ def run_paper_stage(
         ),
         "ablation": _run_ablation,
         "timing": _run_timing,
+        "science-report": _run_science_report,
+        "science-validate": _run_science_validate,
         "report": _run_report,
         "validate": _run_validate,
     }
@@ -205,6 +216,24 @@ def run_complete_paper_evaluation(
     for stage in ("prepare", "train", "pilot"):
         _run_or_skip_stage(config, stage)
 
+    primary_failure_count = _pilot_primary_failure_count(config)
+    if primary_failure_count:
+        manifest = _write_run_manifest(
+            config,
+            status="primary_readiness_failed",
+            failure_count=primary_failure_count,
+            extra={
+                "provenance": provenance,
+                "approval_recorded": False,
+            },
+        )
+        return PaperRunResult(
+            "primary_readiness_failed",
+            RUN_EXIT_PRIMARY_READINESS_FAILED,
+            primary_failure_count,
+            manifest,
+        )
+
     projection = load_json(projection_path)
     _validate_projection(config, projection)
     approval_required = bool(projection.get("approval_required"))
@@ -226,7 +255,7 @@ def run_complete_paper_evaluation(
         )
     if approval_required:
         write_json_atomic({
-            "schema": "pzr.paper-evaluation-approval.v2",
+            "schema": "pzr.paper-evaluation-approval.v3",
             "approved": True,
             "config_sha256": config.config_sha256,
             "pzr_source_sha256": pzr_source_sha256(),
@@ -235,7 +264,7 @@ def run_complete_paper_evaluation(
         }, approval_path)
 
     for stage in (
-        "objective-comparison", "headline", "generalization", "ablation",
+        "headline", "objective-comparison", "generalization", "ablation",
         "timing", "report", "validate",
     ):
         _run_or_skip_stage(
@@ -269,7 +298,7 @@ def run_exploratory_bundle(
     *,
     smoke: bool = False,
 ) -> PaperRunResult:
-    """Prepare data, train both policies, and run only the formal pilot."""
+    """Reuse/prepare teacher data, train budget specialists, and run the pilot."""
     config.output_root.mkdir(parents=True, exist_ok=True)
     provenance = _run_provenance(config)
     if provenance["dirty_source_paths"] and not smoke:
@@ -290,7 +319,7 @@ def run_exploratory_bundle(
     )
     manifest = config.output_root / "explore" / "manifest.json"
     write_json_atomic({
-        "schema": "pzr.paper-evaluation-exploration.v2",
+        "schema": "pzr.paper-evaluation-exploration.v3",
         "experiment_id": config.experiment_id,
         "status": status,
         "updated_at": _utc_now(),
@@ -315,6 +344,169 @@ def run_exploratory_bundle(
     )
 
 
+def run_scientific_paper_evaluation(
+    config: PaperExperimentConfig,
+    *,
+    approve_long_run: bool = False,
+    smoke: bool = False,
+) -> PaperRunResult:
+    """Run the paper's scientific cells and reports, deferring timing."""
+    projection_path = config.output_root / "pilot" / "projection.json"
+    if approve_long_run and not projection_path.is_file():
+        raise ValueError(
+            "long-run approval is accepted only after a pilot projection exists"
+        )
+    config.output_root.mkdir(parents=True, exist_ok=True)
+    provenance = _run_provenance(config)
+    if provenance["dirty_source_paths"] and not smoke:
+        raise ValueError(
+            "paper evaluation requires clean scientific sources; dirty paths: "
+            f"{provenance['dirty_source_paths']}"
+        )
+    _run_preflight(config, provenance)
+    for stage in ("prepare", "train", "pilot"):
+        _run_or_skip_stage(config, stage)
+        _require_no_hard_failures(config, stage)
+
+    projection = load_json(projection_path)
+    _validate_projection(config, projection)
+    primary_failure_count = _pilot_primary_failure_count(config)
+    if primary_failure_count:
+        manifest = _write_evaluate_manifest(
+            config,
+            status="primary_readiness_failed",
+            failure_count=primary_failure_count,
+            extra={"provenance": provenance, "projection": projection},
+        )
+        return PaperRunResult(
+            "primary_readiness_failed",
+            RUN_EXIT_PRIMARY_READINESS_FAILED,
+            primary_failure_count,
+            manifest,
+        )
+
+    # These fixed-scope/ablation stages are independent of the held-out gate.
+    for stage in ("headline", "objective-comparison", "ablation"):
+        _run_or_skip_stage(config, stage)
+        _require_no_hard_failures(config, stage)
+
+    approval_required = bool(projection.get("approval_required"))
+    approval_path = config.output_root / "pilot" / "approval.json"
+    if approval_required and not approve_long_run:
+        manifest = _write_evaluate_manifest(
+            config,
+            status="approval_required",
+            failure_count=_scientific_failure_count(config),
+            extra={
+                "provenance": provenance,
+                "projection": projection,
+                "completed_ungated_stages": [
+                    "headline", "objective-comparison", "ablation",
+                ],
+                "gated_pending_stage": "generalization",
+            },
+        )
+        return PaperRunResult(
+            "approval_required",
+            RUN_EXIT_APPROVAL_REQUIRED,
+            _scientific_failure_count(config),
+            manifest,
+        )
+    if approval_required:
+        write_json_atomic({
+            "schema": "pzr.paper-evaluation-approval.v3",
+            "approved": True,
+            "config_sha256": config.config_sha256,
+            "pzr_source_sha256": pzr_source_sha256(),
+            "projection_sha256": sha256_files((projection_path,)),
+            "recorded_at": _utc_now(),
+        }, approval_path)
+
+    for stage in ("generalization", "science-report", "science-validate"):
+        _run_or_skip_stage(
+            config,
+            stage,
+            approve_long_run=approval_required,
+        )
+        if stage == "generalization":
+            _require_no_hard_failures(config, stage)
+    failure_count = _scientific_failure_count(config)
+    status = "completed" if failure_count == 0 else "completed_with_failures"
+    manifest = _write_evaluate_manifest(
+        config,
+        status=status,
+        failure_count=failure_count,
+        extra={
+            "provenance": provenance,
+            "projection": projection,
+            "timing_deferred": True,
+            "science_artifact_directory": str(
+                config.output_root / "science-report" / "artifacts"
+            ),
+        },
+    )
+    return PaperRunResult(
+        status,
+        RUN_EXIT_COMPLETE if failure_count == 0 else RUN_EXIT_FAILED_POINTS,
+        failure_count,
+        manifest,
+    )
+
+
+def _require_no_hard_failures(config: PaperExperimentConfig, stage: str) -> None:
+    if stage not in SCIENTIFIC_STAGES:
+        return
+    summary = pd.read_csv(config.output_root / stage / "summary.csv")
+    hard = summary[summary["status"].isin((
+        RunState.NATIVE_FAILED.value,
+        RunState.INFRASTRUCTURE_FAILED.value,
+    ))]
+    if not hard.empty:
+        raise RuntimeError(f"{stage} contains {len(hard)} native/infrastructure failures")
+
+
+def _pilot_primary_failure_count(config: PaperExperimentConfig) -> int:
+    summary = pd.read_csv(config.output_root / "pilot" / "summary.csv")
+    primary = summary[summary["method"] == "pairwise_ranking_policy"]
+    expected = len(config.pilot_seeds) * len(config.pilot_budgets)
+    if len(primary) != expected:
+        raise ValueError(
+            f"pilot has {len(primary)} primary-policy cells, expected {expected}"
+        )
+    return int((primary["status"] != RunState.COMPLETED.value).sum())
+
+
+def _write_evaluate_manifest(
+    config: PaperExperimentConfig,
+    *,
+    status: str,
+    failure_count: int,
+    extra: Mapping[str, object],
+) -> Path:
+    path = config.output_root / "evaluate" / "manifest.json"
+    write_json_atomic({
+        "schema": "pzr.paper-evaluation-scientific-run.v3",
+        "experiment_id": config.experiment_id,
+        "status": status,
+        "updated_at": _utc_now(),
+        "config_sha256": config.config_sha256,
+        "pzr_source_sha256": pzr_source_sha256(),
+        **_runtime_provenance(),
+        "failure_count": failure_count,
+        "expected_prerequisite_pilot_cells": config.expected_cells("pilot"),
+        "expected_main_scientific_manifest_cells": sum(
+            config.expected_cells(stage) for stage in PRIMARY_EVALUATION_STAGES
+        ),
+        "expected_new_main_scientific_executions": (
+            sum(config.expected_cells(stage) for stage in PRIMARY_EVALUATION_STAGES)
+            - len(config.fixed_figure8_trace_kinds) * len(config.budgets)
+        ),
+        "timing_included": False,
+        **dict(extra),
+    }, path)
+    return path
+
+
 def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
     """Return a non-mutating summary of the current paper-evaluation output."""
     stages: dict[str, object] = {}
@@ -336,11 +528,12 @@ def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
     projection_path = config.output_root / "pilot" / "projection.json"
     run_manifest = config.output_root / "run" / "manifest.json"
     exploration_manifest = config.output_root / "explore" / "manifest.json"
+    evaluate_manifest = config.output_root / "evaluate" / "manifest.json"
     exploration: dict[str, object] = {"status": "missing"}
     if exploration_manifest.is_file():
         try:
             exploration = load_json(exploration_manifest)
-            if exploration.get("schema") != "pzr.paper-evaluation-exploration.v2":
+            if exploration.get("schema") != "pzr.paper-evaluation-exploration.v3":
                 raise ValueError("unsupported exploration manifest schema")
             if exploration.get("config_sha256") != config.config_sha256:
                 raise ValueError("stale exploration config manifest")
@@ -350,7 +543,7 @@ def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
         except (OSError, ValueError) as exc:
             exploration = {"status": "stale_or_invalid", "message": str(exc)}
     return {
-        "schema": "pzr.paper-evaluation-status.v2",
+        "schema": "pzr.paper-evaluation-status.v3",
         "experiment_id": config.experiment_id,
         "output_root": str(config.output_root),
         "paper_artifact_dir": str(config.paper_artifact_dir),
@@ -358,8 +551,14 @@ def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
             run_manifest, PAPER_RUN_SCHEMA, config, "run",
         ),
         "exploration": exploration,
+        "scientific_evaluation": _validated_auxiliary_manifest(
+            evaluate_manifest,
+            "pzr.paper-evaluation-scientific-run.v3",
+            config,
+            "scientific evaluation",
+        ),
         "projection": _validated_auxiliary_manifest(
-            projection_path, "pzr.paper-evaluation-pilot-projection.v2", config,
+            projection_path, "pzr.paper-evaluation-pilot-projection.v3", config,
             "pilot projection",
         ),
         "approval_recorded": _approval_is_valid(config),
@@ -398,16 +597,33 @@ def _validate_completed_stage(config: PaperExperimentConfig, stage: str) -> None
         raise ValueError(f"stale {stage} source manifest")
     _validate_runtime_provenance(manifest, stage)
     if stage == "prepare":
-        dataset = config.output_root / "prepare" / "teacher" / "dataset" / "manifest.json"
-        if not dataset.is_file():
+        dataset = config.output_root / "prepare" / "teacher" / "dataset"
+        if not (dataset / "manifest.json").is_file():
             raise ValueError("prepare teacher dataset is missing")
+        if dataset_sha256(dataset) != manifest.get("teacher_dataset_sha256"):
+            raise ValueError("prepare teacher dataset hash differs")
     elif stage == "train":
-        models = manifest.get("models")
+        models = manifest.get("models_by_budget")
         if not isinstance(models, dict):
             raise ValueError("train manifest lacks models")
-        for payload in models.values():
+        if set(models) != {str(budget) for budget in config.budgets}:
+            raise ValueError("train manifest specialist budgets differ")
+        expected_hyperparameters = {
+            "epochs": config.training_epochs,
+            "batch_size": config.training_batch_size,
+            "learning_rate": config.training_learning_rate,
+            "weight_decay": config.training_weight_decay,
+            "patience": config.training_patience,
+            "seed": config.training_seed,
+        }
+        if manifest.get("shared_hyperparameters") != expected_hyperparameters:
+            raise ValueError("train manifest shared hyperparameters differ")
+        for budget_text, payload in models.items():
             if not isinstance(payload, dict):
                 raise ValueError("train manifest model entry is invalid")
+            budget = int(budget_text)
+            if payload.get("budget_filter") != [budget]:
+                raise ValueError("train manifest specialist filter differs")
             path = Path(str(payload["path"]))
             if model_sha256(path) != payload.get("sha256"):
                 raise ValueError(f"trained model hash differs: {path}")
@@ -415,19 +631,23 @@ def _validate_completed_stage(config: PaperExperimentConfig, stage: str) -> None
         _validate_scientific_stage(config, stage)
     elif stage == "timing":
         _validate_timing_stage(config, manifest)
-    elif stage == "report":
-        hashes_path = config.paper_artifact_dir / "artifact_hashes.json"
-        report_path = config.paper_artifact_dir / "report_manifest.json"
+    elif stage in {"science-report", "report"}:
+        artifact_dir = (
+            config.output_root / "science-report" / "artifacts"
+            if stage == "science-report" else config.paper_artifact_dir
+        )
+        hashes_path = artifact_dir / "artifact_hashes.json"
+        report_path = artifact_dir / "report_manifest.json"
         if not hashes_path.is_file():
             raise ValueError("paper artifact hashes are missing")
-        if load_json(hashes_path).get("schema") != "pzr.paper-generated-artifact-hashes.v2":
+        if load_json(hashes_path).get("schema") != "pzr.paper-generated-artifact-hashes.v3":
             raise ValueError("unsupported paper artifact hash schema")
         report = load_json(report_path)
-        if report.get("schema") != "pzr.paper-evaluation-report.v2":
+        if report.get("schema") != "pzr.paper-evaluation-report.v3":
             raise ValueError("unsupported paper report schema")
         if report.get("config_sha256") != config.config_sha256:
             raise ValueError("stale paper report config")
-    elif stage == "validate":
+    elif stage in {"science-validate", "validate"}:
         if manifest.get("status") not in {"completed", "completed_with_failures"}:
             raise ValueError("validation stage did not complete")
 
@@ -585,7 +805,7 @@ def _validate_projection(
     config: PaperExperimentConfig,
     projection: Mapping[str, object],
 ) -> None:
-    if projection.get("schema") != "pzr.paper-evaluation-pilot-projection.v2":
+    if projection.get("schema") != "pzr.paper-evaluation-pilot-projection.v3":
         raise ValueError("unsupported pilot projection schema")
     if projection.get("config_sha256") != config.config_sha256:
         raise ValueError("stale pilot projection config")
@@ -631,7 +851,7 @@ def _approval_is_valid(config: PaperExperimentConfig) -> bool:
     try:
         payload = load_json(path)
         return (
-            payload.get("schema") == "pzr.paper-evaluation-approval.v2"
+            payload.get("schema") == "pzr.paper-evaluation-approval.v3"
             and payload.get("config_sha256") == config.config_sha256
             and payload.get("pzr_source_sha256") == pzr_source_sha256()
         )
@@ -737,6 +957,40 @@ def _utc_now() -> str:
 
 def _run_prepare(config: PaperExperimentConfig) -> Path:
     stage_dir = config.output_root / "prepare"
+    parent = config.teacher_dataset_parent
+    if parent is not None and parent.is_dir():
+        _validate_teacher_dataset_parent(config, parent)
+        dataset = stage_dir / "teacher" / "dataset"
+        dataset.parent.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(parent, dataset, dirs_exist_ok=True)
+        if dataset_sha256(dataset) != config.teacher_dataset_parent_sha256:
+            raise ValueError("copied teacher dataset hash differs")
+        source_manifest = load_json(parent / "manifest.json")
+        write_json_atomic(stage_manifest(
+            config,
+            stage="prepare",
+            status="completed",
+            extra={
+                "teacher_dataset": str(dataset),
+                "teacher_dataset_sha256": dataset_sha256(dataset),
+                "teacher_dataset_origin": "reused_verified_parent",
+                "teacher_dataset_parent": str(parent),
+                "teacher_dataset_parent_pzr_source_sha256": source_manifest.get(
+                    "pzr_source_sha256"
+                ),
+                "teacher_budgets": list(config.budgets),
+                "teacher_seed_count": len(config.train_seeds)
+                + len(config.validation_seeds),
+                "trace_scope": TraceSource.GENERATED_NOMINAL.value,
+                "trace_kind": config.generated_nominal_trace_kind,
+                "training_trace_store": source_manifest.get("trace_store"),
+                "training_trace_store_manifest_sha256": source_manifest.get(
+                    "trace_store_manifest_sha256"
+                ),
+            },
+        ), stage_dir / "manifest.json")
+        return stage_dir
+
     trace_root = stage_dir / "traces"
     training_store = generate_random_waypoint_trace_store(RandomWaypointTraceStoreConfig(
         output=trace_root / "training",
@@ -763,6 +1017,8 @@ def _run_prepare(config: PaperExperimentConfig) -> Path:
         status="completed",
         extra={
             "teacher_dataset": str(dataset),
+            "teacher_dataset_sha256": dataset_sha256(dataset),
+            "teacher_dataset_origin": "collected",
             "teacher_budgets": list(config.budgets),
             "teacher_seed_count": len(config.train_seeds) + len(config.validation_seeds),
             "trace_scope": TraceSource.GENERATED_NOMINAL.value,
@@ -774,6 +1030,51 @@ def _run_prepare(config: PaperExperimentConfig) -> Path:
     return stage_dir
 
 
+def _validate_teacher_dataset_parent(
+    config: PaperExperimentConfig,
+    parent: Path,
+) -> None:
+    """Validate the immutable v1 teacher payload by its scientific contract."""
+    actual_hash = dataset_sha256(parent)
+    if actual_hash != config.teacher_dataset_parent_sha256:
+        raise ValueError("teacher dataset parent hash differs")
+    manifest = load_json(parent / "manifest.json")
+    expected = {
+        "schema": "pzr.reducer-cost-dataset.v5",
+        "scenario": "robot_arm",
+        "event_count": config.event_count,
+        "budgets": list(config.budgets),
+        "candidate_names": list(config.candidate_names),
+        "conditions": [config.generated_nominal_trace_kind],
+        "binding_revision": BINDING_REVISION,
+        "interpreter_revision": INTERPRETER_REVISION,
+        "binding_build_profile": BINDING_BUILD_PROFILE,
+    }
+    for key, value in expected.items():
+        if manifest.get(key) != value:
+            raise ValueError(f"teacher dataset parent {key} differs")
+    cost = manifest.get("cost_contract")
+    if not isinstance(cost, dict) or cost.get("teacher_cost") != (
+        "binding_native_two_event_full_width_terminal_cost"
+    ):
+        raise ValueError("teacher dataset parent objective differs")
+    feature = manifest.get("feature_schema")
+    if not isinstance(feature, dict) or (
+        feature.get("name"), feature.get("version")
+    ) != ("rtlola.current-zonotope", 2):
+        raise ValueError("teacher dataset parent feature schema differs")
+    traces = manifest.get("traces")
+    if not isinstance(traces, list):
+        raise ValueError("teacher dataset parent trace list is missing")
+    expected_split = {
+        **{seed: "train" for seed in config.train_seeds},
+        **{seed: "validation" for seed in config.validation_seeds},
+    }
+    actual_split = {int(item["seed"]): str(item["split"]) for item in traces}
+    if actual_split != expected_split:
+        raise ValueError("teacher dataset parent seed splits differ")
+
+
 def _run_train(config: PaperExperimentConfig) -> Path:
     stage_dir = config.output_root / "train"
     dataset = config.output_root / "prepare" / "teacher" / "dataset"
@@ -783,36 +1084,38 @@ def _run_train(config: PaperExperimentConfig) -> Path:
         datasets=(NamedDataset("terminal_full_width_teacher", dataset),),
         objective="pairwise",
         epochs=config.training_epochs,
-        batch_size=256,
-        learning_rate=1e-3,
-        weight_decay=1e-4,
-        patience=10,
-        seed=42,
+        batch_size=config.training_batch_size,
+        learning_rate=config.training_learning_rate,
+        weight_decay=config.training_weight_decay,
+        patience=config.training_patience,
+        seed=config.training_seed,
     )
-    all_budget = run_reducer_training(ReducerTrainingConfig(
-        output=stage_dir / "model-all-budgets",
-        budget_filter=None,
-        **common,
-    ))
-    budget80 = run_reducer_training(ReducerTrainingConfig(
-        output=stage_dir / "model-budget80",
-        budget_filter=(80,),
-        **common,
-    ))
+    models = {}
+    for budget in config.budgets:
+        output = run_reducer_training(ReducerTrainingConfig(
+            output=stage_dir / f"model-budget-{budget}",
+            budget_filter=(budget,),
+            **common,
+        ))
+        models[str(budget)] = {
+            "path": str(output),
+            "sha256": model_sha256(output),
+            "budget_filter": [budget],
+            "training_budget": budget,
+        }
     write_json_atomic(stage_manifest(
         config,
         stage="train",
         status="completed",
         extra={
-            "models": {
-                "pairwise_ranking_policy": {
-                    "path": str(all_budget), "sha256": model_sha256(all_budget),
-                    "budget_filter": None,
-                },
-                "pairwise_ranking_policy_budget80": {
-                    "path": str(budget80), "sha256": model_sha256(budget80),
-                    "budget_filter": [80],
-                },
+            "models_by_budget": models,
+            "shared_hyperparameters": {
+                "epochs": config.training_epochs,
+                "batch_size": config.training_batch_size,
+                "learning_rate": config.training_learning_rate,
+                "weight_decay": config.training_weight_decay,
+                "patience": config.training_patience,
+                "seed": config.training_seed,
             },
         },
     ), stage_dir / "manifest.json")
@@ -833,20 +1136,25 @@ def _run_pilot(config: PaperExperimentConfig, *, workers: int) -> Path:
     disk_bytes = sum(
         path.stat().st_size for path in (stage_dir / "cells").rglob("*") if path.is_file()
     )
+    pilot_manifest = load_json(stage_dir / "manifest.json")
     projection = pilot_projection(
         summary,
         target_cell_count=config.expected_cells("generalization"),
         worker_count=config.evaluation_workers,
         disk_bytes=disk_bytes,
         threshold_hours=config.maximum_projected_wall_hours,
+        observed_pilot_wall_seconds=float(pilot_manifest["matrix_wall_seconds"]),
         separate_fixed_workloads={
             "headline_cells": config.expected_cells("headline"),
             "objective_comparison_cells": config.expected_cells("objective-comparison"),
+            "objective_comparison_new_executions": (
+                len(config.fixed_figure8_trace_kinds) * len(config.budgets)
+            ),
             "timing_measured_repetitions": config.expected_cells("timing"),
             "timing_warmups": config.expected_timing_warmups,
         },
     )
-    projection["schema"] = "pzr.paper-evaluation-pilot-projection.v2"
+    projection["schema"] = "pzr.paper-evaluation-pilot-projection.v3"
     projection["config_sha256"] = config.config_sha256
     projection["pzr_source_sha256"] = pzr_source_sha256()
     write_json_atomic(projection, stage_dir / "projection.json")
@@ -909,14 +1217,116 @@ def _run_objective_comparison(
     *,
     workers: int,
 ) -> Path:
-    return _run_evaluation_matrix(
+    headline_dir = config.output_root / "headline"
+    _validate_completed_stage(config, "headline")
+    traces = _fixed_figure8_traces(config)
+    stage_dir = _run_evaluation_matrix(
         config,
         stage="objective-comparison",
-        traces=_fixed_figure8_traces(config),
+        traces=traces,
         budgets=config.budgets,
-        methods=OBJECTIVE_METHODS,
+        methods=("mpc_cumulative_beam",),
         workers=workers,
+        finalize=False,
     )
+    cumulative = pd.read_csv(stage_dir / "summary.csv")
+    cumulative["execution_origin"] = "executed_objective_comparison"
+    headline = pd.read_csv(headline_dir / "summary.csv")
+    terminal = headline[headline["method"] == "mpc_terminal_beam"].copy()
+    references = _prepare_references(config, stage_dir, traces)
+    trace_by_condition = {trace.condition: trace for trace in traces}
+    reused_rows = []
+    for row in terminal.to_dict("records"):
+        trace = trace_by_condition[str(row["condition"])]
+        budget = int(row["budget"])
+        method = config.method_by_name["mpc_terminal_beam"]
+        identity = cell_identity(
+            config,
+            stage="objective-comparison",
+            trace_id=trace.trace_id,
+            trace_sha256=trace.trace_sha256,
+            trace_source=trace.trace_source,
+            trace_kind=trace.trace_kind,
+            trace_provenance=trace.provenance,
+            condition=trace.condition,
+            seed=trace.seed,
+            event_count=len(trace.events),
+            budget=budget,
+            method=method,
+            reference_path=references[trace.trace_id],
+            model_sha256=None,
+        )
+        source_dir = (
+            headline_dir / "cells" / trace.trace_source.value / trace.condition
+            / f"seed-{trace.seed}" / f"budget-{budget}" / method.name
+        )
+        source_manifest_path = source_dir / "manifest.json"
+        source_manifest = load_json(source_manifest_path)
+        source_identity = source_manifest.get("identity")
+        if not isinstance(source_identity, dict):
+            raise ValueError(f"invalid headline source cell: {source_dir}")
+        for key in (
+            "trace_id", "trace_sha256", "trace_source", "trace_kind", "condition",
+            "seed", "event_count", "budget", "method", "model_sha256",
+            "model_training_budget", "spec_sha256", "binding_revision",
+            "interpreter_revision", "binding_build_profile", "reference_semantics",
+            "reference_cache_sha256",
+        ):
+            if source_identity.get(key) != identity.get(key):
+                raise ValueError(f"headline terminal reuse differs at {key}: {source_dir}")
+        target_dir = (
+            stage_dir / "cells" / trace.trace_source.value / trace.condition
+            / f"seed-{trace.seed}" / f"budget-{budget}" / method.name
+        )
+        target_dir.mkdir(parents=True, exist_ok=True)
+        source_series = source_dir / "timeseries_diagnostic.csv"
+        if source_series.is_file():
+            shutil.copy2(source_series, target_dir / source_series.name)
+        reused = dict(row)
+        reused["cell_fingerprint"] = identity["fingerprint"]
+        reused["cell_elapsed_ms"] = 0.0
+        reused["execution_origin"] = "reused_headline_terminal"
+        reused["source_cell_fingerprint"] = source_identity["fingerprint"]
+        reused_rows.append(reused)
+        write_csv_atomic(pd.DataFrame([reused]), target_dir / "summary.csv")
+        write_json_atomic({
+            "schema": PAPER_CELL_SCHEMA,
+            "identity": identity,
+            "status": reused["status"],
+            "cell_elapsed_ms": 0.0,
+            "diagnostic": {
+                "execution_origin": "reused_headline_terminal",
+                "source_stage": "headline",
+                "source_cell_manifest": str(source_manifest_path),
+                "source_cell_manifest_sha256": sha256_files((source_manifest_path,)),
+            },
+        }, target_dir / "manifest.json")
+    combined = pd.concat((cumulative, pd.DataFrame(reused_rows)), ignore_index=True)
+    validate_summary_matrix(config, "objective-comparison", combined)
+    write_csv_atomic(combined, stage_dir / "summary.csv")
+    series = [pd.read_csv(path) for path in (stage_dir / "cells").rglob(
+        "timeseries_diagnostic.csv"
+    )]
+    write_csv_atomic(pd.concat(series, ignore_index=True), stage_dir / "timeseries.csv")
+    failure_count = int((combined["status"] != RunState.COMPLETED.value).sum())
+    write_json_atomic(stage_manifest(
+        config,
+        stage="objective-comparison",
+        status="completed" if failure_count == 0 else "completed_with_failures",
+        cell_count=len(combined),
+        failure_count=failure_count,
+        extra={
+            "expected_cell_count": config.expected_cells("objective-comparison"),
+            "executed_cell_count": len(cumulative),
+            "reused_cell_count": len(reused_rows),
+            "reuse_source_stage": "headline",
+            "reuse_source_manifest_sha256": sha256_files((headline_dir / "manifest.json",)),
+            "methods": list(OBJECTIVE_METHODS),
+            "budgets": list(config.budgets),
+            "workers": workers,
+        },
+    ), stage_dir / "manifest.json")
+    return stage_dir
 
 
 def _run_ablation(config: PaperExperimentConfig, *, workers: int) -> Path:
@@ -956,13 +1366,12 @@ def _run_evaluation_matrix(
     method_overrides: Mapping[str, MethodConfig] | None = None,
     runtime_overrides: Mapping[str, str] | None = None,
     extra_manifest: Mapping[str, object] | None = None,
+    finalize: bool = True,
 ) -> Path:
     if workers < 1:
         raise ValueError("evaluation workers must be positive")
     stage_dir = config.output_root / stage
     references = _prepare_references(config, stage_dir, traces)
-    model_paths = _model_paths(config, methods)
-    model_hashes = {name: model_sha256(path) for name, path in model_paths.items()}
     source_hash = pzr_source_sha256()
     overrides = dict(method_overrides or {})
     runtime = dict(runtime_overrides or {})
@@ -971,6 +1380,9 @@ def _run_evaluation_matrix(
         reference_path = references[trace.trace_id]
         for budget in budgets:
             for name in methods:
+                model_path = _model_path(config, name, int(budget))
+                model_hash = model_sha256(model_path) if model_path is not None else None
+                model_training_budget = int(budget) if model_path is not None else None
                 method = (
                     overrides[name] if name in overrides else config.method_by_name[name]
                 )
@@ -988,7 +1400,8 @@ def _run_evaluation_matrix(
                     budget=int(budget),
                     method=method,
                     reference_path=reference_path,
-                    model_sha256=model_hashes.get(name),
+                    model_sha256=model_hash,
+                    model_training_budget=model_training_budget,
                     source_sha256=source_hash,
                 )
                 jobs.append(EvaluationCellJob(
@@ -1004,8 +1417,10 @@ def _run_evaluation_matrix(
                     runtime_method=runtime.get(name, name),
                     reference_path=reference_path,
                     identity=identity,
-                    model_directory=model_paths.get(name),
+                    model_directory=model_path,
+                    model_training_budget=model_training_budget,
                 ))
+    matrix_started = perf_counter()
     if workers == 1:
         rows = [_execute_cell_job(job) for job in jobs]
     else:
@@ -1015,6 +1430,7 @@ def _run_evaluation_matrix(
             max_tasks_per_child=1,
         ) as executor:
             rows = list(executor.map(_execute_cell_job, jobs))
+    matrix_wall_seconds = perf_counter() - matrix_started
     summary = pd.DataFrame(rows)
     if stage == "ablation":
         summary["horizon"] = summary["method"].map(
@@ -1023,7 +1439,8 @@ def _run_evaluation_matrix(
         summary["beam_width"] = summary["method"].map(
             {job.method.name: job.method.beam_width for job in jobs}
         )
-    validate_summary_matrix(config, stage, summary)
+    if finalize:
+        validate_summary_matrix(config, stage, summary)
     write_csv_atomic(summary, stage_dir / "summary.csv")
     series = []
     for job in jobs:
@@ -1044,6 +1461,8 @@ def _run_evaluation_matrix(
         stage_dir / "timeseries.csv",
     )
     failure_count = int((summary["status"] != RunState.COMPLETED.value).sum())
+    if not finalize:
+        return stage_dir
     write_json_atomic(stage_manifest(
         config,
         stage=stage,
@@ -1053,6 +1472,7 @@ def _run_evaluation_matrix(
         extra={
             "expected_cell_count": config.expected_cells(stage),
             "workers": workers,
+            "matrix_wall_seconds": matrix_wall_seconds,
             "methods": list(methods),
             "budgets": list(budgets),
             "trace_sources": sorted({trace.trace_source.value for trace in traces}),
@@ -1089,6 +1509,7 @@ def _execute_cell_job(job: EvaluationCellJob) -> dict[str, object]:
             raise ValueError(f"cell summary has {len(frame)} rows: {job.directory}")
         return frame.iloc[0].to_dict()
     job.directory.mkdir(parents=True, exist_ok=True)
+    started = perf_counter()
     try:
         row, diagnostic = _run_cell(job)
     except Exception as exc:
@@ -1096,11 +1517,14 @@ def _execute_cell_job(job: EvaluationCellJob) -> dict[str, object]:
         diagnostic = {
             "failure_type": type(exc).__name__, "message": str(exc),
         }
+    cell_elapsed_ms = (perf_counter() - started) * 1000.0
+    row["cell_elapsed_ms"] = cell_elapsed_ms
     write_csv_atomic(pd.DataFrame([row]), summary_path)
     write_json_atomic({
         "schema": PAPER_CELL_SCHEMA,
         "identity": job.identity,
         "status": row["status"],
+        "cell_elapsed_ms": cell_elapsed_ms,
         "diagnostic": diagnostic,
     }, manifest_path)
     return row
@@ -1269,6 +1693,7 @@ def _row_identity(job: EvaluationCellJob) -> dict[str, object]:
         "method": job.method.name,
         "horizon": job.method.horizon,
         "beam_width": job.method.beam_width,
+        "model_training_budget": job.model_training_budget,
         "cell_fingerprint": job.identity["fingerprint"],
     }
 
@@ -1294,19 +1719,23 @@ def _prepare_references(
     return paths
 
 
-def _model_paths(
+def _model_path(
     config: PaperExperimentConfig,
-    methods: Sequence[str],
-) -> dict[str, Path]:
-    paths = {
-        method: config.output_root / "train" / relative
-        for method, relative in LEARNED_METHODS.items()
-        if method in methods
-    }
-    missing = [path for path in paths.values() if not (path / "training.json").is_file()]
-    if missing:
-        raise ValueError(f"trained paper models are missing: {missing}")
-    return paths
+    method: str,
+    budget: int,
+) -> Path | None:
+    if method not in LEARNED_METHODS:
+        return None
+    if budget not in config.budgets:
+        raise ValueError(f"learned policy has no configured budget: {budget}")
+    path = config.output_root / "train" / f"model-budget-{budget}"
+    training_path = path / "training.json"
+    if not training_path.is_file():
+        raise ValueError(f"trained paper specialist is missing: {path}")
+    training = load_json(training_path)
+    if training.get("budget_filter") != [budget]:
+        raise ValueError(f"trained specialist budget differs: {path}")
+    return path
 
 
 def _generated_nominal_stage_traces(
@@ -1404,18 +1833,19 @@ def _run_timing(config: PaperExperimentConfig) -> Path:
     traces = _fixed_figure8_traces(config)
     methods = HEADLINE_METHODS
     references = _prepare_references(config, stage_dir, traces)
-    model_paths = _model_paths(config, methods)
-    policies = {
-        name: RtlolaReducerPolicy(
-            ReducerPolicy.load(path), default_action_catalog(config.candidate_names),
-        )
-        for name, path in model_paths.items()
-    }
     for variable in ("OPENBLAS_NUM_THREADS", "OMP_NUM_THREADS", "MKL_NUM_THREADS", "NUMEXPR_NUM_THREADS"):
         os.environ[variable] = "1"
     rows = []
     warm_trace = traces[0]
     for budget in config.budgets:
+        policies = {}
+        for name in methods:
+            model_path = _model_path(config, name, budget)
+            if model_path is not None:
+                policies[name] = RtlolaReducerPolicy(
+                    ReducerPolicy.load(model_path),
+                    default_action_catalog(config.candidate_names),
+                )
         for name in methods:
             method = config.method_by_name[name]
             _timed_call(
@@ -1574,16 +2004,30 @@ def _timed_call(
     return elapsed, len(events), RunState.COMPLETED
 
 
+def _run_science_report(config: PaperExperimentConfig) -> Path:
+    return _run_report_common(config, include_timing=False)
+
+
 def _run_report(config: PaperExperimentConfig) -> Path:
+    return _run_report_common(config, include_timing=True)
+
+
+def _run_report_common(
+    config: PaperExperimentConfig,
+    *,
+    include_timing: bool,
+) -> Path:
     from pzr.rtlola.paper_artifacts import write_paper_evaluation_reports
 
     inputs = {
         stage: config.output_root / stage
         for stage in (
             "pilot", "objective-comparison", "headline", "generalization",
-            "ablation", "timing",
+            "ablation",
         )
     }
+    if include_timing:
+        inputs["timing"] = config.output_root / "timing"
     for stage, path in inputs.items():
         if not (path / "manifest.json").is_file():
             raise ValueError(f"report input stage is missing: {stage}")
@@ -1595,19 +2039,43 @@ def _run_report(config: PaperExperimentConfig) -> Path:
         generalization_summary=pd.read_csv(inputs["generalization"] / "summary.csv"),
         objective_summary=pd.read_csv(inputs["objective-comparison"] / "summary.csv"),
         ablation_summary=pd.read_csv(inputs["ablation"] / "summary.csv"),
-        timing_summary=pd.read_csv(inputs["timing"] / "summary.csv"),
+        timing_summary=(
+            pd.read_csv(inputs["timing"] / "summary.csv")
+            if include_timing else None
+        ),
         nominal_composition_timeseries=generalization_timeseries,
         fixed_composition_timeseries=headline_timeseries,
         pilot_projection=load_json(inputs["pilot"] / "projection.json"),
+        output=(
+            None
+            if include_timing
+            else config.output_root / "science-report" / "artifacts"
+        ),
     )
+    stage = "report" if include_timing else "science-report"
     write_json_atomic(stage_manifest(
-        config, stage="report", status="completed",
-        extra={"artifact_directory": str(output)},
-    ), config.output_root / "report" / "manifest.json")
+        config, stage=stage, status="completed",
+        extra={
+            "artifact_directory": str(output),
+            "timing_included": include_timing,
+        },
+    ), config.output_root / stage / "manifest.json")
     return output
 
 
+def _run_science_validate(config: PaperExperimentConfig) -> Path:
+    return _run_validate_common(config, include_timing=False)
+
+
 def _run_validate(config: PaperExperimentConfig) -> Path:
+    return _run_validate_common(config, include_timing=True)
+
+
+def _run_validate_common(
+    config: PaperExperimentConfig,
+    *,
+    include_timing: bool,
+) -> Path:
     validations = {}
     evaluation_stages = ["pilot", "headline", "generalization", "ablation"]
     if (config.output_root / "objective-comparison" / "manifest.json").is_file():
@@ -1642,33 +2110,40 @@ def _run_validate(config: PaperExperimentConfig) -> Path:
             "cell_count": len(summary),
             "failure_count": int((summary["status"] != RunState.COMPLETED.value).sum()),
         }
-    timing_manifest = load_json(config.output_root / "timing" / "manifest.json")
-    if timing_manifest.get("schema") != PAPER_STAGE_SCHEMA:
-        raise ValueError("unsupported timing stage manifest schema")
-    if timing_manifest.get("config_sha256") != config.config_sha256:
-        raise ValueError("stale timing config manifest")
-    if timing_manifest.get("pzr_source_sha256") != current_source_hash:
-        raise ValueError("stale timing source manifest")
-    _validate_runtime_provenance(timing_manifest, "timing")
-    _validate_timing_stage(config, timing_manifest)
-    validations["timing"] = {
-        "cell_count": int(timing_manifest.get("cell_count", 0)),
-        "failure_count": int(timing_manifest.get("failure_count", 0)),
-    }
-    artifact_manifest = config.paper_artifact_dir / "artifact_hashes.json"
+    if include_timing:
+        timing_manifest = load_json(config.output_root / "timing" / "manifest.json")
+        if timing_manifest.get("schema") != PAPER_STAGE_SCHEMA:
+            raise ValueError("unsupported timing stage manifest schema")
+        if timing_manifest.get("config_sha256") != config.config_sha256:
+            raise ValueError("stale timing config manifest")
+        if timing_manifest.get("pzr_source_sha256") != current_source_hash:
+            raise ValueError("stale timing source manifest")
+        _validate_runtime_provenance(timing_manifest, "timing")
+        _validate_timing_stage(config, timing_manifest)
+        validations["timing"] = {
+            "cell_count": int(timing_manifest.get("cell_count", 0)),
+            "failure_count": int(timing_manifest.get("failure_count", 0)),
+        }
+    artifact_root = (
+        config.paper_artifact_dir
+        if include_timing else config.output_root / "science-report" / "artifacts"
+    )
+    artifact_manifest = artifact_root / "artifact_hashes.json"
     if not artifact_manifest.is_file():
         raise ValueError("generated paper artifact hash manifest is missing")
-    destination = config.output_root / "validate"
+    stage = "validate" if include_timing else "science-validate"
+    destination = config.output_root / stage
     failure_count = sum(
         int(stage["failure_count"]) for stage in validations.values()
     )
     write_json_atomic(stage_manifest(
-        config, stage="validate",
+        config, stage=stage,
         status="completed" if failure_count == 0 else "completed_with_failures",
         failure_count=failure_count,
         extra={
             "validated_stages": validations,
             "artifact_hash_manifest": str(artifact_manifest),
+            "timing_included": include_timing,
         },
     ), destination / "manifest.json")
     return destination
@@ -1687,7 +2162,9 @@ def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(
         description="Run the versioned paper evaluation",
     )
-    parser.add_argument("stage", choices=(*STAGES, "explore", "run", "status"))
+    parser.add_argument(
+        "stage", choices=(*STAGES, "explore", "evaluate", "run", "status"),
+    )
     parser.add_argument("--config", type=Path, default=DEFAULT_CONFIG)
     parser.add_argument("--output", type=Path)
     parser.add_argument("--paper-artifacts", type=Path)
@@ -1721,6 +2198,8 @@ def main(argv: list[str] | None = None) -> None:
             teacher_workers=1,
             evaluation_workers=1,
             training_epochs=2,
+            teacher_dataset_parent=None,
+            teacher_dataset_parent_sha256=None,
             train_seeds=(0,),
             validation_seeds=(1,),
             reserved_exploration_seeds=(26,),
@@ -1755,7 +2234,7 @@ def main(argv: list[str] | None = None) -> None:
         except Exception as exc:
             if config.output_root.is_dir():
                 write_json_atomic({
-                    "schema": "pzr.paper-evaluation-exploration.v2",
+                    "schema": "pzr.paper-evaluation-exploration.v3",
                     "experiment_id": config.experiment_id,
                     "status": "failed",
                     "updated_at": _utc_now(),
@@ -1768,6 +2247,21 @@ def main(argv: list[str] | None = None) -> None:
             raise
         print(
             f"Exploratory bundle {result.status}: failures={result.failure_count}, "
+            f"manifest={result.manifest}",
+        )
+        raise SystemExit(result.exit_code)
+    if args.stage == "evaluate":
+        if args.workers not in {None, config.evaluation_workers}:
+            raise ValueError(
+                "evaluate uses the configured worker counts to retain its declared semantics"
+            )
+        result = run_scientific_paper_evaluation(
+            config,
+            approve_long_run=args.approve_long_run,
+            smoke=args.smoke,
+        )
+        print(
+            f"Scientific evaluation {result.status}: failures={result.failure_count}, "
             f"manifest={result.manifest}",
         )
         raise SystemExit(result.exit_code)

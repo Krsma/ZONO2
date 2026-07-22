@@ -19,7 +19,7 @@ The adopted split is:
 This separates trajectory diversity from controlled fault presentation. It
 also avoids presenting condition-dependent rejection samples as though they
 were paired fault variants of one random trajectory. This is now the contract
-in `experiments/paper_evaluation_v1.yaml`: pilot, held-out generalization, and
+in `experiments/paper_evaluation_v2.yaml`: pilot, held-out generalization, and
 horizon/width ablation generate nominal traces only. The earlier
 four-generated-condition design is retained here as superseded history and its
 artifacts must not be reinterpreted.
@@ -100,5 +100,5 @@ redesigned provenance-rich generator satisfying the requirements above and
 publishing fresh experiment artifacts.
 
 Do not reinterpret artifacts produced under the superseded four-condition
-generation contract. Regenerate affected manifests under the schema-v2
+generation contract. Regenerate affected manifests under the schema-v3
 specification/configuration hash.

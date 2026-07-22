@@ -69,30 +69,33 @@ pzr-learning train --dataset clean=/tmp/pzr-learning/clean/dataset \
   --output /tmp/pzr-learning/model-pairwise-ranking-policy --objective pairwise --epochs 2
 ```
 
-The paper evaluation is defined by `experiments/paper_evaluation_v1.yaml`.
+The current paper evaluation is defined by `experiments/paper_evaluation_v2.yaml`.
 Run or resume only the release-checked teacher/training/formal-pilot bundle with:
 
 ```bash
 tools/run_paper_evaluation.sh explore
 ```
 
-`explore` includes preflight, nominal teacher-trace preparation, both policy
-trainings, and the 54-cell nominal pilot. It
+`explore` includes preflight, verified reuse of the nominal teacher dataset,
+seven fixed-hyperparameter budget-specialist trainings, and the 112-cell
+nominal pilot (two seeds, seven budgets, eight methods). It
 does not run objective comparison, headline, held-out generalization, ablation,
 timing, reporting, validation, or the historical bounded-exploration study. Its
 outputs are source-compatible with a later complete `run` and will be validated
 and skipped when that run resumes.
 
-Run or resume the complete release-checked bundle with:
+Run or resume the paper's scientific evaluation, without dedicated timing, with:
 
 ```bash
-tools/run_paper_evaluation.sh run
+tools/run_paper_evaluation.sh evaluate
 ```
 
 The command runs the release/binding preflight excluding explicitly marked
-RLolaEval parity tests, teacher preparation, both policy trainings, pilot,
-objective comparison, headline, held-out generalization, H/W ablation,
-sequential timing, reporting, and integrity validation. Inspect a running or
+RLolaEval parity tests, teacher reuse, specialist training, pilot, headline,
+matched objective comparison, held-out generalization, H/W ablation, interim
+reporting, and integrity validation. Dedicated contention-free timing is
+deferred; run `tools/run_paper_evaluation.sh timing` and then `run` when it is
+needed for final throughput artifacts. Inspect a running or
 interrupted evaluation with `tools/run_paper_evaluation.sh status`. Individual
 `pzr-paper` stages remain available for focused diagnostics.
 
@@ -107,20 +110,21 @@ pzr-rtlola-parity --rlola-eval ../rlola-eval --output /tmp/pzr-parity \
 
 The ordinary unfiltered pytest command still includes all parity-marked tests.
 
-The 54-cell pilot projects only the 1,260-cell nominal held-out sweep. If it
+The 112-cell pilot projects only the 1,120-cell nominal held-out sweep. If it
 exceeds 72 four-worker hours, the run exits after recording the projection.
 After reviewing it, resume with:
 
 ```bash
-tools/run_paper_evaluation.sh run --approve-long-run
+tools/run_paper_evaluation.sh evaluate --approve-long-run
 ```
 
 Supplying approval before the pilot exists is rejected. Valid completed stages
 are skipped, partial cell matrices resume, and stale manifests require a fresh
 output directory. Raw cells and stage logs remain under
-`results/paper-evaluation-v1`; compact source tables, TeX tables, PDF/PNG
+`results/paper-evaluation-v2`; compact interim source tables, TeX tables, PDF/PNG
 figures, and their hashes are written under
-`paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v1`.
+`results/paper-evaluation-v2/science-report/artifacts`. Final timing-inclusive
+artifacts use `paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v2`.
 
 Learning, pilot, held-out generalization, and H/W ablation use independently
 generated nominal random-waypoint traces only. The four full-length imported
@@ -133,7 +137,7 @@ For an unattended run, start the checked-in command in a detached session:
 
 ```bash
 tmux new-session -d -s paper-evaluation \
-  'cd /home/vlkr/Faks/phd/ZONO2 && tools/run_paper_evaluation.sh run'
+  'cd /home/vlkr/Faks/phd/ZONO2 && tools/run_paper_evaluation.sh evaluate'
 ```
 
 For the exploratory bundle only:
@@ -148,10 +152,11 @@ bundle validated with explicitly unavailable scientific or timing points, `75`
 means pilot approval is required, and `1` indicates an execution or integrity
 failure.
 
-`pairwise_ranking_policy` is trained from one seven-budget terminal full-width
-teacher dataset. `pairwise_ranking_policy_budget80` uses the same dataset with
-an explicit recorded budget-80 filter and appears only in the extrapolation
-study. Offline terminal beam uses recorded future inputs, while the linear
+`pairwise_ranking_policy` denotes a family of seven specialists. Specialist
+`b` is trained only from budget-`b` rows of the one verified terminal full-width
+teacher dataset and is evaluated only at budget `b`; all specialists share the
+same fixed training hyperparameters. Cross-budget and joint-budget learned
+policies are deferred follow-up work. Offline terminal beam uses recorded future inputs, while the linear
 predictive beam is causal and deployable. Exact caches are used only for
 offline metrics; selection and teaching retain native unreduced rollouts.
 
@@ -233,7 +238,7 @@ datasets, explicit PyTorch model directories, and generalization evaluation
 artifacts at the user-provided paths.
 The paper pipeline writes source-aware cells, diagnostic time series, stage
 summaries, a top-level run manifest, and per-stage logs below
-`results/paper-evaluation-v1`. Its report stage writes compact CSV and TeX
+`results/paper-evaluation-v2`. Its report stage writes compact CSV and TeX
 tables plus PDF/PNG figures and a complete hash manifest into the paper's
 generated-artifact directory.
 

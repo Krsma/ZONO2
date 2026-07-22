@@ -37,7 +37,7 @@ pzr-benchmark --profile smoke --scenario omni_robot --method-set core \
 tools/run_rtlola_robot_arm.sh --length 20 --seeds 1 --method-set core \
   --output /tmp/pzr-arm
 
-tools/run_paper_evaluation.sh run --smoke
+tools/run_paper_evaluation.sh evaluate --smoke
 
 pzr-learning generate --output /tmp/pzr-learning/traces --event-count 10 \
   --conditions random_waypoint --seed-count 3
@@ -105,18 +105,19 @@ The canonical wrapper is `tools/run_paper_evaluation.sh`. It performs the
 non-parity release preflight, training, pilot gating, all scientific matrices,
 reporting, and validation. It prepares one exact reference per trace and uses
 source-aware resumable cells. The H/W ablation uses one experiment worker so
-its throughput heatmap is contention-free; headline and generalization use four
-workers. Full RLolaEval notebook parity remains available through
+its diagnostic throughput is contention-free; headline and generalization use four
+workers. Dedicated timing is deferred from the main `evaluate` command. Full
+RLolaEval notebook parity remains available through
 `pzr-rtlola-parity` but is never invoked or required by paper stages.
 `tools/run_paper_evaluation.sh explore` is the preliminary entrypoint: it runs
-only release preflight, teacher preparation, both policy trainings, and the
-formal pilot. It does not run paper-scale matrices or the historical
+only release preflight, verified teacher reuse, seven specialist trainings,
+and the formal pilot. It does not run paper-scale matrices or the historical
 bounded-exploration study.
 
 ## Current Robot-Arm Results
 
 There is currently no active canonical paper artifact. New results belong under
-`results/paper-evaluation-v1` and must validate through the versioned pipeline.
+`results/paper-evaluation-v2` and must validate through the versioned pipeline.
 Earlier robot-arm, four-budget learning, MPC-tail, and bounded-exploration
 outputs are historical and must not be quoted as the current evaluation.
 
@@ -160,17 +161,17 @@ generator mass. It is strictly pre-event and does not use stream values,
 history, spectral statistics, or an inference-time preview rollout.
 
 Pairwise Ranking Policy is the primary paper-facing learned method. The
-versioned experiment in `experiments/paper_evaluation_v1.yaml` pre-generates
+versioned experiment in `experiments/paper_evaluation_v2.yaml` reuses the verified
 26 independent 500-event nominal random-waypoint traces and collects one
 terminal full-width teacher dataset at budgets `40,80,120,150,200,250,500`.
-Clean teacher train/validation seeds are 0--19/20--25. The primary model uses
-all seven budgets; `pairwise_ranking_policy_budget80` is separately trained by
-filtering that dataset to recorded budget-80 samples and is only an
-extrapolation diagnostic.
+Clean teacher train/validation seeds are 0--19/20--25. It trains one
+fixed-hyperparameter specialist per budget from only that budget's rows and
+dispatches each specialist only at its matching evaluation budget. Joint- and
+cross-budget learned policies are deferred follow-up work.
 
 The Phase 1 cleanup reset all prior learning result directories. There is no
 active primary, secondary, exploratory, or paper-evaluation result artifact.
-New claims require the versioned 224-cell fixed figure-8 headline and 1,260-cell
+New claims require the versioned 224-cell fixed figure-8 headline and 1,120-cell
 nominal held-out manifests, with every failed point explicitly unavailable.
 
 Soft-KL and guarded DART remain completed secondary ablations and are not part

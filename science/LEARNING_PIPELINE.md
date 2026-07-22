@@ -44,11 +44,11 @@ random-waypoint trajectories:
 |---|---:|---:|---|
 | Primary clean | 0--19 | 20--25 | teacher |
 
-Validation trajectories never contribute gradients. The wrapper trains only
-`pairwise_ranking_policy` across all seven paper budgets and separately trains
-`pairwise_ranking_policy_budget80` from the recorded budget-80 subset. The
-all-budget policy is the only primary learned method; the budget-80 model is an
-extrapolation diagnostic.
+Validation trajectories never contribute gradients. The wrapper trains seven
+`pairwise_ranking_policy` specialists from this one dataset. Specialist `b`
+receives only recorded budget-`b` samples and is dispatched only at evaluation
+budget `b`. Epochs, batch size, optimizer settings, patience, and seed are fixed
+across budgets. Joint-budget and cross-budget policies are follow-up work.
 
 Exact references are prepared once per trace. Teacher collection uses ten
 spawned workers; pilot, headline, objective comparison, and generalization use
@@ -60,11 +60,11 @@ NumExpr remain limited to one native thread.
 Run or resume the complete paper evaluation with:
 
 ```bash
-tools/run_paper_evaluation.sh run
+tools/run_paper_evaluation.sh evaluate
 ```
 
 The output must be fresh and source-aware. We do not claim a revised result
-until the 224-cell fixed figure-eight headline and 1,260-cell nominal held-out
+until the 224-cell fixed figure-eight headline and 1,120-cell nominal held-out
 manifests validate, with every failed point explicitly unavailable. Training,
 pilot, held-out evaluation, and H/W ablation generate nominal random-waypoint
 traces only. Imported patterned figure-eight traces are controlled case studies

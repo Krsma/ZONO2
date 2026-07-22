@@ -17,6 +17,7 @@ from pzr.rtlola.paper_experiment import (
     RunState,
     aggregate_trace_metrics,
     artifact_hash_manifest,
+    load_json,
     reducer_composition,
     trace_level_metrics,
 )
@@ -32,7 +33,6 @@ METHOD_LABELS = {
     "mpc_terminal_full_width": "Full-width teacher",
     "mpc_cumulative_beam": "Cumulative beam (offline)",
     "pairwise_ranking_policy": "Pairwise ranking policy",
-    "pairwise_ranking_policy_budget80": "Budget-80 policy",
 }
 COLORS = (
     "#0072B2", "#D55E00", "#009E73", "#CC79A7", "#E69F00",
@@ -49,7 +49,7 @@ def write_paper_evaluation_reports(
     generalization_summary: pd.DataFrame,
     objective_summary: pd.DataFrame,
     ablation_summary: pd.DataFrame,
-    timing_summary: pd.DataFrame,
+    timing_summary: pd.DataFrame | None,
     nominal_composition_timeseries: pd.DataFrame,
     fixed_composition_timeseries: pd.DataFrame,
     pilot_projection: Mapping[str, object],
@@ -74,9 +74,10 @@ def write_paper_evaluation_reports(
         "generated_nominal_random_waypoint",
         "H/W ablation summary",
     )
-    _require_single_trace_source(
-        timing_summary, "fixed_rlolaeval", "timing summary",
-    )
+    if timing_summary is not None:
+        _require_single_trace_source(
+            timing_summary, "fixed_rlolaeval", "timing summary",
+        )
     _require_single_trace_source(
         nominal_composition_timeseries,
         "generated_nominal_random_waypoint",
@@ -101,7 +102,6 @@ def write_paper_evaluation_reports(
         config.fixed_figure8_trace_kinds,
     )
     fallback = fallback_diagnostics(headline_summary)
-    extrapolation = budget80_extrapolation(generalization)
     nominal_composition = reducer_composition(nominal_composition_timeseries)
     fixed_composition = reducer_composition(fixed_composition_timeseries)
     ablation = ablation_table(ablation_summary)
@@ -112,20 +112,29 @@ def write_paper_evaluation_reports(
         "objective_comparison.csv": objective,
         "headline_long_table.csv": long_table,
         "fallback_diagnostics.csv": fallback,
-        "budget80_extrapolation.csv": extrapolation,
         "nominal_reducer_composition.csv": nominal_composition,
         "fixed_figure8_reducer_composition.csv": fixed_composition,
         "ablation_heatmaps.csv": ablation,
-        "timing_summary.csv": timing_summary,
     }
+    if timing_summary is not None:
+        tables["timing_summary.csv"] = timing_summary
+    train_manifest = load_json(config.output_root / "train" / "manifest.json")
+    model_rows = [
+        {
+            "method": "pairwise_ranking_policy",
+            "training_budget": int(budget),
+            "model_sha256": payload["sha256"],
+            "budget_filter": int(payload["budget_filter"][0]),
+        }
+        for budget, payload in sorted(
+            train_manifest["models_by_budget"].items(), key=lambda item: int(item[0])
+        )
+    ]
+    tables["pairwise_ranking_policy_specialists.csv"] = pd.DataFrame(model_rows)
     for name, frame in tables.items():
         write_csv_atomic(frame, destination / name)
     write_text_atomic(_headline_tex(long_table), destination / "headline_long_table.tex")
     write_text_atomic(_fallback_tex(fallback), destination / "fallback_diagnostics.tex")
-    write_text_atomic(
-        _extrapolation_tex(extrapolation),
-        destination / "budget80_extrapolation.tex",
-    )
     write_text_atomic(
         _objective_tex(objective),
         destination / "objective_comparison.tex",
@@ -144,9 +153,12 @@ def write_paper_evaluation_reports(
     _plot_composition(
         fixed_composition, destination / "fixed_figure8_reducer_composition",
     )
-    _plot_ablation(ablation, destination / "ablation_heatmaps")
+    _plot_ablation(
+        ablation, destination / "ablation_heatmaps",
+        include_throughput=timing_summary is not None,
+    )
     write_json_atomic({
-        "schema": "pzr.paper-evaluation-report.v2",
+        "schema": "pzr.paper-evaluation-report.v3",
         "config_sha256": config.config_sha256,
         "bootstrap": {
             "replicates": 10_000,
@@ -171,6 +183,10 @@ def write_paper_evaluation_reports(
             "randomized_fault_generalization": False,
         },
         "ordinary_composition_exclusions": ["none", "fallback", "infeasible_event"],
+        "timing_included": timing_summary is not None,
+        "learned_policy_contract": (
+            "one fixed-hyperparameter specialist trained and evaluated at each exact budget"
+        ),
     }, destination / "report_manifest.json")
     write_json_atomic(
         artifact_hash_manifest(destination),
@@ -195,7 +211,7 @@ def _require_single_trace_source(
 
 def headline_long_table(
     summary: pd.DataFrame,
-    timing: pd.DataFrame,
+    timing: pd.DataFrame | None,
     budgets: Sequence[int],
     conditions: Sequence[str],
 ) -> pd.DataFrame:
@@ -221,11 +237,14 @@ def headline_long_table(
                 row[f"{prefix}_loss"] = (
                     float(cell.iloc[0]["mean_approx_loss"]) if completed else np.nan
                 )
-                timing_cell = timing[
-                    (timing["budget"] == budget)
-                    & (timing["method"] == method)
-                    & (timing["condition"] == condition)
-                ]
+                timing_cell = (
+                    timing[
+                        (timing["budget"] == budget)
+                        & (timing["method"] == method)
+                        & (timing["condition"] == condition)
+                    ]
+                    if timing is not None else pd.DataFrame()
+                )
                 row[f"{prefix}_throughput"] = (
                     float(timing_cell["median_throughput_events_per_second"].iloc[0])
                     if completed and len(timing_cell) == 1 else np.nan
@@ -267,18 +286,6 @@ def fallback_diagnostics(summary: pd.DataFrame) -> pd.DataFrame:
     return data.loc[data["status"] != RunState.COMPLETED.value, columns].reset_index(
         drop=True,
     )
-
-
-def budget80_extrapolation(generalization: pd.DataFrame) -> pd.DataFrame:
-    """Compare the budget-80-only policy with the all-budget policy everywhere."""
-    methods = ("pairwise_ranking_policy", "pairwise_ranking_policy_budget80")
-    selected = generalization[generalization["method"].isin(methods)].copy()
-    counts = selected.groupby(
-        ["trace_source", "trace_kind", "condition", "budget"],
-    )["method"].nunique()
-    if not counts.empty and bool((counts != 2).any()):
-        raise ValueError("budget-80 extrapolation policies do not align")
-    return selected.sort_values(["condition", "budget", "method"]).reset_index(drop=True)
 
 
 def ablation_table(summary: pd.DataFrame) -> pd.DataFrame:
@@ -421,14 +428,20 @@ def _plot_composition(data: pd.DataFrame, stem: Path) -> None:
     plt.close(figure)
 
 
-def _plot_ablation(data: pd.DataFrame, stem: Path) -> None:
+def _plot_ablation(
+    data: pd.DataFrame,
+    stem: Path,
+    *,
+    include_throughput: bool = True,
+) -> None:
     plt = _pyplot()
     conditions = tuple(dict.fromkeys(data["condition"].astype(str)))
-    metrics = (
+    metrics = [
         ("mean_loss", "Native loss"),
         ("macro_fpr", "Macro FPR"),
-        ("median_throughput_events_per_second", "Events/s"),
-    )
+    ]
+    if include_throughput:
+        metrics.append(("median_throughput_events_per_second", "Events/s"))
     figure, axes = plt.subplots(
         len(metrics), len(conditions), figsize=(7.05, 5.0),
         constrained_layout=True, squeeze=False,
@@ -529,27 +542,6 @@ def _fallback_tex(frame: pd.DataFrame) -> str:
             f"& {row.budget} & {_tex(str(row.status))} & "
             f"{_format_number(row.first_fallback_event)} & "
             f"{_format_number(row.completed_fraction)} \\\\"
-        )
-    lines.extend(("\\bottomrule", "\\end{tabular}", ""))
-    return "\n".join(lines)
-
-
-def _extrapolation_tex(frame: pd.DataFrame) -> str:
-    columns = ["condition", "budget", "method", "macro_fpr", "macro_mean_approx_loss"]
-    compact = frame[columns] if set(columns) <= set(frame.columns) else pd.DataFrame(columns=columns)
-    lines = [
-        "% Generated by pzr-paper; do not edit.",
-        "\\begin{tabular}{lrlll}",
-        "\\toprule",
-        "Condition & Budget & Policy & Macro FPR & Mean loss \\\\",
-        "\\midrule",
-    ]
-    for row in compact.itertuples(index=False):
-        lines.append(
-            f"{_tex(str(row.condition))} & {row.budget} & "
-            f"{_tex(METHOD_LABELS.get(row.method, row.method))} & "
-            f"{_format_number(row.macro_fpr)} & "
-            f"{_format_number(row.macro_mean_approx_loss)} \\\\"
         )
     lines.extend(("\\bottomrule", "\\end{tabular}", ""))
     return "\n".join(lines)

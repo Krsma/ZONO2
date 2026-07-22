@@ -94,9 +94,10 @@ was removed by the Phase 1 schema reset and is not an active result.
 ## Evaluation Claims
 
 The primary completion criteria are the 224-cell full-length fixed figure-eight
-headline and the 1,260-cell nominal held-out generalization matrix. The latter
+headline and the 1,120-cell nominal held-out generalization matrix. The latter
 covers twenty independently generated random-waypoint traces, seven transform
-bounds, eight headline methods, and the budget-80 extrapolation policy.
+bounds, and eight headline methods. The learned row uses the specialist trained
+at the same exact budget; joint- and cross-budget policies are deferred.
 
 The four imported nominal, drift, geofence, and combined figure-eight traces
 form a controlled patterned case study. They are not a multi-seed estimate of
