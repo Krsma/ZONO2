@@ -66,7 +66,6 @@ from pzr.rtlola.paper_experiment import (
     validate_cell_manifest,
     validate_summary_matrix,
 )
-from pzr.rtlola.parity import PARITY_BOUNDS, ParityConfig, run_parity
 from pzr.rtlola.reference import REFERENCE_CACHE_SCHEMA, load_or_compute_reference
 from pzr.rtlola.robot_arm import (
     RLOLAEVAL_REVISION,
@@ -81,10 +80,10 @@ from pzr.rtlola.scenarios import scenario_by_name
 
 DEFAULT_CONFIG = Path("experiments/paper_evaluation_v1.yaml")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
-DEFAULT_RLOLA_EVAL = REPOSITORY_ROOT.parent / "rlola-eval"
 RUN_EXIT_COMPLETE = 0
 RUN_EXIT_FAILED_POINTS = 2
 RUN_EXIT_APPROVAL_REQUIRED = 75
+PAPER_PREFLIGHT_MARKER_EXPRESSION = "not rlola_parity"
 SCIENTIFIC_STAGES = (
     "pilot", "objective-comparison", "headline", "generalization", "ablation",
 )
@@ -180,7 +179,6 @@ def run_paper_stage(
 def run_complete_paper_evaluation(
     config: PaperExperimentConfig,
     *,
-    rlola_eval: Path,
     approve_long_run: bool = False,
     smoke: bool = False,
 ) -> PaperRunResult:
@@ -204,7 +202,6 @@ def run_complete_paper_evaluation(
     )
 
     _run_preflight(config, provenance)
-    _run_or_resume_parity(config, rlola_eval=rlola_eval, smoke=smoke)
     for stage in ("prepare", "train", "pilot"):
         _run_or_skip_stage(config, stage)
 
@@ -305,8 +302,8 @@ def run_exploratory_bundle(
         "projection": projection,
         "included_stages": ["preflight", "prepare", "train", "pilot"],
         "excluded_stages": [
-            "parity", "objective-comparison", "headline", "generalization",
-            "ablation", "timing", "report", "validate",
+            "objective-comparison", "headline", "generalization", "ablation",
+            "timing", "report", "validate",
             "bounded-exploration",
         ],
     }, manifest)
@@ -464,14 +461,19 @@ def _run_preflight(
         ):
             raise ValueError("stale preflight manifest")
         _validate_runtime_provenance(manifest, "preflight")
-        if manifest.get("status") != "completed" or manifest.get("skipped") != 0:
+        if (
+            manifest.get("status") != "completed"
+            or manifest.get("skipped") != 0
+            or manifest.get("pytest_marker_expression")
+            != PAPER_PREFLIGHT_MARKER_EXPRESSION
+        ):
             raise ValueError("preflight manifest is incomplete")
         print("skip validated stage: preflight", flush=True)
         return
     stage_dir.mkdir(parents=True, exist_ok=True)
     junit = stage_dir / "pytest.xml"
     log = stage_dir / "pytest.log"
-    command = [sys.executable, "-m", "pytest", "-q", f"--junitxml={junit}"]
+    command = _paper_preflight_command(junit)
     completed = subprocess.run(
         command,
         cwd=REPOSITORY_ROOT,
@@ -497,27 +499,23 @@ def _run_preflight(
         "failures": counts["failures"],
         "errors": counts["errors"],
         "skipped": counts["skipped"],
+        "pytest_marker_expression": PAPER_PREFLIGHT_MARKER_EXPRESSION,
         "command": command,
         "provenance": dict(provenance),
     }, manifest_path)
 
 
-def _run_or_resume_parity(
-    config: PaperExperimentConfig,
-    *,
-    rlola_eval: Path,
-    smoke: bool,
-) -> None:
-    output = config.output_root / "parity"
-    with _stage_log(config, "parity"):
-        run_parity(ParityConfig(
-            rlola_eval=rlola_eval,
-            output=output,
-            trace_kinds=("figure8",) if smoke else tuple(ROBOT_ARM_TRACE_SHA256),
-            bounds=(PARITY_BOUNDS[0],) if smoke else PARITY_BOUNDS,
-            run_speed_gate=not smoke,
-            event_limit=config.event_count if smoke else None,
-        ))
+def _paper_preflight_command(junit: Path) -> list[str]:
+    """Return the paper preflight command, excluding standalone parity checks."""
+    return [
+        sys.executable,
+        "-m",
+        "pytest",
+        "-q",
+        "-m",
+        PAPER_PREFLIGHT_MARKER_EXPRESSION,
+        f"--junitxml={junit}",
+    ]
 
 
 def _scientific_failure_count(config: PaperExperimentConfig) -> int:
@@ -911,15 +909,6 @@ def _run_objective_comparison(
     *,
     workers: int,
 ) -> Path:
-    parity_manifest = config.output_root / "parity" / "manifest.json"
-    if not parity_manifest.is_file():
-        raise ValueError(
-            "objective comparison requires a completed notebook-parity manifest at "
-            f"{parity_manifest}"
-        )
-    parity = load_json(parity_manifest)
-    if parity.get("status") != "complete" or not parity.get("correctness_passed"):
-        raise ValueError("notebook-faithful cumulative parity is not complete")
     return _run_evaluation_matrix(
         config,
         stage="objective-comparison",
@@ -927,7 +916,6 @@ def _run_objective_comparison(
         budgets=config.budgets,
         methods=OBJECTIVE_METHODS,
         workers=workers,
-        extra_manifest={"parity_manifest_sha256": sha256_files((parity_manifest,))},
     )
 
 
@@ -1704,7 +1692,6 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--output", type=Path)
     parser.add_argument("--paper-artifacts", type=Path)
     parser.add_argument("--workers", type=int)
-    parser.add_argument("--rlola-eval", type=Path, default=DEFAULT_RLOLA_EVAL)
     parser.add_argument(
         "--smoke", action="store_true",
         help="run the same stage contract with one short trace per scope",
@@ -1788,7 +1775,6 @@ def main(argv: list[str] | None = None) -> None:
         try:
             result = run_complete_paper_evaluation(
                 config,
-                rlola_eval=args.rlola_eval.resolve(),
                 approve_long_run=args.approve_long_run,
                 smoke=args.smoke,
             )

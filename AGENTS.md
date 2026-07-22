@@ -73,8 +73,10 @@ the binding-native transforms, counters, and approximation loss. PZR reports
 the compact reducer dimension separately from the exported logical row count,
 and budget checks must use the compact reducer dimension.
 
-Release validation must record the current pass count and zero skips in the
-paper-evaluation preflight manifest; do not rely on a historical test count.
+The ordinary release-validation command must pass with no skips. Paper
+evaluation preflight records its own pass count and zero skips after excluding
+tests marked `rlola_parity`; notebook parity remains a standalone development
+diagnostic and is not a paper prerequisite.
 
 The authoritative trace kinds and full lengths are:
 
@@ -99,14 +101,16 @@ The paper-facing MPC methods are:
   explicit-horizon loss, used only for objective comparison;
 - `mpc_terminal_full_width`: exhaustive two-event terminal-loss teacher.
 
-The canonical wrapper is `tools/run_paper_evaluation.sh`. It performs release
-tests, parity, training, pilot gating, all scientific matrices, reporting, and
-validation. It prepares one exact reference per trace and uses source-aware
-resumable cells. The H/W ablation uses one experiment worker so its throughput
-heatmap is contention-free; headline and generalization use four workers.
+The canonical wrapper is `tools/run_paper_evaluation.sh`. It performs the
+non-parity release preflight, training, pilot gating, all scientific matrices,
+reporting, and validation. It prepares one exact reference per trace and uses
+source-aware resumable cells. The H/W ablation uses one experiment worker so
+its throughput heatmap is contention-free; headline and generalization use four
+workers. Full RLolaEval notebook parity remains available through
+`pzr-rtlola-parity` but is never invoked or required by paper stages.
 `tools/run_paper_evaluation.sh explore` is the preliminary entrypoint: it runs
 only release preflight, teacher preparation, both policy trainings, and the
-formal pilot. It does not run parity, paper-scale matrices, or the historical
+formal pilot. It does not run paper-scale matrices or the historical
 bounded-exploration study.
 
 ## Current Robot-Arm Results

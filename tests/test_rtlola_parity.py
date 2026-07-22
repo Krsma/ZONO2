@@ -1,13 +1,31 @@
+from dataclasses import replace
 import json
 
 import pytest
 
 from pzr.rtlola.parity import (
+    ParityConfig,
     _Series,
     _compare_cell,
     _load_or_run_cell,
     _parse_csv_ints,
 )
+
+pytestmark = pytest.mark.rlola_parity
+
+
+def test_parity_event_limit_is_explicit_and_validated(tmp_path):
+    config = ParityConfig(
+        rlola_eval=tmp_path / "rlola-eval",
+        output=tmp_path / "parity",
+        trace_kinds=("figure8",),
+        bounds=(15,),
+        run_speed_gate=False,
+        event_limit=20,
+    )
+    assert config.event_limit == 20
+    with pytest.raises(ValueError, match="at least two"):
+        replace(config, event_limit=1)
 
 
 def test_parity_cell_checks_losses_triggers_states_and_reduction_choices():

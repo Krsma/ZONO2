@@ -9,14 +9,20 @@ not define the paper result.
 
 Run or resume the complete bundle with `tools/run_paper_evaluation.sh run` and
 inspect it with `tools/run_paper_evaluation.sh status`. The complete command
-runs release tests and the 576-cell pinned notebook parity before scientific
-stages. A projection above 72 hours requires a later
+runs the release/binding preflight with tests marked `rlola_parity` excluded,
+then proceeds directly to scientific stages. A projection above 72 hours requires a later
 `run --approve-long-run` invocation; approval cannot be supplied before the
 pilot exists.
 
+RLolaEval notebook parity remains available as the standalone
+`pzr-rtlola-parity` development diagnostic. It is not invoked by the paper
+wrapper, is not required by objective comparison, and does not create a paper
+stage or manifest dependency. The ordinary unfiltered release test command
+continues to include parity-marked tests.
+
 For a preliminary run, `tools/run_paper_evaluation.sh explore` executes only
 release preflight, nominal teacher preparation, both policy trainings, and the
-formal 54-cell nominal pilot. It explicitly excludes parity and every paper-scale matrix,
+formal 54-cell nominal pilot. It explicitly excludes every paper-scale matrix,
 including the unrelated historical bounded-exploration study. These stages are
 source-aware and are reused by a later complete `run`.
 

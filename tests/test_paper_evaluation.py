@@ -37,12 +37,15 @@ from pzr.rtlola.paper_experiment import (
 from pzr.rtlola.paper_pipeline import (
     DEFAULT_CONFIG,
     EvaluationCellJob,
+    PAPER_PREFLIGHT_MARKER_EXPRESSION,
     RUN_EXIT_APPROVAL_REQUIRED,
     _execute_cell_job,
     _fixed_figure8_traces,
     _generated_nominal_stage_traces,
     _junit_counts,
+    _paper_preflight_command,
     _runtime_provenance,
+    _run_objective_comparison,
     _run_prepare,
     _scientific_failure_count,
     _validate_timing_stage,
@@ -53,7 +56,6 @@ from pzr.rtlola.paper_pipeline import (
     run_exploratory_bundle,
     run_paper_stage,
 )
-from pzr.rtlola.parity import ParityConfig
 
 
 def _summary_row(
@@ -258,20 +260,6 @@ def test_cell_identity_records_explicit_trace_source_and_provenance(tmp_path):
     assert identity["trace_provenance"]["generator_config_sha256"] == "generator-hash"
 
 
-def test_smoke_parity_event_limit_is_explicit_and_validated(tmp_path):
-    config = ParityConfig(
-        rlola_eval=tmp_path / "rlola-eval",
-        output=tmp_path / "parity",
-        trace_kinds=("figure8",),
-        bounds=(15,),
-        run_speed_gate=False,
-        event_limit=20,
-    )
-    assert config.event_limit == 20
-    with pytest.raises(ValueError, match="at least two"):
-        replace(config, event_limit=1)
-
-
 def test_runtime_provenance_rejects_stale_native_stack():
     provenance = _runtime_provenance()
     provenance["binding_revision"] = "old"
@@ -289,6 +277,13 @@ def test_preflight_junit_counts_rejectable_outcomes(tmp_path):
     assert _junit_counts(report) == {
         "tests": 9, "failures": 1, "errors": 2, "skipped": 3,
     }
+
+
+def test_paper_preflight_explicitly_excludes_standalone_parity(tmp_path):
+    command = _paper_preflight_command(tmp_path / "pytest.xml")
+
+    assert command[-3:-1] == ["-m", PAPER_PREFLIGHT_MARKER_EXPRESSION]
+    assert PAPER_PREFLIGHT_MARKER_EXPRESSION == "not rlola_parity"
 
 
 def test_scientific_failure_count_includes_timing_failures(tmp_path):
@@ -647,6 +642,8 @@ def test_cli_exposes_all_staged_commands_and_long_run_approval():
     assert parser.parse_args(["explore"]).stage == "explore"
     assert parser.parse_args(["status"]).stage == "status"
     assert parser.parse_args(["generalization", "--approve-long-run"]).approve_long_run
+    with pytest.raises(SystemExit):
+        parser.parse_args(["run", "--rlola-eval", "/tmp/rlola-eval"])
     assert BOOTSTRAP_REPLICATES == 10_000
 
 
@@ -690,7 +687,7 @@ def test_exploratory_bundle_runs_only_preflight_training_and_formal_pilot(
     assert result.status == "exploration_completed"
     manifest = json.loads(result.manifest.read_text())
     assert manifest["included_stages"] == ["preflight", "prepare", "train", "pilot"]
-    assert "parity" in manifest["excluded_stages"]
+    assert "parity" not in manifest["excluded_stages"]
     assert "bounded-exploration" in manifest["excluded_stages"]
 
 
@@ -714,10 +711,6 @@ def test_complete_run_stops_at_pilot_gate_and_rejects_preapproval(
         lambda _config: {"dirty_source_paths": []},
     )
     monkeypatch.setattr("pzr.rtlola.paper_pipeline._run_preflight", lambda *_: None)
-    monkeypatch.setattr(
-        "pzr.rtlola.paper_pipeline._run_or_resume_parity", lambda *_args, **_kwargs: None,
-    )
-
     def fake_stage(_config, stage, **_kwargs):
         calls.append(stage)
         if stage == "pilot":
@@ -733,7 +726,7 @@ def test_complete_run_stops_at_pilot_gate_and_rejects_preapproval(
     )
 
     result = run_complete_paper_evaluation(
-        config, rlola_eval=tmp_path / "rlola-eval", smoke=True,
+        config, smoke=True,
     )
 
     assert result.exit_code == RUN_EXIT_APPROVAL_REQUIRED
@@ -741,7 +734,6 @@ def test_complete_run_stops_at_pilot_gate_and_rejects_preapproval(
     with pytest.raises(ValueError, match="only after a pilot"):
         run_complete_paper_evaluation(
             replace(config, output_root=tmp_path / "fresh"),
-            rlola_eval=tmp_path / "rlola-eval",
             approve_long_run=True,
             smoke=True,
         )
@@ -767,9 +759,6 @@ def test_approved_complete_run_records_approval_and_exact_stage_order(
     )
     monkeypatch.setattr("pzr.rtlola.paper_pipeline._run_preflight", lambda *_: None)
     monkeypatch.setattr(
-        "pzr.rtlola.paper_pipeline._run_or_resume_parity", lambda *_args, **_kwargs: None,
-    )
-    monkeypatch.setattr(
         "pzr.rtlola.paper_pipeline._run_or_skip_stage",
         lambda _config, stage, **_kwargs: calls.append(stage),
     )
@@ -779,7 +768,6 @@ def test_approved_complete_run_records_approval_and_exact_stage_order(
 
     result = run_complete_paper_evaluation(
         config,
-        rlola_eval=tmp_path / "rlola-eval",
         approve_long_run=True,
         smoke=True,
     )
@@ -792,3 +780,33 @@ def test_approved_complete_run_records_approval_and_exact_stage_order(
     approval = config.output_root / "pilot" / "approval.json"
     assert approval.is_file()
     assert json.loads(approval.read_text())["approved"] is True
+
+
+def test_objective_comparison_has_no_parity_artifact_dependency(
+    tmp_path, monkeypatch,
+):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path / "results",
+    )
+    traces = (object(),)
+    captured = {}
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._fixed_figure8_traces",
+        lambda _config: traces,
+    )
+
+    def fake_matrix(_config, **kwargs):
+        captured.update(kwargs)
+        return config.output_root / "objective-comparison"
+
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._run_evaluation_matrix", fake_matrix,
+    )
+
+    result = _run_objective_comparison(config, workers=4)
+
+    assert result == config.output_root / "objective-comparison"
+    assert captured["stage"] == "objective-comparison"
+    assert captured["traces"] is traces
+    assert "extra_manifest" not in captured

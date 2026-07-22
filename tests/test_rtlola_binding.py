@@ -354,6 +354,7 @@ def test_cached_mpc_requires_exact_non_predictive_reference():
         ))
 
 
+@pytest.mark.rlola_parity
 def test_short_notebook_cumulative_beam_matches_production_search(tmp_path):
     scenario = benchmark_module.scenario_by_name("robot_arm")
     trace = scenario.generate_trace(

@@ -49,3 +49,6 @@ pzr = [
 [tool.pytest.ini_options]
 pythonpath = ["src"]
 testpaths = ["tests"]
+markers = [
+    "rlola_parity: standalone RLolaEval notebook-parity validation",
+]

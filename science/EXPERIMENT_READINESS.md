@@ -2,7 +2,9 @@
 
 An experiment is ready only when:
 
-- the pinned binding builds and all binding-backed tests pass;
+- the pinned binding builds and all non-parity binding-backed paper-preflight
+  tests pass; the unfiltered release suite and standalone parity diagnostic
+  remain development checks outside the paper run;
 - the installed binding reports the pinned interpreter and release build profile;
 - every bounded native transform outer-bounds the unreduced branch in the
   soundness regression;

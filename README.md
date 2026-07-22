@@ -78,10 +78,10 @@ tools/run_paper_evaluation.sh explore
 
 `explore` includes preflight, nominal teacher-trace preparation, both policy
 trainings, and the 54-cell nominal pilot. It
-does not run parity, objective comparison, headline, held-out generalization,
-ablation, timing, reporting, validation, or the historical bounded-exploration
-study. Its outputs are source-compatible with a later complete `run` and will
-be validated and skipped when that run resumes.
+does not run objective comparison, headline, held-out generalization, ablation,
+timing, reporting, validation, or the historical bounded-exploration study. Its
+outputs are source-compatible with a later complete `run` and will be validated
+and skipped when that run resumes.
 
 Run or resume the complete release-checked bundle with:
 
@@ -89,12 +89,23 @@ Run or resume the complete release-checked bundle with:
 tools/run_paper_evaluation.sh run
 ```
 
-The command runs the full release-binding test suite, all 576 pinned RLolaEval
-parity cells, teacher preparation, both policy trainings, pilot, objective
-comparison, headline, held-out generalization, H/W ablation, sequential timing,
-reporting, and integrity validation. Inspect a running or interrupted evaluation
-with `tools/run_paper_evaluation.sh status`. Individual `pzr-paper` stages remain
-available for focused diagnostics.
+The command runs the release/binding preflight excluding explicitly marked
+RLolaEval parity tests, teacher preparation, both policy trainings, pilot,
+objective comparison, headline, held-out generalization, H/W ablation,
+sequential timing, reporting, and integrity validation. Inspect a running or
+interrupted evaluation with `tools/run_paper_evaluation.sh status`. Individual
+`pzr-paper` stages remain available for focused diagnostics.
+
+Notebook parity is a standalone development diagnostic rather than a paper-run
+prerequisite. Run it explicitly after substantial binding, monitor, or search
+changes, for example:
+
+```bash
+pzr-rtlola-parity --rlola-eval ../rlola-eval --output /tmp/pzr-parity \
+  --trace-kinds figure8 --bounds 15 --length 20 --skip-speed-gate
+```
+
+The ordinary unfiltered pytest command still includes all parity-marked tests.
 
 The 54-cell pilot projects only the 1,260-cell nominal held-out sweep. If it
 exceeds 72 four-worker hours, the run exits after recording the projection.
@@ -229,9 +240,9 @@ generated-artifact directory.
 The packaged robot-arm assets come from RLolaEval commit
 `2257d074173a6dd475c042ef9a82cd8755a81ac3`. Each of `figure8`, `random`, and
 `square` has compliant, drift, geofence, and drift-geofence variants;
-`figure8_drift` is the default. The complete paper command validates all 576
-notebook cells and the production/oracle throughput gate before scientific
-stages.
+`figure8_drift` is the default. The standalone `pzr-rtlola-parity` command
+retains the full notebook-cell and production/oracle throughput validation; it
+is not invoked by the paper pipeline.
 
 Generated files under `results/` must be regenerated through the CLI rather
 than edited manually.
