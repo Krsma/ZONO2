@@ -15,8 +15,8 @@ stages. A projection above 72 hours requires a later
 pilot exists.
 
 For a preliminary run, `tools/run_paper_evaluation.sh explore` executes only
-release preflight, teacher preparation, both policy trainings, and the formal
-216-cell pilot. It explicitly excludes parity and every paper-scale matrix,
+release preflight, nominal teacher preparation, both policy trainings, and the
+formal 54-cell nominal pilot. It explicitly excludes parity and every paper-scale matrix,
 including the unrelated historical bounded-exploration study. These stages are
 source-aware and are reused by a later complete `run`.
 
@@ -38,19 +38,29 @@ selection or teaching reference.
 
 ## Scope and stopping rule
 
-Training and validation use nominal 500-event random-waypoint traces with
-seeds 0--19 and 20--25. The 216-cell pilot uses seeds 90--91, four conditions,
-budgets 40/150/500, and nine policies. It records CPU, four-worker wall, disk,
-and per-method projections. A projection above 72 wall hours pauses the
-5,040-cell held-out stage until `--approve-long-run` is supplied; the scope is
-not reduced.
+Training and validation use nominal 500-event random-waypoint traces with seeds
+0--19 and 20--25. The 54-cell pilot uses nominal seeds 90--91, budgets
+40/150/500, and nine policies. It records CPU, four-worker wall, disk, and
+per-method projections. A projection above 72 wall hours pauses only the
+1,260-cell nominal held-out stage until `--approve-long-run` is supplied; fixed
+headline, objective, timing, and ablation work is outside that gate.
 
-Held-out generalization uses seeds 100--119, four conditions, seven budgets,
-and nine policies. The running example uses the four full-length figure-8
-conditions, seven budgets, and eight headline methods (224 cells). The H/W
-ablation uses seeds 60--64, four conditions, budget 150, and the 4-by-4 grid
-`{1,2,4,8}` (320 cells). It uses one experiment worker so the displayed
-event-loop throughput is contention-free.
+Nominal random-trajectory generalization uses seeds 100--119, seven budgets,
+and nine policies. The controlled running example uses the four full-length
+imported figure-eight variants, seven budgets, and eight headline methods (224
+cells). These four fixed traces are controlled case studies rather than
+multi-seed fault-population estimates. The H/W ablation uses nominal seeds
+60--64, budget 150, and the 4-by-4 grid `{1,2,4,8}` (80 cells). It uses one
+experiment worker so the displayed event-loop throughput is contention-free.
+
+The matched terminal-versus-cumulative objective comparison remains 56 cells
+(`4 fixed traces × 7 budgets × 2 methods`). Timing remains 56 warm-ups followed
+by 672 measured repetitions (`4 × 7 × 8 × 3`) and 224 summarized
+condition/budget/method points.
+
+The adopted split and deferred randomized-fault generator work are documented
+in `notes/robot_arm_trace_generation_followup_20260722.md`. No claim is made
+about randomized drift or geofence generalization.
 
 ## Failure and reporting contract
 
@@ -76,5 +86,11 @@ report stage writes compact CSV sources, TeX tables, PDF/PNG figures, and a hash
 manifest to
 `paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v1`.
 The compact sources include the pilot projection, terminal-versus-cumulative
-objective comparison, budget-80 extrapolation, fallback diagnostics, reducer
-composition, ablation heatmaps, and contention-free timing.
+objective comparison, budget-80 extrapolation, fallback diagnostics, separately
+labelled nominal and fixed-figure-eight reducer composition, ablation heatmaps,
+and contention-free timing.
+
+The filename and output namespace remain `paper_evaluation_v1`, but the
+configuration, cell, stage, run, and report contracts are schema v2. Artifacts
+from the superseded four-generated-condition contract are stale and must be
+archived rather than resumed or reinterpreted.

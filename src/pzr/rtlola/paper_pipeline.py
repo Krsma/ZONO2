@@ -7,6 +7,7 @@ from concurrent.futures import ProcessPoolExecutor
 from contextlib import contextmanager, redirect_stderr, redirect_stdout
 from dataclasses import asdict, dataclass, replace
 from datetime import datetime, timezone
+import hashlib
 import json
 from multiprocessing import get_context
 import os
@@ -20,7 +21,12 @@ import numpy as np
 import pandas as pd
 
 from pzr.artifact_io import write_csv_atomic, write_json_atomic
-from pzr.learning.provenance import model_sha256, pzr_source_sha256, sha256_files
+from pzr.learning.provenance import (
+    model_sha256,
+    payload_sha256,
+    pzr_source_sha256,
+    sha256_files,
+)
 from pzr.learning.ranker import ReducerPolicy
 from pzr.learning.training import NamedDataset, ReducerTrainingConfig, run_reducer_training
 from pzr.rtlola.actions import default_action_catalog
@@ -51,6 +57,7 @@ from pzr.rtlola.paper_experiment import (
     MethodConfig,
     PaperExperimentConfig,
     RunState,
+    TraceSource,
     cell_identity,
     load_json,
     load_paper_experiment_config,
@@ -64,8 +71,11 @@ from pzr.rtlola.reference import REFERENCE_CACHE_SCHEMA, load_or_compute_referen
 from pzr.rtlola.robot_arm import (
     RLOLAEVAL_REVISION,
     ROBOT_ARM_SPEC_SHA256,
+    ROBOT_ARM_TRACE_ROWS,
     ROBOT_ARM_TRACE_SHA256,
+    trace_path,
 )
+from pzr.rtlola.robot_arm_random import RANDOM_WAYPOINT_SOURCE_REVISION
 from pzr.rtlola.scenarios import scenario_by_name
 
 
@@ -91,6 +101,9 @@ class EvaluationTrace:
     seed: int
     events: tuple[RtlolaEvent, ...]
     trace_sha256: str
+    trace_source: TraceSource
+    trace_kind: str
+    provenance: Mapping[str, object]
 
 
 @dataclass(frozen=True)
@@ -196,6 +209,7 @@ def run_complete_paper_evaluation(
         _run_or_skip_stage(config, stage)
 
     projection = load_json(projection_path)
+    _validate_projection(config, projection)
     approval_required = bool(projection.get("approval_required"))
     approval_path = config.output_root / "pilot" / "approval.json"
     if approval_required and not approve_long_run:
@@ -215,7 +229,7 @@ def run_complete_paper_evaluation(
         )
     if approval_required:
         write_json_atomic({
-            "schema": "pzr.paper-evaluation-approval.v1",
+            "schema": "pzr.paper-evaluation-approval.v2",
             "approved": True,
             "config_sha256": config.config_sha256,
             "pzr_source_sha256": pzr_source_sha256(),
@@ -271,6 +285,7 @@ def run_exploratory_bundle(
         _run_or_skip_stage(config, stage)
 
     projection = load_json(config.output_root / "pilot" / "projection.json")
+    _validate_projection(config, projection)
     failure_count = _stage_failure_count(config, "pilot")
     status = (
         "exploration_completed"
@@ -278,7 +293,7 @@ def run_exploratory_bundle(
     )
     manifest = config.output_root / "explore" / "manifest.json"
     write_json_atomic({
-        "schema": "pzr.paper-evaluation-exploration.v1",
+        "schema": "pzr.paper-evaluation-exploration.v2",
         "experiment_id": config.experiment_id,
         "status": status,
         "updated_at": _utc_now(),
@@ -328,6 +343,8 @@ def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
     if exploration_manifest.is_file():
         try:
             exploration = load_json(exploration_manifest)
+            if exploration.get("schema") != "pzr.paper-evaluation-exploration.v2":
+                raise ValueError("unsupported exploration manifest schema")
             if exploration.get("config_sha256") != config.config_sha256:
                 raise ValueError("stale exploration config manifest")
             if exploration.get("pzr_source_sha256") != pzr_source_sha256():
@@ -336,18 +353,19 @@ def paper_evaluation_status(config: PaperExperimentConfig) -> dict[str, object]:
         except (OSError, ValueError) as exc:
             exploration = {"status": "stale_or_invalid", "message": str(exc)}
     return {
-        "schema": "pzr.paper-evaluation-status.v1",
+        "schema": "pzr.paper-evaluation-status.v2",
         "experiment_id": config.experiment_id,
         "output_root": str(config.output_root),
         "paper_artifact_dir": str(config.paper_artifact_dir),
-        "run": load_json(run_manifest) if run_manifest.is_file() else {"status": "missing"},
-        "exploration": exploration,
-        "projection": (
-            load_json(projection_path) if projection_path.is_file() else None
+        "run": _validated_auxiliary_manifest(
+            run_manifest, PAPER_RUN_SCHEMA, config, "run",
         ),
-        "approval_recorded": (
-            config.output_root / "pilot" / "approval.json"
-        ).is_file(),
+        "exploration": exploration,
+        "projection": _validated_auxiliary_manifest(
+            projection_path, "pzr.paper-evaluation-pilot-projection.v2", config,
+            "pilot projection",
+        ),
+        "approval_recorded": _approval_is_valid(config),
         "stages": stages,
     }
 
@@ -399,12 +417,19 @@ def _validate_completed_stage(config: PaperExperimentConfig, stage: str) -> None
     elif stage in SCIENTIFIC_STAGES:
         _validate_scientific_stage(config, stage)
     elif stage == "timing":
-        summary = config.output_root / "timing" / "summary.csv"
-        if not summary.is_file() or pd.read_csv(summary).empty:
-            raise ValueError("timing summary is missing or empty")
+        _validate_timing_stage(config, manifest)
     elif stage == "report":
-        if not (config.paper_artifact_dir / "artifact_hashes.json").is_file():
+        hashes_path = config.paper_artifact_dir / "artifact_hashes.json"
+        report_path = config.paper_artifact_dir / "report_manifest.json"
+        if not hashes_path.is_file():
             raise ValueError("paper artifact hashes are missing")
+        if load_json(hashes_path).get("schema") != "pzr.paper-generated-artifact-hashes.v2":
+            raise ValueError("unsupported paper artifact hash schema")
+        report = load_json(report_path)
+        if report.get("schema") != "pzr.paper-evaluation-report.v2":
+            raise ValueError("unsupported paper report schema")
+        if report.get("config_sha256") != config.config_sha256:
+            raise ValueError("stale paper report config")
     elif stage == "validate":
         if manifest.get("status") not in {"completed", "completed_with_failures"}:
             raise ValueError("validation stage did not complete")
@@ -431,6 +456,8 @@ def _run_preflight(
     manifest_path = stage_dir / "manifest.json"
     if manifest_path.is_file():
         manifest = load_json(manifest_path)
+        if manifest.get("schema") != "pzr.paper-evaluation-preflight.v2":
+            raise ValueError("unsupported preflight manifest schema")
         if (
             manifest.get("config_sha256") != config.config_sha256
             or manifest.get("pzr_source_sha256") != pzr_source_sha256()
@@ -461,7 +488,7 @@ def _run_preflight(
     if counts["failures"] or counts["errors"] or counts["skipped"]:
         raise RuntimeError(f"release validation was not pass-only: {counts}")
     write_json_atomic({
-        "schema": "pzr.paper-evaluation-preflight.v1",
+        "schema": "pzr.paper-evaluation-preflight.v2",
         "status": "completed",
         "config_sha256": config.config_sha256,
         "pzr_source_sha256": pzr_source_sha256(),
@@ -556,6 +583,107 @@ def _validate_runtime_provenance(
             raise ValueError(f"stale {label} {key}")
 
 
+def _validate_projection(
+    config: PaperExperimentConfig,
+    projection: Mapping[str, object],
+) -> None:
+    if projection.get("schema") != "pzr.paper-evaluation-pilot-projection.v2":
+        raise ValueError("unsupported pilot projection schema")
+    if projection.get("config_sha256") != config.config_sha256:
+        raise ValueError("stale pilot projection config")
+    if projection.get("pzr_source_sha256") != pzr_source_sha256():
+        raise ValueError("stale pilot projection source")
+    if projection.get("gated_stage") != "generalization":
+        raise ValueError("pilot projection gate has the wrong stage")
+    if projection.get("trace_scope") != TraceSource.GENERATED_NOMINAL.value:
+        raise ValueError("pilot projection gate has the wrong trace scope")
+    if int(projection.get("target_cell_count", -1)) != config.expected_cells(
+        "generalization"
+    ):
+        raise ValueError("pilot projection target count differs")
+
+
+def _validated_auxiliary_manifest(
+    path: Path,
+    schema: str,
+    config: PaperExperimentConfig,
+    label: str,
+) -> dict[str, object] | None:
+    if not path.is_file():
+        return {"status": "missing"} if label == "run" else None
+    try:
+        payload = load_json(path)
+        if payload.get("schema") != schema:
+            raise ValueError(f"unsupported {label} schema")
+        if payload.get("config_sha256") != config.config_sha256:
+            raise ValueError(f"stale {label} config")
+        if payload.get("pzr_source_sha256") != pzr_source_sha256():
+            raise ValueError(f"stale {label} source")
+        if label == "pilot projection":
+            _validate_projection(config, payload)
+        return payload
+    except (OSError, ValueError) as exc:
+        return {"status": "stale_or_invalid", "message": str(exc)}
+
+
+def _approval_is_valid(config: PaperExperimentConfig) -> bool:
+    path = config.output_root / "pilot" / "approval.json"
+    if not path.is_file():
+        return False
+    try:
+        payload = load_json(path)
+        return (
+            payload.get("schema") == "pzr.paper-evaluation-approval.v2"
+            and payload.get("config_sha256") == config.config_sha256
+            and payload.get("pzr_source_sha256") == pzr_source_sha256()
+        )
+    except (OSError, ValueError):
+        return False
+
+
+def _validate_timing_stage(
+    config: PaperExperimentConfig,
+    manifest: Mapping[str, object],
+) -> None:
+    directory = config.output_root / "timing"
+    raw = pd.read_csv(directory / "timing_repetitions.csv")
+    summary = pd.read_csv(directory / "summary.csv")
+    raw_keys = [
+        "trace_source", "trace_kind", "condition", "budget", "method",
+        "repetition",
+    ]
+    summary_keys = [
+        "trace_source", "trace_kind", "condition", "budget", "method",
+    ]
+    if len(raw) != config.expected_cells("timing"):
+        raise ValueError("timing measured repetition count differs")
+    if len(summary) != config.expected_timing_summary_points:
+        raise ValueError("timing summary point count differs")
+    if bool(raw.duplicated(raw_keys).any()) or bool(summary.duplicated(summary_keys).any()):
+        raise ValueError("timing contains duplicate identities")
+    expected_summary = {
+        (TraceSource.FIXED_RLOLAEVAL.value, condition, condition, budget, method)
+        for condition in config.fixed_figure8_trace_kinds
+        for budget in config.budgets
+        for method in HEADLINE_METHODS
+    }
+    actual_summary = set(summary[summary_keys].itertuples(index=False, name=None))
+    if actual_summary != expected_summary:
+        raise ValueError("timing summary identities differ")
+    expected_raw = {
+        (*identity, repetition)
+        for identity in expected_summary
+        for repetition in range(config.timing_repetitions)
+    }
+    actual_raw = set(raw[raw_keys].itertuples(index=False, name=None))
+    if actual_raw != expected_raw:
+        raise ValueError("timing repetition identities differ")
+    if int(manifest.get("cell_count", -1)) != config.expected_cells("timing"):
+        raise ValueError("timing manifest measured count differs")
+    if int(manifest.get("warmup_count", -1)) != config.expected_timing_warmups:
+        raise ValueError("timing manifest warm-up count differs")
+
+
 def _write_run_manifest(
     config: PaperExperimentConfig,
     *,
@@ -575,6 +703,9 @@ def _write_run_manifest(
         "expected_scientific_cell_count": sum(
             config.expected_cells(stage) for stage in SCIENTIFIC_STAGES
         ),
+        "expected_timing_measured_repetition_count": config.expected_cells("timing"),
+        "expected_timing_summary_point_count": config.expected_timing_summary_points,
+        "expected_timing_warmup_count": config.expected_timing_warmups,
         **dict(extra),
     }, path)
     return path
@@ -609,26 +740,13 @@ def _utc_now() -> str:
 def _run_prepare(config: PaperExperimentConfig) -> Path:
     stage_dir = config.output_root / "prepare"
     trace_root = stage_dir / "traces"
-    generate_random_waypoint_trace_store(RandomWaypointTraceStoreConfig(
+    training_store = generate_random_waypoint_trace_store(RandomWaypointTraceStoreConfig(
         output=trace_root / "training",
         event_count=config.event_count,
-        conditions=("random_waypoint",),
+        conditions=(config.generated_nominal_trace_kind,),
         seed_start=min(config.train_seeds),
         seed_count=len(config.train_seeds) + len(config.validation_seeds),
     ))
-    for name, seeds in (
-        ("pilot", config.pilot_seeds),
-        ("generalization", config.generalization_seeds),
-        ("ablation", config.ablation_seeds),
-    ):
-        _require_contiguous_seeds(name, seeds)
-        generate_random_waypoint_trace_store(RandomWaypointTraceStoreConfig(
-            output=trace_root / name,
-            event_count=config.event_count,
-            conditions=config.conditions,
-            seed_start=min(seeds),
-            seed_count=len(seeds),
-        ))
     dataset = run_learning_collection(LearningCollectionConfig(
         output=stage_dir / "teacher",
         trace_store=trace_root / "training",
@@ -649,6 +767,10 @@ def _run_prepare(config: PaperExperimentConfig) -> Path:
             "teacher_dataset": str(dataset),
             "teacher_budgets": list(config.budgets),
             "teacher_seed_count": len(config.train_seeds) + len(config.validation_seeds),
+            "trace_scope": TraceSource.GENERATED_NOMINAL.value,
+            "trace_kind": config.generated_nominal_trace_kind,
+            "training_trace_store": str(training_store.root),
+            "training_trace_store_manifest_sha256": training_store.manifest_sha256,
         },
     ), stage_dir / "manifest.json")
     return stage_dir
@@ -700,7 +822,7 @@ def _run_train(config: PaperExperimentConfig) -> Path:
 
 
 def _run_pilot(config: PaperExperimentConfig, *, workers: int) -> Path:
-    traces = _stored_traces(config.output_root / "prepare" / "traces" / "pilot")
+    traces = _generated_nominal_stage_traces(config, "pilot", config.pilot_seeds)
     stage_dir = _run_evaluation_matrix(
         config,
         stage="pilot",
@@ -719,7 +841,16 @@ def _run_pilot(config: PaperExperimentConfig, *, workers: int) -> Path:
         worker_count=config.evaluation_workers,
         disk_bytes=disk_bytes,
         threshold_hours=config.maximum_projected_wall_hours,
+        separate_fixed_workloads={
+            "headline_cells": config.expected_cells("headline"),
+            "objective_comparison_cells": config.expected_cells("objective-comparison"),
+            "timing_measured_repetitions": config.expected_cells("timing"),
+            "timing_warmups": config.expected_timing_warmups,
+        },
     )
+    projection["schema"] = "pzr.paper-evaluation-pilot-projection.v2"
+    projection["config_sha256"] = config.config_sha256
+    projection["pzr_source_sha256"] = pzr_source_sha256()
     write_json_atomic(projection, stage_dir / "projection.json")
     manifest = load_json(stage_dir / "manifest.json")
     manifest["projection"] = projection
@@ -745,13 +876,14 @@ def _run_generalization(
     if not projection_path.is_file():
         raise ValueError("pilot projection is required before held-out generalization")
     projection = load_json(projection_path)
+    _validate_projection(config, projection)
     if bool(projection.get("approval_required")) and not approve_long_run:
         raise PermissionError(
             "pilot projects more than 72 four-worker hours; publish the pilot "
             "manifest and rerun with --approve-long-run"
         )
-    traces = _stored_traces(
-        config.output_root / "prepare" / "traces" / "generalization",
+    traces = _generated_nominal_stage_traces(
+        config, "generalization", config.generalization_seeds,
     )
     return _run_evaluation_matrix(
         config,
@@ -814,8 +946,8 @@ def _run_ablation(config: PaperExperimentConfig, *, workers: int) -> Path:
     return _run_evaluation_matrix(
         config,
         stage="ablation",
-        traces=_stored_traces(
-            config.output_root / "prepare" / "traces" / "ablation",
+        traces=_generated_nominal_stage_traces(
+            config, "ablation", config.ablation_seeds,
         ),
         budgets=(config.ablation_budget,),
         methods=tuple(method.name for method in methods),
@@ -859,6 +991,9 @@ def _run_evaluation_matrix(
                     stage=stage,
                     trace_id=trace.trace_id,
                     trace_sha256=trace.trace_sha256,
+                    trace_source=trace.trace_source,
+                    trace_kind=trace.trace_kind,
+                    trace_provenance=trace.provenance,
                     condition=trace.condition,
                     seed=trace.seed,
                     event_count=len(trace.events),
@@ -871,7 +1006,8 @@ def _run_evaluation_matrix(
                 jobs.append(EvaluationCellJob(
                     stage=stage,
                     directory=(
-                        stage_dir / "cells" / trace.condition / f"seed-{trace.seed}"
+                        stage_dir / "cells" / trace.trace_source.value
+                        / trace.condition / f"seed-{trace.seed}"
                         / f"budget-{budget}" / name
                     ),
                     trace=trace,
@@ -907,10 +1043,16 @@ def _run_evaluation_matrix(
         if path.is_file():
             frame = pd.read_csv(path)
             frame["condition"] = job.trace.condition
+            frame["trace_source"] = job.trace.trace_source.value
+            frame["trace_kind"] = job.trace.trace_kind
             frame["trace_id"] = job.trace.trace_id
             series.append(frame)
     write_csv_atomic(
-        pd.concat(series, ignore_index=True) if series else pd.DataFrame(),
+        pd.concat(series, ignore_index=True) if series else pd.DataFrame(columns=(
+            "trace_source", "trace_kind", "condition", "trace_id", "budget",
+            "method", "reducer_used", "fallback_used",
+            "infeasible_candidate_count",
+        )),
         stage_dir / "timeseries.csv",
     )
     failure_count = int((summary["status"] != RunState.COMPLETED.value).sum())
@@ -925,6 +1067,21 @@ def _run_evaluation_matrix(
             "workers": workers,
             "methods": list(methods),
             "budgets": list(budgets),
+            "trace_sources": sorted({trace.trace_source.value for trace in traces}),
+            "trace_kinds": sorted({trace.trace_kind for trace in traces}),
+            "trace_manifest": [
+                {
+                    "trace_id": trace.trace_id,
+                    "trace_source": trace.trace_source.value,
+                    "trace_kind": trace.trace_kind,
+                    "condition": trace.condition,
+                    "seed": trace.seed,
+                    "event_count": len(trace.events),
+                    "trace_sha256": trace.trace_sha256,
+                    "provenance": dict(trace.provenance),
+                }
+                for trace in traces
+            ],
             **dict(extra_manifest or {}),
         },
     ), stage_dir / "manifest.json")
@@ -997,6 +1154,8 @@ def _run_cell(job: EvaluationCellJob) -> tuple[dict[str, object], dict[str, obje
         if not partial.empty:
             partial["method"] = job.method.name
             partial["condition"] = job.trace.condition
+            partial["trace_source"] = job.trace.trace_source.value
+            partial["trace_kind"] = job.trace.trace_kind
             partial["trace_id"] = job.trace.trace_id
             write_csv_atomic(partial, job.directory / "timeseries_diagnostic.csv")
         elapsed_ms = (
@@ -1028,6 +1187,8 @@ def _run_cell(job: EvaluationCellJob) -> tuple[dict[str, object], dict[str, obje
     timeseries = result.timeseries.copy()
     timeseries["method"] = job.method.name
     timeseries["condition"] = job.trace.condition
+    timeseries["trace_source"] = job.trace.trace_source.value
+    timeseries["trace_kind"] = job.trace.trace_kind
     timeseries["trace_id"] = job.trace.trace_id
     write_csv_atomic(timeseries, job.directory / "timeseries_diagnostic.csv")
     fallback_rows = np.flatnonzero(timeseries["fallback_used"].astype(bool).to_numpy())
@@ -1112,7 +1273,8 @@ def _row_identity(job: EvaluationCellJob) -> dict[str, object]:
     return {
         "trace_id": job.trace.trace_id,
         "trace_sha256": job.trace.trace_sha256,
-        "trace_kind": job.trace.condition,
+        "trace_source": job.trace.trace_source.value,
+        "trace_kind": job.trace.trace_kind,
         "condition": job.trace.condition,
         "seed": job.trace.seed,
         "budget": job.budget,
@@ -1159,23 +1321,74 @@ def _model_paths(
     return paths
 
 
-def _stored_traces(path: Path) -> tuple[EvaluationTrace, ...]:
+def _generated_nominal_stage_traces(
+    config: PaperExperimentConfig,
+    stage: str,
+    seeds: Sequence[int],
+) -> tuple[EvaluationTrace, ...]:
+    """Create or validate a stage-owned nominal random-waypoint trace store."""
+    _require_contiguous_seeds(stage, seeds)
+    path = config.output_root / stage / "traces" / "generated-nominal"
+    generate_random_waypoint_trace_store(RandomWaypointTraceStoreConfig(
+        output=path,
+        event_count=config.event_count,
+        conditions=(config.generated_nominal_trace_kind,),
+        seed_start=min(seeds),
+        seed_count=len(seeds),
+    ))
+    return _stored_traces(path, expected_seeds=seeds, config=config)
+
+
+def _stored_traces(
+    path: Path,
+    *,
+    expected_seeds: Sequence[int],
+    config: PaperExperimentConfig,
+) -> tuple[EvaluationTrace, ...]:
     store = load_random_waypoint_trace_store(path)
+    if store.conditions != (config.generated_nominal_trace_kind,):
+        raise ValueError("paper generated trace store must be nominal-only")
+    if tuple(range(store.seed_start, store.seed_start + store.seed_count)) != tuple(
+        expected_seeds
+    ):
+        raise ValueError("paper generated trace-store seed coverage differs")
     return tuple(EvaluationTrace(
         trace_id=item.trace_id,
         condition=item.condition,
         seed=item.seed,
         events=item.trace.events,
         trace_sha256=item.trace.metadata.trace_sha256,
+        trace_source=TraceSource.GENERATED_NOMINAL,
+        trace_kind=item.condition,
+        provenance={
+            "source_revision": RANDOM_WAYPOINT_SOURCE_REVISION,
+            "trace_store_manifest_sha256": store.manifest_sha256,
+            "generator_config_sha256": payload_sha256(
+                item.trace.metadata.generator_config,
+            ),
+            "generator_config": item.trace.metadata.generator_config,
+        },
     ) for item in store.traces)
 
 
 def _fixed_figure8_traces(config: PaperExperimentConfig) -> tuple[EvaluationTrace, ...]:
     scenario = scenario_by_name("robot_arm")
     traces = []
-    for condition in config.figure8_conditions:
+    for condition in config.fixed_figure8_trace_kinds:
+        source_path = trace_path(condition)
+        actual_hash = hashlib.sha256(source_path.read_bytes()).hexdigest()
+        expected_hash = ROBOT_ARM_TRACE_SHA256[condition]
+        if actual_hash != expected_hash:
+            raise ValueError(f"fixed RLolaEval trace hash differs: {condition}")
         generated = scenario.generate_trace(0, 0, trace_kind=condition)
-        events = generated.events
+        full_events = generated.events
+        expected_length = ROBOT_ARM_TRACE_ROWS[condition]
+        if len(full_events) != expected_length:
+            raise ValueError(
+                f"fixed RLolaEval trace length differs: {condition} has "
+                f"{len(full_events)}, expected {expected_length}"
+            )
+        events = full_events
         if not config.enforce_canonical_scope:
             events = events[:config.event_count]
         traces.append(EvaluationTrace(
@@ -1183,7 +1396,16 @@ def _fixed_figure8_traces(config: PaperExperimentConfig) -> tuple[EvaluationTrac
             condition=condition,
             seed=0,
             events=events,
-            trace_sha256=ROBOT_ARM_TRACE_SHA256[condition],
+            trace_sha256=actual_hash,
+            trace_source=TraceSource.FIXED_RLOLAEVAL,
+            trace_kind=condition,
+            provenance={
+                "source_revision": RLOLAEVAL_REVISION,
+                "source_path": str(source_path.relative_to(REPOSITORY_ROOT)),
+                "source_file_sha256": actual_hash,
+                "source_event_count": expected_length,
+                "evaluation_event_count": len(events),
+            },
         ))
     return tuple(traces)
 
@@ -1230,6 +1452,8 @@ def _run_timing(config: PaperExperimentConfig) -> Path:
                         policies.get(name),
                     )
                     rows.append({
+                        "trace_source": trace.trace_source.value,
+                        "trace_kind": trace.trace_kind,
                         "condition": trace.condition,
                         "budget": budget,
                         "method": name,
@@ -1251,6 +1475,8 @@ def _run_timing(config: PaperExperimentConfig) -> Path:
         available = len(completed) == len(frame)
         values = completed["throughput_events_per_second"]
         summary_rows.append({
+            "trace_source": TraceSource.FIXED_RLOLAEVAL.value,
+            "trace_kind": condition,
             "condition": condition, "budget": budget, "method": method,
             "available": available,
             "valid_count": len(completed), "failed_count": len(frame) - len(completed),
@@ -1284,6 +1510,23 @@ def _run_timing(config: PaperExperimentConfig) -> Path:
             "native_threads": 1,
             "warmup_events_per_method_budget": config.timing_warmup_events,
             "measured_repetitions": config.timing_repetitions,
+            "expected_measured_repetition_count": config.expected_cells("timing"),
+            "expected_summary_point_count": config.expected_timing_summary_points,
+            "warmup_count": config.expected_timing_warmups,
+            "trace_source": TraceSource.FIXED_RLOLAEVAL.value,
+            "trace_manifest": [
+                {
+                    "trace_id": trace.trace_id,
+                    "trace_source": trace.trace_source.value,
+                    "trace_kind": trace.trace_kind,
+                    "condition": trace.condition,
+                    "seed": trace.seed,
+                    "event_count": len(trace.events),
+                    "trace_sha256": trace.trace_sha256,
+                    "provenance": dict(trace.provenance),
+                }
+                for trace in traces
+            ],
             "included": "event_loop_and_exact_metric_computation",
             "excluded": ["trace_generation", "reference_preparation", "artifact_io"],
             "method_order": "deterministic_rotation_by_condition_and_repetition",
@@ -1357,6 +1600,7 @@ def _run_report(config: PaperExperimentConfig) -> Path:
         if not (path / "manifest.json").is_file():
             raise ValueError(f"report input stage is missing: {stage}")
     generalization_timeseries = pd.read_csv(inputs["generalization"] / "timeseries.csv")
+    headline_timeseries = pd.read_csv(inputs["headline"] / "timeseries.csv")
     output = write_paper_evaluation_reports(
         config,
         headline_summary=pd.read_csv(inputs["headline"] / "summary.csv"),
@@ -1364,7 +1608,8 @@ def _run_report(config: PaperExperimentConfig) -> Path:
         objective_summary=pd.read_csv(inputs["objective-comparison"] / "summary.csv"),
         ablation_summary=pd.read_csv(inputs["ablation"] / "summary.csv"),
         timing_summary=pd.read_csv(inputs["timing"] / "summary.csv"),
-        composition_timeseries=generalization_timeseries,
+        nominal_composition_timeseries=generalization_timeseries,
+        fixed_composition_timeseries=headline_timeseries,
         pilot_projection=load_json(inputs["pilot"] / "projection.json"),
     )
     write_json_atomic(stage_manifest(
@@ -1410,10 +1655,14 @@ def _run_validate(config: PaperExperimentConfig) -> Path:
             "failure_count": int((summary["status"] != RunState.COMPLETED.value).sum()),
         }
     timing_manifest = load_json(config.output_root / "timing" / "manifest.json")
+    if timing_manifest.get("schema") != PAPER_STAGE_SCHEMA:
+        raise ValueError("unsupported timing stage manifest schema")
+    if timing_manifest.get("config_sha256") != config.config_sha256:
+        raise ValueError("stale timing config manifest")
+    if timing_manifest.get("pzr_source_sha256") != current_source_hash:
+        raise ValueError("stale timing source manifest")
     _validate_runtime_provenance(timing_manifest, "timing")
-    timing_summary = pd.read_csv(config.output_root / "timing" / "summary.csv")
-    if timing_summary.empty:
-        raise ValueError("timing summary is empty")
+    _validate_timing_stage(config, timing_manifest)
     validations["timing"] = {
         "cell_count": int(timing_manifest.get("cell_count", 0)),
         "failure_count": int(timing_manifest.get("failure_count", 0)),
@@ -1480,8 +1729,8 @@ def main(argv: list[str] | None = None) -> None:
             ),
             event_count=20,
             budgets=(40, 80),
-            conditions=("random_waypoint",),
-            figure8_conditions=("figure8",),
+            generated_nominal_trace_kind="random_waypoint",
+            fixed_figure8_trace_kinds=("figure8",),
             teacher_workers=1,
             evaluation_workers=1,
             training_epochs=2,
@@ -1519,7 +1768,7 @@ def main(argv: list[str] | None = None) -> None:
         except Exception as exc:
             if config.output_root.is_dir():
                 write_json_atomic({
-                    "schema": "pzr.paper-evaluation-exploration.v1",
+                    "schema": "pzr.paper-evaluation-exploration.v2",
                     "experiment_id": config.experiment_id,
                     "status": "failed",
                     "updated_at": _utc_now(),

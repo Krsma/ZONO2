@@ -1,20 +1,19 @@
-schema: pzr.paper-evaluation-config.v1
+schema: pzr.paper-evaluation-config.v2
 experiment_id: paper-evaluation-v1
 output_root: results/paper-evaluation-v1
 paper_artifact_dir: paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v1
 event_count: 500
 budgets: [40, 80, 120, 150, 200, 250, 500]
 candidate_names: [girard, scott, pca, combastel]
-conditions:
-  - random_waypoint
-  - random_waypoint_drift
-  - random_waypoint_geofence
-  - random_waypoint_drift_geofence
-figure8_conditions:
-  - figure8
-  - figure8_drift
-  - figure8_geofence
-  - figure8_drift_geofence
+generated_nominal:
+  trace_kind: random_waypoint
+fixed_patterned:
+  source: rlolaeval
+  figure8_trace_kinds:
+    - figure8
+    - figure8_drift
+    - figure8_geofence
+    - figure8_drift_geofence
 workers:
   teacher: 10
   evaluation: 4

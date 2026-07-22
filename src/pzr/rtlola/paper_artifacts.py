@@ -50,32 +50,71 @@ def write_paper_evaluation_reports(
     objective_summary: pd.DataFrame,
     ablation_summary: pd.DataFrame,
     timing_summary: pd.DataFrame,
-    composition_timeseries: pd.DataFrame,
+    nominal_composition_timeseries: pd.DataFrame,
+    fixed_composition_timeseries: pd.DataFrame,
     pilot_projection: Mapping[str, object],
     output: Path | None = None,
 ) -> Path:
     """Write compact source tables, TeX, and deterministic PDF/PNG figures."""
     destination = config.paper_artifact_dir if output is None else output
     destination.mkdir(parents=True, exist_ok=True)
+    _require_single_trace_source(
+        headline_summary, "fixed_rlolaeval", "headline summary",
+    )
+    _require_single_trace_source(
+        generalization_summary,
+        "generated_nominal_random_waypoint",
+        "nominal generalization summary",
+    )
+    _require_single_trace_source(
+        objective_summary, "fixed_rlolaeval", "objective comparison summary",
+    )
+    _require_single_trace_source(
+        ablation_summary,
+        "generated_nominal_random_waypoint",
+        "H/W ablation summary",
+    )
+    _require_single_trace_source(
+        timing_summary, "fixed_rlolaeval", "timing summary",
+    )
+    _require_single_trace_source(
+        nominal_composition_timeseries,
+        "generated_nominal_random_waypoint",
+        "nominal composition time series",
+    )
+    _require_single_trace_source(
+        fixed_composition_timeseries,
+        "fixed_rlolaeval",
+        "fixed composition time series",
+    )
     headline = aggregate_trace_metrics(headline_summary)
     generalization = aggregate_trace_metrics(generalization_summary)
+    headline["macro_fpr_ci_low"] = np.nan
+    headline["macro_fpr_ci_high"] = np.nan
+    headline["inference_scope"] = "none_fixed_controlled_case_study"
+    generalization["inference_scope"] = "paired_seed_bootstrap"
     objective = objective_comparison_table(objective_summary)
     long_table = headline_long_table(
-        headline_summary, timing_summary, config.budgets, config.figure8_conditions,
+        headline_summary,
+        timing_summary,
+        config.budgets,
+        config.fixed_figure8_trace_kinds,
     )
     fallback = fallback_diagnostics(headline_summary)
     extrapolation = budget80_extrapolation(generalization)
-    composition = reducer_composition(composition_timeseries)
+    nominal_composition = reducer_composition(nominal_composition_timeseries)
+    fixed_composition = reducer_composition(fixed_composition_timeseries)
     ablation = ablation_table(ablation_summary)
 
     tables = {
-        "headline_aggregates.csv": headline,
-        "generalization_aggregates.csv": generalization,
+        "fixed_figure8_headline_aggregates.csv": headline,
+        "nominal_generalization_aggregates.csv": generalization,
         "objective_comparison.csv": objective,
         "headline_long_table.csv": long_table,
         "fallback_diagnostics.csv": fallback,
         "budget80_extrapolation.csv": extrapolation,
-        "reducer_composition.csv": composition,
+        "nominal_reducer_composition.csv": nominal_composition,
+        "fixed_figure8_reducer_composition.csv": fixed_composition,
         "ablation_heatmaps.csv": ablation,
         "timing_summary.csv": timing_summary,
     }
@@ -93,19 +132,44 @@ def write_paper_evaluation_reports(
     )
     write_json_atomic(dict(pilot_projection), destination / "pilot_projection.json")
 
-    _plot_budget_facets(headline, destination / "headline_budget_curves")
-    _plot_composition(composition, destination / "reducer_composition")
+    _plot_budget_facets(
+        headline, destination / "fixed_figure8_headline_budget_curves",
+    )
+    _plot_budget_facets(
+        generalization, destination / "nominal_generalization_budget_curves",
+    )
+    _plot_composition(
+        nominal_composition, destination / "nominal_reducer_composition",
+    )
+    _plot_composition(
+        fixed_composition, destination / "fixed_figure8_reducer_composition",
+    )
     _plot_ablation(ablation, destination / "ablation_heatmaps")
     write_json_atomic({
-        "schema": "pzr.paper-evaluation-report.v1",
+        "schema": "pzr.paper-evaluation-report.v2",
         "config_sha256": config.config_sha256,
         "bootstrap": {
             "replicates": 10_000,
             "interval": "paired seed-level percentile 95% CI",
             "aggregation_unit": "trace",
+            "scope": "generated nominal generalization only",
+            "fixed_patterned_intervals": "none; one controlled trace per condition",
         },
         "missing_points": "unavailable if any contributing run failed",
-        "loss_scale": _loss_scale(headline),
+        "loss_scales": {
+            "fixed_figure8_headline": _loss_scale(headline),
+            "nominal_generalization": _loss_scale(generalization),
+        },
+        "trace_scopes": {
+            "nominal_generalization": "generated_nominal_random_waypoint",
+            "controlled_patterned_case_study": "fixed_rlolaeval_figure8",
+            "pooled_across_scopes": False,
+        },
+        "claims": {
+            "nominal": "random-trajectory generalization",
+            "fixed_patterned": "controlled case study; not a fault-population estimate",
+            "randomized_fault_generalization": False,
+        },
         "ordinary_composition_exclusions": ["none", "fallback", "infeasible_event"],
     }, destination / "report_manifest.json")
     write_json_atomic(
@@ -113,6 +177,20 @@ def write_paper_evaluation_reports(
         destination / "artifact_hashes.json",
     )
     return destination
+
+
+def _require_single_trace_source(
+    frame: pd.DataFrame,
+    expected: str,
+    label: str,
+) -> None:
+    if "trace_source" not in frame:
+        raise ValueError(f"{label} lacks trace_source")
+    if frame.empty:
+        return
+    actual = set(frame["trace_source"].astype(str))
+    if actual != {expected}:
+        raise ValueError(f"{label} has trace sources {sorted(actual)}, expected {expected}")
 
 
 def headline_long_table(
@@ -166,7 +244,9 @@ def objective_comparison_table(summary: pd.DataFrame) -> pd.DataFrame:
     if set(summary["method"].astype(str)) != expected:
         raise ValueError("objective comparison method identities differ")
     result = aggregate_trace_metrics(summary)
-    counts = result.groupby(["condition", "budget"])["method"].nunique()
+    counts = result.groupby(
+        ["trace_source", "trace_kind", "condition", "budget"],
+    )["method"].nunique()
     if bool((counts != 2).any()):
         raise ValueError("objective comparison methods do not align")
     return result.sort_values(["condition", "budget", "method"]).reset_index(drop=True)
@@ -175,7 +255,8 @@ def objective_comparison_table(summary: pd.DataFrame) -> pd.DataFrame:
 def fallback_diagnostics(summary: pd.DataFrame) -> pd.DataFrame:
     """Keep fallback progress diagnostics adjacent to unavailable headline values."""
     columns = [
-        "condition", "seed", "budget", "method", "status", "first_fallback_event",
+        "trace_source", "trace_kind", "condition", "seed", "budget", "method",
+        "status", "first_fallback_event",
         "completed_fraction", "pre_fallback_mean_loss",
         "pre_fallback_throughput_events_per_second",
     ]
@@ -192,7 +273,9 @@ def budget80_extrapolation(generalization: pd.DataFrame) -> pd.DataFrame:
     """Compare the budget-80-only policy with the all-budget policy everywhere."""
     methods = ("pairwise_ranking_policy", "pairwise_ranking_policy_budget80")
     selected = generalization[generalization["method"].isin(methods)].copy()
-    counts = selected.groupby(["condition", "budget"])["method"].nunique()
+    counts = selected.groupby(
+        ["trace_source", "trace_kind", "condition", "budget"],
+    )["method"].nunique()
     if not counts.empty and bool((counts != 2).any()):
         raise ValueError("budget-80 extrapolation policies do not align")
     return selected.sort_values(["condition", "budget", "method"]).reset_index(drop=True)
@@ -200,17 +283,24 @@ def budget80_extrapolation(generalization: pd.DataFrame) -> pd.DataFrame:
 
 def ablation_table(summary: pd.DataFrame) -> pd.DataFrame:
     """Aggregate the H/W grid without admitting invalid runs into main values."""
-    required = {"condition", "horizon", "beam_width", "status"}
+    required = {
+        "trace_source", "trace_kind", "condition", "horizon", "beam_width", "status",
+    }
     missing = required - set(summary.columns)
     if missing:
         raise ValueError(f"ablation summary lacks columns: {sorted(missing)}")
     data = trace_level_metrics(summary)
     rows = []
-    for keys, frame in data.groupby(["condition", "horizon", "beam_width"], sort=True):
-        condition, horizon, width = keys
+    for keys, frame in data.groupby(
+        ["trace_source", "trace_kind", "condition", "horizon", "beam_width"],
+        sort=True,
+    ):
+        trace_source, trace_kind, condition, horizon, width = keys
         completed = frame[frame["status"] == RunState.COMPLETED.value]
         available = len(completed) == len(frame)
         rows.append({
+            "trace_source": trace_source,
+            "trace_kind": trace_kind,
             "condition": condition,
             "horizon": int(horizon),
             "beam_width": int(width),

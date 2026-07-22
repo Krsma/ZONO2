@@ -76,7 +76,8 @@ Run or resume only the release-checked teacher/training/formal-pilot bundle with
 tools/run_paper_evaluation.sh explore
 ```
 
-`explore` includes preflight, `prepare`, `train`, and the 216-cell pilot. It
+`explore` includes preflight, nominal teacher-trace preparation, both policy
+trainings, and the 54-cell nominal pilot. It
 does not run parity, objective comparison, headline, held-out generalization,
 ablation, timing, reporting, validation, or the historical bounded-exploration
 study. Its outputs are source-compatible with a later complete `run` and will
@@ -95,7 +96,7 @@ reporting, and integrity validation. Inspect a running or interrupted evaluation
 with `tools/run_paper_evaluation.sh status`. Individual `pzr-paper` stages remain
 available for focused diagnostics.
 
-The 216-cell pilot projects the unchanged 5,040-cell held-out sweep. If it
+The 54-cell pilot projects only the 1,260-cell nominal held-out sweep. If it
 exceeds 72 four-worker hours, the run exits after recording the projection.
 After reviewing it, resume with:
 
@@ -109,6 +110,13 @@ output directory. Raw cells and stage logs remain under
 `results/paper-evaluation-v1`; compact source tables, TeX tables, PDF/PNG
 figures, and their hashes are written under
 `paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v1`.
+
+Learning, pilot, held-out generalization, and H/W ablation use independently
+generated nominal random-waypoint traces only. The four full-length imported
+figure-eight variants provide the controlled nominal/drift/geofence/combined
+headline, objective, and timing comparisons. Those fixed patterned traces are
+case studies, not multi-seed estimates of randomized fault generalization; the
+pipeline makes no randomized drift/geofence generalization claim.
 
 For an unattended run, start the checked-in command in a detached session:
 

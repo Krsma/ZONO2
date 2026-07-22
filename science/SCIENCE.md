@@ -93,10 +93,15 @@ was removed by the Phase 1 schema reset and is not an active result.
 
 ## Evaluation Claims
 
-The primary completion criteria are the 224-cell full-length figure-8 headline
-and the 5,040-cell held-out generalization matrix. The latter covers twenty
-seeded traces under four conditions, seven transform bounds, eight headline
-methods, and the budget-80 extrapolation policy.
+The primary completion criteria are the 224-cell full-length fixed figure-eight
+headline and the 1,260-cell nominal held-out generalization matrix. The latter
+covers twenty independently generated random-waypoint traces, seven transform
+bounds, eight headline methods, and the budget-80 extrapolation policy.
+
+The four imported nominal, drift, geofence, and combined figure-eight traces
+form a controlled patterned case study. They are not a multi-seed estimate of
+fault-population generalization, and we make no claim about randomized drift or
+geofence generalization. Nominal and fixed patterned results are never pooled.
 
 These matrices define experimental contracts, not results. We do not claim new
 findings before the source-aware manifests validate every required cell and mark

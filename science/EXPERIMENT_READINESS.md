@@ -23,13 +23,17 @@ An experiment is ready only when:
 - interval fallback changes the run state to `fallback_failed`, makes headline
   FPR and completed-run throughput unavailable, and retains pre-fallback
   diagnostics;
-- the 216-cell pilot projection is at most 72 hours with four one-thread
-  workers, or explicit approval is recorded before the unchanged 5,040-cell
-  held-out sweep;
+- the 54-cell nominal pilot projection is at most 72 hours with four one-thread
+  workers, or explicit approval is recorded before the 1,260-cell nominal
+  held-out sweep; the gate excludes fixed headline/objective/timing work;
 - headline aggregation is trace-level, paired bootstrap intervals use 10,000
   deterministic seed-level replicates, and failed points are not connected;
 - the timing stage uses one worker and one native thread, with warm-up,
   reference preparation, trace generation, and artifact I/O excluded.
+- generated training, pilot, held-out, and H/W traces are nominal-only, while
+  the four imported figure-eight variants retain their pinned hashes and lengths;
+- nominal and fixed patterned aggregates and reducer composition remain
+  separate, with no randomized drift/geofence generalization claim.
 
 The primary overnight method list contains Girard, Scott, PCA, Combastel, and
 beam MPC. The MPC and learning candidate catalog contains the same four

@@ -8,9 +8,11 @@ import pandas as pd
 import pytest
 
 from pzr.learning.dataset import ReducerCostDataset
+from pzr.learning.provenance import pzr_source_sha256
 from pzr.learning.training import filter_training_budgets
 from pzr.rtlola.engine import RtlolaEvent
 from pzr.rtlola.paper_artifacts import (
+    _require_single_trace_source,
     _plot_budget_facets,
     ablation_table,
     budget80_extrapolation,
@@ -23,7 +25,9 @@ from pzr.rtlola.paper_experiment import (
     PAPER_CONFIG_SCHEMA,
     ExecutionRegime,
     RunState,
+    TraceSource,
     aggregate_trace_metrics,
+    cell_identity,
     load_paper_experiment_config,
     pilot_projection,
     reducer_composition,
@@ -35,10 +39,15 @@ from pzr.rtlola.paper_pipeline import (
     EvaluationCellJob,
     RUN_EXIT_APPROVAL_REQUIRED,
     _execute_cell_job,
+    _fixed_figure8_traces,
+    _generated_nominal_stage_traces,
     _junit_counts,
     _runtime_provenance,
+    _run_prepare,
     _scientific_failure_count,
+    _validate_timing_stage,
     _validate_runtime_provenance,
+    _validate_completed_stage,
     build_parser,
     run_complete_paper_evaluation,
     run_exploratory_bundle,
@@ -58,7 +67,13 @@ def _summary_row(
     negatives: int = 10,
     loss: float = 2.0,
 ) -> dict[str, object]:
+    trace_source = (
+        TraceSource.FIXED_RLOLAEVAL.value
+        if condition.startswith("figure8")
+        else TraceSource.GENERATED_NOMINAL.value
+    )
     return {
+        "trace_source": trace_source,
         "condition": condition,
         "trace_kind": condition,
         "trace_id": f"{condition}:seed-{seed}",
@@ -84,18 +99,38 @@ def _summary_row(
     }
 
 
+def _projection_payload(config, *, approval_required: bool) -> dict[str, object]:
+    return {
+        "schema": "pzr.paper-evaluation-pilot-projection.v2",
+        "config_sha256": config.config_sha256,
+        "pzr_source_sha256": pzr_source_sha256(),
+        "gated_stage": "generalization",
+        "trace_scope": TraceSource.GENERATED_NOMINAL.value,
+        "target_cell_count": config.expected_cells("generalization"),
+        "approval_required": approval_required,
+    }
+
+
 def test_checked_config_declares_stable_methods_regimes_and_cell_counts():
     config = load_paper_experiment_config(DEFAULT_CONFIG)
 
     assert DEFAULT_CONFIG.name == "paper_evaluation_v1.yaml"
-    assert config.schema == PAPER_CONFIG_SCHEMA == "pzr.paper-evaluation-config.v1"
+    assert config.schema == PAPER_CONFIG_SCHEMA == "pzr.paper-evaluation-config.v2"
     assert config.experiment_id == "paper-evaluation-v1"
     assert config.ablation_workers == 1
-    assert config.expected_cells("pilot") == 216
-    assert config.expected_cells("generalization") == 5_040
+    assert config.generated_nominal_trace_kind == "random_waypoint"
+    assert config.fixed_figure8_trace_kinds == (
+        "figure8", "figure8_drift", "figure8_geofence",
+        "figure8_drift_geofence",
+    )
+    assert config.expected_cells("pilot") == 54
+    assert config.expected_cells("generalization") == 1_260
     assert config.expected_cells("headline") == 224
     assert config.expected_cells("objective-comparison") == 56
-    assert config.expected_cells("ablation") == 320
+    assert config.expected_cells("ablation") == 80
+    assert config.expected_cells("timing") == 672
+    assert config.expected_timing_summary_points == 224
+    assert config.expected_timing_warmups == 56
     assert config.method_by_name["mpc_terminal_beam"].execution_regime is (
         ExecutionRegime.OFFLINE_RECORDED
     )
@@ -117,6 +152,110 @@ def test_checked_config_seed_groups_are_pairwise_disjoint():
     for index, left in enumerate(groups):
         for right in groups[index + 1:]:
             assert not set(left) & set(right)
+
+
+def test_v1_config_schema_is_rejected_instead_of_reinterpreted(tmp_path):
+    stale = tmp_path / "stale.yaml"
+    stale.write_text(DEFAULT_CONFIG.read_text().replace(
+        "pzr.paper-evaluation-config.v2",
+        "pzr.paper-evaluation-config.v1",
+        1,
+    ))
+    with pytest.raises(ValueError, match="unsupported paper config schema"):
+        load_paper_experiment_config(stale)
+
+
+def test_fixed_figure8_traces_validate_pinned_hashes_lengths_and_provenance():
+    config = load_paper_experiment_config(DEFAULT_CONFIG)
+    traces = _fixed_figure8_traces(config)
+
+    assert tuple(trace.trace_kind for trace in traces) == config.fixed_figure8_trace_kinds
+    assert {trace.trace_source for trace in traces} == {TraceSource.FIXED_RLOLAEVAL}
+    assert {len(trace.events) for trace in traces} == {2_340}
+    assert all(trace.provenance["source_file_sha256"] == trace.trace_sha256 for trace in traces)
+    assert all(trace.provenance["source_event_count"] == 2_340 for trace in traces)
+
+
+def test_generated_evaluation_store_is_nominal_only_and_stage_owned(
+    tmp_path, monkeypatch,
+):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path,
+        enforce_canonical_scope=False,
+    )
+    generated = []
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline.generate_random_waypoint_trace_store",
+        lambda trace_config: generated.append(trace_config),
+    )
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline._stored_traces", lambda *_args, **_kwargs: (),
+    )
+
+    assert _generated_nominal_stage_traces(config, "pilot", (90, 91)) == ()
+    assert generated[0].conditions == ("random_waypoint",)
+    assert generated[0].output == tmp_path / "pilot" / "traces" / "generated-nominal"
+
+
+def test_prepare_generates_only_nominal_teacher_traces(tmp_path, monkeypatch):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path,
+        enforce_canonical_scope=False,
+    )
+    generated = []
+
+    def fake_generate(trace_config):
+        generated.append(trace_config)
+        return SimpleNamespace(root=trace_config.output, manifest_sha256="store-hash")
+
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline.generate_random_waypoint_trace_store",
+        fake_generate,
+    )
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline.run_learning_collection",
+        lambda collection_config: collection_config.output / "dataset",
+    )
+
+    _run_prepare(config)
+
+    assert len(generated) == 1
+    assert generated[0].conditions == ("random_waypoint",)
+    assert generated[0].seed_start == 0
+    assert generated[0].seed_count == 26
+    assert not (tmp_path / "prepare" / "traces" / "pilot").exists()
+
+
+def test_cell_identity_records_explicit_trace_source_and_provenance(tmp_path):
+    config = load_paper_experiment_config(DEFAULT_CONFIG)
+    reference = tmp_path / "reference.json"
+    reference.write_text("{}")
+    identity = cell_identity(
+        config,
+        stage="pilot",
+        trace_id="random_waypoint:seed-90",
+        trace_sha256="trace-hash",
+        trace_source=TraceSource.GENERATED_NOMINAL,
+        trace_kind="random_waypoint",
+        trace_provenance={
+            "trace_store_manifest_sha256": "store-hash",
+            "generator_config_sha256": "generator-hash",
+        },
+        condition="random_waypoint",
+        seed=90,
+        event_count=500,
+        budget=40,
+        method=config.method_by_name["girard"],
+        reference_path=reference,
+        model_sha256=None,
+        source_sha256="source-hash",
+    )
+
+    assert identity["trace_source"] == TraceSource.GENERATED_NOMINAL.value
+    assert identity["trace_kind"] == "random_waypoint"
+    assert identity["trace_provenance"]["generator_config_sha256"] == "generator-hash"
 
 
 def test_smoke_parity_event_limit_is_explicit_and_validated(tmp_path):
@@ -240,18 +379,28 @@ def test_trace_misalignment_is_recorded_and_disables_paired_interval():
 def test_reducer_composition_excludes_none_fallback_and_infeasible_events():
     timeseries = pd.DataFrame([
         {"condition": "random_waypoint", "budget": 40,
+         "trace_source": TraceSource.GENERATED_NOMINAL.value,
+         "trace_kind": "random_waypoint",
          "method": "mpc_terminal_beam", "reducer_used": "girard",
          "fallback_used": False, "infeasible_candidate_count": 0},
         {"condition": "random_waypoint", "budget": 40,
+         "trace_source": TraceSource.GENERATED_NOMINAL.value,
+         "trace_kind": "random_waypoint",
          "method": "mpc_terminal_beam", "reducer_used": "scott",
          "fallback_used": False, "infeasible_candidate_count": 0},
         {"condition": "random_waypoint", "budget": 40,
+         "trace_source": TraceSource.GENERATED_NOMINAL.value,
+         "trace_kind": "random_waypoint",
          "method": "mpc_terminal_beam", "reducer_used": "none",
          "fallback_used": False, "infeasible_candidate_count": 0},
         {"condition": "random_waypoint", "budget": 40,
+         "trace_source": TraceSource.GENERATED_NOMINAL.value,
+         "trace_kind": "random_waypoint",
          "method": "mpc_terminal_beam", "reducer_used": "interval",
          "fallback_used": True, "infeasible_candidate_count": 0},
         {"condition": "random_waypoint", "budget": 40,
+         "trace_source": TraceSource.GENERATED_NOMINAL.value,
+         "trace_kind": "random_waypoint",
          "method": "mpc_terminal_beam", "reducer_used": "pca",
          "fallback_used": False, "infeasible_candidate_count": 1},
     ])
@@ -290,6 +439,9 @@ def test_fallback_cell_is_invalidated_and_keeps_full_diagnostic_series(
             trace_id="trace", condition="random_waypoint", seed=90,
             events=(RtlolaEvent(0.0, ()), RtlolaEvent(1.0, ()), RtlolaEvent(2.0, ())),
             trace_sha256="trace-hash",
+            trace_source=TraceSource.GENERATED_NOMINAL,
+            trace_kind="random_waypoint",
+            provenance={},
         ),
         budget=40,
         method=method,
@@ -325,6 +477,23 @@ def test_stale_or_old_cell_manifest_is_rejected():
         )
 
 
+def test_v1_stage_manifest_is_rejected_before_resume(tmp_path):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path,
+    )
+    manifest = tmp_path / "pilot" / "manifest.json"
+    manifest.parent.mkdir()
+    manifest.write_text(json.dumps({
+        "schema": "pzr.paper-evaluation-stage.v1",
+        "config_sha256": config.config_sha256,
+        "pzr_source_sha256": pzr_source_sha256(),
+    }))
+
+    with pytest.raises(ValueError, match="unsupported pilot stage manifest schema"):
+        _validate_completed_stage(config, "pilot")
+
+
 def test_matrix_validation_rejects_duplicate_cells_and_wrong_count():
     config = load_paper_experiment_config(DEFAULT_CONFIG)
     row = _summary_row()
@@ -340,22 +509,75 @@ def test_pilot_projection_reports_scaling_disk_and_approval_gate():
         _summary_row(seed=90, method="girard"),
         _summary_row(seed=91, method="girard"),
     ])
-    summary["total_time_ms"] = 360_000.0
+    summary["total_time_ms"] = 1_000_000.0
 
     projection = pilot_projection(
-        summary, target_cell_count=5_040, worker_count=4,
+        summary, target_cell_count=1_260, worker_count=4,
         disk_bytes=1_000, threshold_hours=72.0,
     )
 
-    assert projection["projected_cpu_hours"] == pytest.approx(504.0)
-    assert projection["projected_four_worker_wall_hours"] == pytest.approx(126.0)
-    assert projection["projected_disk_bytes"] == 2_520_000
+    assert projection["projected_cpu_hours"] == pytest.approx(350.0)
+    assert projection["projected_wall_hours"] == pytest.approx(87.5)
+    assert projection["projected_disk_bytes"] == 630_000
+    assert projection["gated_stage"] == "generalization"
+    assert projection["trace_scope"] == TraceSource.GENERATED_NOMINAL.value
     assert projection["approval_required"] is True
+
+
+def test_timing_validation_asserts_existing_repetition_contract(tmp_path):
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        output_root=tmp_path,
+        budgets=(40,),
+        fixed_figure8_trace_kinds=("figure8",),
+        timing_repetitions=2,
+        enforce_canonical_scope=False,
+    )
+    directory = tmp_path / "timing"
+    directory.mkdir()
+    raw = pd.DataFrame([
+        {
+            "trace_source": TraceSource.FIXED_RLOLAEVAL.value,
+            "trace_kind": "figure8",
+            "condition": "figure8",
+            "budget": 40,
+            "method": method,
+            "repetition": repetition,
+        }
+        for method in HEADLINE_METHODS
+        for repetition in range(2)
+    ])
+    summary = raw.drop(columns="repetition").drop_duplicates()
+    raw.to_csv(directory / "timing_repetitions.csv", index=False)
+    summary.to_csv(directory / "summary.csv", index=False)
+    manifest = {
+        "cell_count": config.expected_cells("timing"),
+        "warmup_count": config.expected_timing_warmups,
+    }
+
+    _validate_timing_stage(config, manifest)
+    with pytest.raises(ValueError, match="manifest measured count"):
+        _validate_timing_stage(config, {**manifest, "cell_count": 1})
+
+
+def test_reporting_rejects_mixed_generated_and_fixed_trace_sources():
+    frame = pd.DataFrame({
+        "trace_source": [
+            TraceSource.GENERATED_NOMINAL.value,
+            TraceSource.FIXED_RLOLAEVAL.value,
+        ],
+    })
+    with pytest.raises(ValueError, match="has trace sources"):
+        _require_single_trace_source(
+            frame, TraceSource.GENERATED_NOMINAL.value, "composition",
+        )
 
 
 def test_budget80_extrapolation_requires_aligned_policy_pairs():
     rows = pd.DataFrame([
-        {"condition": "random_waypoint", "budget": 40,
+        {"trace_source": TraceSource.GENERATED_NOMINAL.value,
+         "trace_kind": "random_waypoint",
+         "condition": "random_waypoint", "budget": 40,
          "method": "pairwise_ranking_policy", "macro_fpr": 0.1},
     ])
     with pytest.raises(ValueError, match="do not align"):
@@ -452,7 +674,9 @@ def test_exploratory_bundle_runs_only_preflight_training_and_formal_pilot(
         if stage == "pilot":
             path = config.output_root / "pilot" / "projection.json"
             path.parent.mkdir(parents=True)
-            path.write_text('{"approval_required": false}')
+            path.write_text(json.dumps(_projection_payload(
+                config, approval_required=False,
+            )))
 
     monkeypatch.setattr("pzr.rtlola.paper_pipeline._run_or_skip_stage", fake_stage)
     monkeypatch.setattr(
@@ -499,7 +723,9 @@ def test_complete_run_stops_at_pilot_gate_and_rejects_preapproval(
         if stage == "pilot":
             path = config.output_root / "pilot" / "projection.json"
             path.parent.mkdir(parents=True)
-            path.write_text('{"approval_required": true}')
+            path.write_text(json.dumps(_projection_payload(
+                config, approval_required=True,
+            )))
 
     monkeypatch.setattr("pzr.rtlola.paper_pipeline._run_or_skip_stage", fake_stage)
     monkeypatch.setattr(
@@ -531,7 +757,9 @@ def test_approved_complete_run_records_approval_and_exact_stage_order(
     )
     projection = config.output_root / "pilot" / "projection.json"
     projection.parent.mkdir(parents=True)
-    projection.write_text('{"approval_required": true}')
+    projection.write_text(json.dumps(_projection_payload(
+        config, approval_required=True,
+    )))
     calls = []
     monkeypatch.setattr(
         "pzr.rtlola.paper_pipeline._run_provenance",

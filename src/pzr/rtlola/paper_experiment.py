@@ -23,10 +23,10 @@ from pzr.rtlola.reference import REFERENCE_CACHE_SCHEMA
 from pzr.rtlola.robot_arm import RLOLAEVAL_REVISION, ROBOT_ARM_SPEC_SHA256
 
 
-PAPER_CONFIG_SCHEMA = "pzr.paper-evaluation-config.v1"
-PAPER_CELL_SCHEMA = "pzr.paper-evaluation-cell.v1"
-PAPER_STAGE_SCHEMA = "pzr.paper-evaluation-stage.v1"
-PAPER_RUN_SCHEMA = "pzr.paper-evaluation-run.v1"
+PAPER_CONFIG_SCHEMA = "pzr.paper-evaluation-config.v2"
+PAPER_CELL_SCHEMA = "pzr.paper-evaluation-cell.v2"
+PAPER_STAGE_SCHEMA = "pzr.paper-evaluation-stage.v2"
+PAPER_RUN_SCHEMA = "pzr.paper-evaluation-run.v2"
 BOOTSTRAP_REPLICATES = 10_000
 BOOTSTRAP_SEED = 20260721
 ORDINARY_REDUCERS = ("girard", "scott", "pca", "combastel")
@@ -89,6 +89,11 @@ class RunState(str, Enum):
     INFRASTRUCTURE_FAILED = "infrastructure_failed"
 
 
+class TraceSource(str, Enum):
+    GENERATED_NOMINAL = "generated_nominal_random_waypoint"
+    FIXED_RLOLAEVAL = "fixed_rlolaeval"
+
+
 @dataclass(frozen=True)
 class MethodConfig:
     name: str
@@ -129,8 +134,9 @@ class PaperExperimentConfig:
     event_count: int
     budgets: tuple[int, ...]
     candidate_names: tuple[str, ...]
-    conditions: tuple[str, ...]
-    figure8_conditions: tuple[str, ...]
+    generated_nominal_trace_kind: str
+    fixed_patterned_source: str
+    fixed_figure8_trace_kinds: tuple[str, ...]
     teacher_workers: int
     evaluation_workers: int
     ablation_workers: int
@@ -161,8 +167,7 @@ class PaperExperimentConfig:
             raise ValueError("paper config needs at least two events and one budget")
         _require_unique("budgets", self.budgets)
         _require_unique("candidate names", self.candidate_names)
-        _require_unique("conditions", self.conditions)
-        _require_unique("figure8 conditions", self.figure8_conditions)
+        _require_unique("fixed figure-eight trace kinds", self.fixed_figure8_trace_kinds)
         _require_unique("method names", tuple(method.name for method in self.methods))
         seed_groups = {
             "training": set(self.train_seeds),
@@ -180,6 +185,61 @@ class PaperExperimentConfig:
             40, 80, 120, 150, 200, 250, 500,
         ):
             raise ValueError("canonical paper budgets differ")
+        if self.enforce_canonical_scope:
+            expected_scope = (
+                "random_waypoint",
+                (
+                    "figure8", "figure8_drift", "figure8_geofence",
+                    "figure8_drift_geofence",
+                ),
+            )
+            actual_scope = (
+                self.generated_nominal_trace_kind,
+                self.fixed_figure8_trace_kinds,
+            )
+            if actual_scope != expected_scope:
+                raise ValueError(
+                    f"canonical paper trace scopes differ: {actual_scope} != "
+                    f"{expected_scope}"
+                )
+            if self.fixed_patterned_source != "rlolaeval":
+                raise ValueError("canonical fixed patterned source must be rlolaeval")
+            if self.event_count != 500:
+                raise ValueError("canonical generated trace event count must be 500")
+            if self.pilot_budgets != (40, 150, 500):
+                raise ValueError("canonical pilot budgets differ")
+            if (
+                self.ablation_budget != 150
+                or self.ablation_horizons != (1, 2, 4, 8)
+                or self.ablation_widths != (1, 2, 4, 8)
+            ):
+                raise ValueError("canonical H/W ablation contract differs")
+            if self.timing_warmup_events != 100 or self.timing_repetitions != 3:
+                raise ValueError("canonical timing contract differs")
+            if (
+                self.teacher_workers != 10
+                or self.evaluation_workers != 4
+                or self.ablation_workers != 1
+            ):
+                raise ValueError("canonical paper worker contract differs")
+            expected_seeds = {
+                "training": tuple(range(0, 20)),
+                "validation": tuple(range(20, 26)),
+                "exploration": tuple(range(26, 42)),
+                "ablation": tuple(range(60, 65)),
+                "pilot": tuple(range(90, 92)),
+                "generalization": tuple(range(100, 120)),
+            }
+            actual_seeds = {
+                "training": self.train_seeds,
+                "validation": self.validation_seeds,
+                "exploration": self.reserved_exploration_seeds,
+                "ablation": self.ablation_seeds,
+                "pilot": self.pilot_seeds,
+                "generalization": self.generalization_seeds,
+            }
+            if actual_seeds != expected_seeds:
+                raise ValueError("canonical paper seed banks differ")
         expected_methods = {*HEADLINE_METHODS, *PILOT_METHODS, *OBJECTIVE_METHODS}
         if set(self.method_by_name) != expected_methods:
             raise ValueError("paper method catalog differs from the stable identities")
@@ -191,11 +251,12 @@ class PaperExperimentConfig:
             raise ValueError("training epochs must be positive")
         if self.enforce_canonical_scope:
             expected_counts = {
-                "pilot": 216,
-                "generalization": 5_040,
+                "pilot": 54,
+                "generalization": 1_260,
                 "headline": 224,
                 "objective-comparison": 56,
-                "ablation": 320,
+                "ablation": 80,
+                "timing": 672,
             }
             actual_counts = {stage: self.expected_cells(stage) for stage in expected_counts}
             if actual_counts != expected_counts:
@@ -209,29 +270,40 @@ class PaperExperimentConfig:
 
     def expected_cells(self, stage: str) -> int:
         if stage == "pilot":
-            return len(self.pilot_seeds) * len(self.conditions) * len(
-                self.pilot_budgets,
-            ) * len(PILOT_METHODS)
+            return len(self.pilot_seeds) * len(self.pilot_budgets) * len(PILOT_METHODS)
         if stage == "generalization":
-            return len(self.generalization_seeds) * len(self.conditions) * len(
-                self.budgets,
-            ) * len(GENERALIZATION_METHODS)
+            return len(self.generalization_seeds) * len(self.budgets) * len(
+                GENERALIZATION_METHODS,
+            )
         if stage == "headline":
-            return len(self.figure8_conditions) * len(self.budgets) * len(
+            return len(self.fixed_figure8_trace_kinds) * len(self.budgets) * len(
                 HEADLINE_METHODS,
             )
         if stage == "objective-comparison":
-            return len(self.figure8_conditions) * len(self.budgets) * len(
+            return len(self.fixed_figure8_trace_kinds) * len(self.budgets) * len(
                 OBJECTIVE_METHODS,
             )
         if stage == "ablation":
             return (
                 len(self.ablation_seeds)
-                * len(self.conditions)
                 * len(self.ablation_horizons)
                 * len(self.ablation_widths)
             )
+        if stage == "timing":
+            return self.expected_timing_summary_points * self.timing_repetitions
         raise ValueError(f"stage has no scientific cell matrix: {stage}")
+
+    @property
+    def expected_timing_summary_points(self) -> int:
+        return (
+            len(self.fixed_figure8_trace_kinds)
+            * len(self.budgets)
+            * len(HEADLINE_METHODS)
+        )
+
+    @property
+    def expected_timing_warmups(self) -> int:
+        return len(self.budgets) * len(HEADLINE_METHODS)
 
 
 def load_paper_experiment_config(path: Path) -> PaperExperimentConfig:
@@ -240,6 +312,8 @@ def load_paper_experiment_config(path: Path) -> PaperExperimentConfig:
     raw = yaml.safe_load(raw_bytes)
     if not isinstance(raw, dict):
         raise ValueError("paper experiment config must be a mapping")
+    if raw.get("schema") != PAPER_CONFIG_SCHEMA:
+        raise ValueError(f"unsupported paper config schema: {raw.get('schema')}")
     methods = tuple(
         MethodConfig(
             name=str(name),
@@ -261,8 +335,11 @@ def load_paper_experiment_config(path: Path) -> PaperExperimentConfig:
         event_count=int(raw["event_count"]),
         budgets=tuple(int(value) for value in raw["budgets"]),
         candidate_names=tuple(str(value) for value in raw["candidate_names"]),
-        conditions=tuple(str(value) for value in raw["conditions"]),
-        figure8_conditions=tuple(str(value) for value in raw["figure8_conditions"]),
+        generated_nominal_trace_kind=str(raw["generated_nominal"]["trace_kind"]),
+        fixed_patterned_source=str(raw["fixed_patterned"]["source"]),
+        fixed_figure8_trace_kinds=tuple(
+            str(value) for value in raw["fixed_patterned"]["figure8_trace_kinds"]
+        ),
         teacher_workers=int(raw["workers"]["teacher"]),
         evaluation_workers=int(raw["workers"]["evaluation"]),
         ablation_workers=int(raw["workers"]["ablation"]),
@@ -309,6 +386,9 @@ def cell_identity(
     stage: str,
     trace_id: str,
     trace_sha256: str,
+    trace_source: TraceSource,
+    trace_kind: str,
+    trace_provenance: Mapping[str, object],
     condition: str,
     seed: int,
     event_count: int,
@@ -327,6 +407,9 @@ def cell_identity(
         "stage": stage,
         "trace_id": trace_id,
         "trace_sha256": trace_sha256,
+        "trace_source": trace_source.value,
+        "trace_kind": trace_kind,
+        "trace_provenance": dict(trace_provenance),
         "condition": condition,
         "seed": seed,
         "event_count": event_count,
@@ -338,6 +421,11 @@ def cell_identity(
         "interpreter_revision": INTERPRETER_REVISION,
         "binding_build_profile": BINDING_BUILD_PROFILE,
         "reference_cache_schema": REFERENCE_CACHE_SCHEMA,
+        "trace_scope_contract": {
+            "generated_nominal_trace_kind": config.generated_nominal_trace_kind,
+            "fixed_patterned_source": config.fixed_patterned_source,
+            "fixed_figure8_trace_kinds": list(config.fixed_figure8_trace_kinds),
+        },
         "reference_cache_sha256": sha256_files((reference_path,)),
         "reference_semantics": {
             "selection": method.selection_reference,
@@ -352,7 +440,6 @@ def cell_identity(
             "generalization": list(config.generalization_seeds),
             "ablation": list(config.ablation_seeds),
         },
-        "conditions": list(config.conditions),
         "config_sha256": config.config_sha256,
         "pzr_source_sha256": source_sha256 or pzr_source_sha256(),
     }
@@ -378,7 +465,8 @@ def validate_cell_manifest(
 def trace_level_metrics(summary: pd.DataFrame) -> pd.DataFrame:
     """Reconstruct trace-level rates and reject inconsistent denominators."""
     required = {
-        "condition", "seed", "budget", "method", "status",
+        "trace_source", "trace_kind", "condition", "seed", "budget", "method",
+        "status",
         "false_positive_count", "false_negative_count",
         "reference_negative_count", "reference_positive_count",
         "mean_approx_loss", "total_time_ms", "event_count",
@@ -431,8 +519,10 @@ def aggregate_trace_metrics(
     data = trace_level_metrics(summary)
     rows: list[dict[str, object]] = []
     rng = np.random.default_rng(bootstrap_seed)
-    group_keys = ["condition", "budget"]
-    for (condition, budget), point in data.groupby(group_keys, sort=True):
+    group_keys = ["trace_source", "trace_kind", "condition", "budget"]
+    for (trace_source, trace_kind, condition, budget), point in data.groupby(
+        group_keys, sort=True,
+    ):
         methods = sorted(point["method"].astype(str).unique())
         seed_sets = {
             method: tuple(sorted(
@@ -463,6 +553,8 @@ def aggregate_trace_metrics(
             fp_count = float(valid["false_positive_count"].sum())
             negative_count = float(valid["reference_negative_count"].sum())
             rows.append({
+                "trace_source": trace_source,
+                "trace_kind": trace_kind,
                 "condition": condition,
                 "budget": int(budget),
                 "method": method,
@@ -504,7 +596,8 @@ def aggregate_trace_metrics(
 def reducer_composition(timeseries: pd.DataFrame) -> pd.DataFrame:
     """Count ordinary choices, excluding none, fallback, and infeasible events."""
     required = {
-        "condition", "budget", "method", "reducer_used", "fallback_used",
+        "trace_source", "trace_kind", "condition", "budget", "method",
+        "reducer_used", "fallback_used",
         "infeasible_candidate_count",
     }
     missing = required - set(timeseries.columns)
@@ -516,7 +609,10 @@ def reducer_composition(timeseries: pd.DataFrame) -> pd.DataFrame:
         & ~timeseries["fallback_used"].astype(bool)
         & (timeseries["infeasible_candidate_count"].astype(int) == 0)
     ].copy()
-    groups = ["condition", "budget", "method", "reducer_used"]
+    groups = [
+        "trace_source", "trace_kind", "condition", "budget", "method",
+        "reducer_used",
+    ]
     result = selected.groupby(groups, dropna=False).size().rename("count").reset_index()
     if result.empty:
         return pd.DataFrame(columns=(*groups, "count", "percentage"))
@@ -532,6 +628,9 @@ def pilot_projection(
     worker_count: int,
     disk_bytes: int,
     threshold_hours: float,
+    gated_stage: str = "generalization",
+    trace_scope: str = TraceSource.GENERATED_NOMINAL.value,
+    separate_fixed_workloads: Mapping[str, int] | None = None,
 ) -> dict[str, object]:
     """Project the held-out run from observed pilot cells and expose its gate."""
     if target_cell_count < 1 or worker_count < 1 or disk_bytes < 0:
@@ -561,13 +660,18 @@ def pilot_projection(
         "pilot_cell_count": len(data),
         "completed_pilot_cell_count": len(completed),
         "target_cell_count": target_cell_count,
+        "gated_stage": gated_stage,
+        "trace_scope": trace_scope,
         "worker_count": worker_count,
         "projected_cpu_hours": cpu_hours,
-        "projected_four_worker_wall_hours": wall_hours,
+        "projected_wall_hours": wall_hours,
         "projected_disk_bytes": int(round(disk_bytes * target_cell_count / len(data))),
         "per_method_scaling": per_method,
         "maximum_wall_hours": threshold_hours,
         "approval_required": wall_hours > threshold_hours,
+        "gate_covers": [gated_stage],
+        "gate_excludes": ["headline", "objective-comparison", "timing", "ablation"],
+        "separate_fixed_workloads": dict(separate_fixed_workloads or {}),
     }
 
 
@@ -580,7 +684,7 @@ def validate_summary_matrix(
     expected = config.expected_cells(stage)
     if len(summary) != expected:
         raise ValueError(f"{stage} has {len(summary)} cells, expected {expected}")
-    keys = ["condition", "seed", "budget", "method"]
+    keys = ["trace_source", "trace_kind", "condition", "seed", "budget", "method"]
     if stage == "ablation":
         keys.extend(("horizon", "beam_width"))
     missing = set(keys) - set(summary.columns)
@@ -604,42 +708,58 @@ def _expected_matrix_keys(
 ) -> set[tuple[object, ...]]:
     if stage == "pilot":
         return {
-            (condition, seed, budget, method)
+            (
+                TraceSource.GENERATED_NOMINAL.value,
+                config.generated_nominal_trace_kind,
+                config.generated_nominal_trace_kind,
+                seed, budget, method,
+            )
             for seed in config.pilot_seeds
-            for condition in config.conditions
             for budget in config.pilot_budgets
             for method in PILOT_METHODS
         }
     if stage == "generalization":
         return {
-            (condition, seed, budget, method)
+            (
+                TraceSource.GENERATED_NOMINAL.value,
+                config.generated_nominal_trace_kind,
+                config.generated_nominal_trace_kind,
+                seed, budget, method,
+            )
             for seed in config.generalization_seeds
-            for condition in config.conditions
             for budget in config.budgets
             for method in GENERALIZATION_METHODS
         }
     if stage == "headline":
         return {
-            (condition, 0, budget, method)
-            for condition in config.figure8_conditions
+            (
+                TraceSource.FIXED_RLOLAEVAL.value, condition, condition,
+                0, budget, method,
+            )
+            for condition in config.fixed_figure8_trace_kinds
             for budget in config.budgets
             for method in HEADLINE_METHODS
         }
     if stage == "objective-comparison":
         return {
-            (condition, 0, budget, method)
-            for condition in config.figure8_conditions
+            (
+                TraceSource.FIXED_RLOLAEVAL.value, condition, condition,
+                0, budget, method,
+            )
+            for condition in config.fixed_figure8_trace_kinds
             for budget in config.budgets
             for method in OBJECTIVE_METHODS
         }
     if stage == "ablation":
         return {
             (
-                condition, seed, config.ablation_budget,
+                TraceSource.GENERATED_NOMINAL.value,
+                config.generated_nominal_trace_kind,
+                config.generated_nominal_trace_kind,
+                seed, config.ablation_budget,
                 f"mpc_terminal_beam_h{horizon}_w{width}", horizon, width,
             )
             for seed in config.ablation_seeds
-            for condition in config.conditions
             for horizon in config.ablation_horizons
             for width in config.ablation_widths
         }
@@ -662,6 +782,11 @@ def stage_manifest(
         "status": status,
         "config_path": str(config.source),
         "config_sha256": config.config_sha256,
+        "trace_scope_contract": {
+            "generated_nominal_trace_kind": config.generated_nominal_trace_kind,
+            "fixed_patterned_source": config.fixed_patterned_source,
+            "fixed_figure8_trace_kinds": list(config.fixed_figure8_trace_kinds),
+        },
         "pzr_source_sha256": pzr_source_sha256(),
         "spec_sha256": ROBOT_ARM_SPEC_SHA256,
         "rlolaeval_revision": RLOLAEVAL_REVISION,
@@ -686,7 +811,7 @@ def artifact_hash_manifest(directory: Path) -> dict[str, object]:
         if path.is_file() and path.name != "artifact_hashes.json"
     ))
     return {
-        "schema": "pzr.paper-generated-artifact-hashes.v1",
+        "schema": "pzr.paper-generated-artifact-hashes.v2",
         "files": [
             {
                 "path": str(path.relative_to(directory)),

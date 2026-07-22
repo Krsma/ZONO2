@@ -166,8 +166,8 @@ extrapolation diagnostic.
 
 The Phase 1 cleanup reset all prior learning result directories. There is no
 active primary, secondary, exploratory, or paper-evaluation result artifact.
-New claims require the versioned 224-cell figure-8 headline and 5,040-cell
-held-out manifests, with every failed point explicitly unavailable.
+New claims require the versioned 224-cell fixed figure-8 headline and 1,260-cell
+nominal held-out manifests, with every failed point explicitly unavailable.
 
 Soft-KL and guarded DART remain completed secondary ablations and are not part
 of the default wrapper. Their historical result artifact was removed during the
@@ -183,10 +183,13 @@ The former Clean20/Clean36/DART36/expected-regret promotion workflow is not a
 current experiment entry point. Seeds 26--41 remain reserved so a future,
 explicitly versioned learning study cannot contaminate the paper splits.
 
-The four figure-8 headline traces always retain their full authoritative lengths.
-Held-out generalization uses seeds 100--119 under all four random-waypoint
-conditions at 500 events. Pilot seeds are 90--91, ablation seeds are 60--64,
-and reserved exploration/model-selection seeds remain 26--41.
+The four fixed figure-8 headline traces always retain their full authoritative
+lengths and pinned RLolaEval hashes. They are controlled patterned case studies,
+not multi-seed fault-population estimates. Held-out generalization uses generated
+nominal random-waypoint seeds 100--119 at 500 events; pilot seeds 90--91 and
+ablation seeds 60--64 are nominal-only. No randomized drift/geofence
+generalization claim is made. Reserved exploration/model-selection seeds remain
+26--41.
 Teacher shards use ten spawned workers. Headline, pilot, objective comparison,
 and generalization use four spawned workers with `max_tasks_per_child=1`; each
 worker owns its monitor and planner. Ablation and timing are sequential. BLAS,

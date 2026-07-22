@@ -64,8 +64,11 @@ tools/run_paper_evaluation.sh run
 ```
 
 The output must be fresh and source-aware. We do not claim a revised result
-until the 224-cell headline and 5,040-cell held-out manifests validate, with
-every failed point explicitly unavailable.
+until the 224-cell fixed figure-eight headline and 1,260-cell nominal held-out
+manifests validate, with every failed point explicitly unavailable. Training,
+pilot, held-out evaluation, and H/W ablation generate nominal random-waypoint
+traces only. Imported patterned figure-eight traces are controlled case studies
+and are never pooled with the nominal seed bank.
 
 ## Secondary Soft-KL and Guarded DART Ablations
 
