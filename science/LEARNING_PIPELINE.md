@@ -52,7 +52,7 @@ across budgets. Joint-budget and cross-budget policies are follow-up work.
 
 Exact references are prepared once per trace. Teacher collection uses ten
 spawned workers; pilot, headline, objective comparison, and generalization use
-four spawned workers with `max_tasks_per_child=1`. Ablation and timing are
+ten spawned workers with `max_tasks_per_child=1`. Ablation and timing are
 sequential so their reported throughput is not contaminated by experiment-worker
 contention. Every worker owns its binding monitor, while BLAS, OpenMP, MKL, and
 NumExpr remain limited to one native thread.

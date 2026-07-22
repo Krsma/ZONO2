@@ -105,7 +105,7 @@ The canonical wrapper is `tools/run_paper_evaluation.sh`. It performs the
 non-parity release preflight, training, pilot gating, all scientific matrices,
 reporting, and validation. It prepares one exact reference per trace and uses
 source-aware resumable cells. The H/W ablation uses one experiment worker so
-its diagnostic throughput is contention-free; headline and generalization use four
+its diagnostic throughput is contention-free; headline and generalization use ten
 workers. Dedicated timing is deferred from the main `evaluate` command. Full
 RLolaEval notebook parity remains available through
 `pzr-rtlola-parity` but is never invoked or required by paper stages.
@@ -196,7 +196,7 @@ ablation seeds 60--64 are nominal-only. No randomized drift/geofence
 generalization claim is made. Reserved exploration/model-selection seeds remain
 26--41.
 Teacher shards use ten spawned workers. Headline, pilot, objective comparison,
-and generalization use four spawned workers with `max_tasks_per_child=1`; each
+and generalization use ten spawned workers with `max_tasks_per_child=1`; each
 worker owns its monitor and planner. Ablation and timing are sequential. BLAS,
 OpenMP, MKL, and NumExpr remain limited to one thread per worker.
 

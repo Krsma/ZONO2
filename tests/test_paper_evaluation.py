@@ -127,6 +127,7 @@ def test_checked_config_declares_stable_methods_regimes_and_cell_counts():
     assert config.schema == PAPER_CONFIG_SCHEMA == "pzr.paper-evaluation-config.v3"
     assert config.experiment_id == "paper-evaluation-v2"
     assert config.ablation_workers == 1
+    assert config.evaluation_workers == 10
     assert config.generated_nominal_trace_kind == "random_waypoint"
     assert config.fixed_figure8_trace_kinds == (
         "figure8", "figure8_drift", "figure8_geofence",

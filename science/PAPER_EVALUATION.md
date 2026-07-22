@@ -47,7 +47,7 @@ selection or teaching reference.
 
 Training and validation use nominal 500-event random-waypoint traces with seeds
 0--19 and 20--25. The 112-cell pilot uses nominal seeds 90--91, all seven
-budgets, and eight methods. It records CPU, four-worker wall, disk, and
+budgets, and eight methods. It records CPU, ten-worker wall, disk, and
 per-method projections. A projection above 72 wall hours pauses only the
 1,120-cell nominal held-out stage until `--approve-long-run` is supplied; fixed
 headline, objective, timing, and ablation work is outside that gate.

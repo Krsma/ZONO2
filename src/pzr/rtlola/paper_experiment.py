@@ -226,7 +226,7 @@ class PaperExperimentConfig:
                 raise ValueError("canonical timing contract differs")
             if (
                 self.teacher_workers != 10
-                or self.evaluation_workers != 4
+                or self.evaluation_workers != 10
                 or self.ablation_workers != 1
             ):
                 raise ValueError("canonical paper worker contract differs")

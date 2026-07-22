@@ -1185,7 +1185,7 @@ def _run_generalization(
     _validate_projection(config, projection)
     if bool(projection.get("approval_required")) and not approve_long_run:
         raise PermissionError(
-            "pilot projects more than 72 four-worker hours; publish the pilot "
+            "pilot projects more than 72 configured-worker hours; publish the pilot "
             "manifest and rerun with --approve-long-run"
         )
     traces = _generated_nominal_stage_traces(

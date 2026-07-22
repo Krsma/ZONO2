@@ -111,7 +111,7 @@ pzr-rtlola-parity --rlola-eval ../rlola-eval --output /tmp/pzr-parity \
 The ordinary unfiltered pytest command still includes all parity-marked tests.
 
 The 112-cell pilot projects only the 1,120-cell nominal held-out sweep. If it
-exceeds 72 four-worker hours, the run exits after recording the projection.
+exceeds 72 ten-worker hours, the run exits after recording the projection.
 After reviewing it, resume with:
 
 ```bash

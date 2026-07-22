@@ -19,7 +19,7 @@ teacher_dataset:
   sha256: 885c3dfbf70ddf614db72f564877e667e056a59966e62094d365606e0b503602
 workers:
   teacher: 10
-  evaluation: 4
+  evaluation: 10
   ablation: 1
 training:
   epochs: 100

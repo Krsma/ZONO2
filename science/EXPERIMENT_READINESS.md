@@ -27,7 +27,7 @@ An experiment is ready only when:
   diagnostics;
 - every learned evaluation row records a model trained only at the same exact
   budget, and all seven specialist trainings use the shared fixed hyperparameters;
-- the 112-cell nominal pilot projection is at most 72 hours with four one-thread
+- the 112-cell nominal pilot projection is at most 72 hours with ten one-thread
   workers, or explicit approval is recorded before the 1,120-cell nominal
   held-out sweep; the gate excludes fixed headline/objective/timing work;
 - headline aggregation is trace-level, paired bootstrap intervals use 10,000
