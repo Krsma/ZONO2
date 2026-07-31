@@ -85,7 +85,7 @@ from pzr.rtlola.robot_arm_random import RANDOM_WAYPOINT_SOURCE_REVISION
 from pzr.rtlola.scenarios import scenario_by_name
 
 
-DEFAULT_CONFIG = Path("experiments/paper_evaluation_v2.yaml")
+DEFAULT_CONFIG = Path("experiments/paper_evaluation_v3.yaml")
 REPOSITORY_ROOT = Path(__file__).resolve().parents[3]
 RUN_EXIT_COMPLETE = 0
 RUN_EXIT_FAILED_POINTS = 2
@@ -597,11 +597,24 @@ def _validate_completed_stage(config: PaperExperimentConfig, stage: str) -> None
         raise ValueError(f"stale {stage} source manifest")
     _validate_runtime_provenance(manifest, stage)
     if stage == "prepare":
-        dataset = config.output_root / "prepare" / "teacher" / "dataset"
-        if not (dataset / "manifest.json").is_file():
-            raise ValueError("prepare teacher dataset is missing")
-        if dataset_sha256(dataset) != manifest.get("teacher_dataset_sha256"):
-            raise ValueError("prepare teacher dataset hash differs")
+        if config.frozen_policy_source is not None:
+            frozen = config.frozen_policy_source
+            if manifest.get("teacher_dataset_origin") != "frozen_policy_provenance":
+                raise ValueError("prepare frozen-policy origin differs")
+            if manifest.get("frozen_policy_variant") != frozen.variant:
+                raise ValueError("prepare frozen-policy variant differs")
+            if manifest.get("frozen_policy_training_size") != frozen.training_size:
+                raise ValueError("prepare frozen-policy training size differs")
+            if manifest.get("frozen_policy_model_matrix_sha256") != (
+                frozen.model_matrix_sha256
+            ):
+                raise ValueError("prepare frozen-policy matrix hash differs")
+        else:
+            dataset = config.output_root / "prepare" / "teacher" / "dataset"
+            if not (dataset / "manifest.json").is_file():
+                raise ValueError("prepare teacher dataset is missing")
+            if dataset_sha256(dataset) != manifest.get("teacher_dataset_sha256"):
+                raise ValueError("prepare teacher dataset hash differs")
     elif stage == "train":
         models = manifest.get("models_by_budget")
         if not isinstance(models, dict):
@@ -624,6 +637,13 @@ def _validate_completed_stage(config: PaperExperimentConfig, stage: str) -> None
             budget = int(budget_text)
             if payload.get("budget_filter") != [budget]:
                 raise ValueError("train manifest specialist filter differs")
+            if config.frozen_policy_source is not None:
+                if payload.get("training_size") != len(config.train_seeds):
+                    raise ValueError("frozen specialist training size differs")
+                if payload.get("training_seeds") != list(config.train_seeds):
+                    raise ValueError("frozen specialist training seeds differ")
+                if payload.get("optimizer_seed") != config.training_seed:
+                    raise ValueError("frozen specialist optimizer seed differs")
             path = Path(str(payload["path"]))
             if model_sha256(path) != payload.get("sha256"):
                 raise ValueError(f"trained model hash differs: {path}")
@@ -764,10 +784,14 @@ def _run_provenance(config: PaperExperimentConfig) -> dict[str, object]:
         ["git", "rev-parse", "HEAD"], cwd=REPOSITORY_ROOT,
         text=True, capture_output=True, check=True,
     ).stdout.strip()
+    try:
+        config_scope = str(config.source.relative_to(REPOSITORY_ROOT))
+    except ValueError:
+        config_scope = str(config.source)
     dirty = subprocess.run(
         [
             "git", "status", "--porcelain", "--untracked-files=all", "--",
-            "src/pzr", "experiments", "rlolapythonbinding", "pyproject.toml",
+            "src/pzr", config_scope, "rlolapythonbinding", "pyproject.toml",
             "tools/run_paper_evaluation.sh",
         ],
         cwd=REPOSITORY_ROOT, text=True, capture_output=True, check=True,
@@ -955,8 +979,136 @@ def _utc_now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
 
+def _resolve_repository_path(path: Path) -> Path:
+    return path if path.is_absolute() else REPOSITORY_ROOT / path
+
+
+def _frozen_policy_records(
+    config: PaperExperimentConfig,
+) -> tuple[dict[int, dict[str, object]], dict[str, object]]:
+    """Validate and return the selected exact-budget frozen policy records."""
+    source = config.frozen_policy_source
+    if source is None:
+        raise ValueError("paper configuration has no frozen policy source")
+    manifest_path = _resolve_repository_path(source.manifest)
+    manifest = load_json(manifest_path)
+    expected_header = {
+        "freeze_schema": source.schema,
+        "experiment_fingerprint": source.experiment_fingerprint,
+        "pzr_source_sha256": source.pzr_source_sha256,
+        "model_matrix_sha256": source.model_matrix_sha256,
+        "binding_revision": BINDING_REVISION,
+        "interpreter_revision": INTERPRETER_REVISION,
+        "binding_build_profile": BINDING_BUILD_PROFILE,
+    }
+    for key, expected in expected_header.items():
+        if manifest.get(key) != expected:
+            raise ValueError(f"frozen policy source {key} differs")
+    raw_models = manifest.get("models")
+    if not isinstance(raw_models, dict):
+        raise ValueError("frozen policy source model matrix is missing")
+    if payload_sha256(raw_models) != source.model_matrix_sha256:
+        raise ValueError("frozen policy source model matrix hash differs")
+    records: dict[int, dict[str, object]] = {}
+    for budget in config.budgets:
+        raw = raw_models.get(f"{source.variant}:{budget}")
+        if not isinstance(raw, dict):
+            raise ValueError(f"frozen policy source lacks budget {budget}")
+        record = dict(raw)
+        expected_record = {
+            "variant": source.variant,
+            "training_size": source.training_size,
+            "training_seeds": list(config.train_seeds),
+            "optimizer_seed": source.optimizer_seed,
+            "budget": budget,
+        }
+        for key, expected in expected_record.items():
+            if record.get(key) != expected:
+                raise ValueError(f"frozen policy budget {budget} {key} differs")
+        model_path = _resolve_repository_path(Path(str(record["path"])))
+        if model_sha256(model_path) != record.get("sha256"):
+            raise ValueError(f"frozen policy model hash differs: budget {budget}")
+        training = load_json(model_path / "exploratory_training.json")
+        identity = training.get("identity")
+        if not isinstance(identity, dict):
+            raise ValueError(f"frozen policy training identity is missing: budget {budget}")
+        for key, expected in {
+            "experiment_fingerprint": source.experiment_fingerprint,
+            "variant": source.variant,
+            "training_size": source.training_size,
+            "training_seeds": list(config.train_seeds),
+            "optimizer_seed": source.optimizer_seed,
+            "budget": budget,
+            "training": {
+                "epochs": config.training_epochs,
+                "batch_size": config.training_batch_size,
+                "learning_rate": config.training_learning_rate,
+                "weight_decay": config.training_weight_decay,
+                "patience": config.training_patience,
+            },
+        }.items():
+            if identity.get(key) != expected:
+                raise ValueError(f"frozen policy training {key} differs: budget {budget}")
+        if training.get("model_sha256") != record["sha256"]:
+            raise ValueError(f"frozen policy training model hash differs: budget {budget}")
+        if training.get("record") != raw:
+            raise ValueError(f"frozen policy training record differs: budget {budget}")
+        source_hashes = dict(identity.get("source_hashes", {}))
+        if source_hashes != dict(source.source_dataset_sha256):
+            raise ValueError(f"frozen policy source datasets differ: budget {budget}")
+        record["source_hashes"] = source_hashes
+        records[budget] = record
+    return records, manifest
+
+
 def _run_prepare(config: PaperExperimentConfig) -> Path:
     stage_dir = config.output_root / "prepare"
+    if config.frozen_policy_source is not None:
+        records, source_manifest = _frozen_policy_records(config)
+        source_hashes = {
+            str(name): str(value)
+            for record in records.values()
+            for name, value in dict(record.get("source_hashes", {})).items()
+        }
+        write_json_atomic(stage_manifest(
+            config,
+            stage="prepare",
+            status="completed",
+            extra={
+                "teacher_dataset_origin": "frozen_policy_provenance",
+                "teacher_budgets": list(config.budgets),
+                "teacher_seed_count": len(config.train_seeds)
+                + len(config.validation_seeds),
+                "training_seed_count": len(config.train_seeds),
+                "validation_seed_count": len(config.validation_seeds),
+                "trace_scope": TraceSource.GENERATED_NOMINAL.value,
+                "trace_kind": config.generated_nominal_trace_kind,
+                "frozen_policy_source_manifest": str(
+                    config.frozen_policy_source.manifest
+                ),
+                "frozen_policy_source_manifest_sha256": sha256_files((
+                    _resolve_repository_path(config.frozen_policy_source.manifest),
+                )),
+                "frozen_policy_source_experiment_fingerprint": source_manifest[
+                    "experiment_fingerprint"
+                ],
+                "frozen_policy_source_pzr_source_sha256": source_manifest[
+                    "pzr_source_sha256"
+                ],
+                "frozen_policy_variant": config.frozen_policy_source.variant,
+                "frozen_policy_training_size": (
+                    config.frozen_policy_source.training_size
+                ),
+                "frozen_policy_optimizer_seed": (
+                    config.frozen_policy_source.optimizer_seed
+                ),
+                "frozen_policy_model_matrix_sha256": (
+                    config.frozen_policy_source.model_matrix_sha256
+                ),
+                "teacher_dataset_source_hashes": source_hashes,
+            },
+        ), stage_dir / "manifest.json")
+        return stage_dir
     parent = config.teacher_dataset_parent
     if parent is not None and parent.is_dir():
         _validate_teacher_dataset_parent(config, parent)
@@ -1077,6 +1229,84 @@ def _validate_teacher_dataset_parent(
 
 def _run_train(config: PaperExperimentConfig) -> Path:
     stage_dir = config.output_root / "train"
+    if config.frozen_policy_source is not None:
+        records, _ = _frozen_policy_records(config)
+        models = {}
+        for budget in config.budgets:
+            source = records[budget]
+            source_path = _resolve_repository_path(Path(str(source["path"])))
+            output = stage_dir / f"model-budget-{budget}"
+            output.parent.mkdir(parents=True, exist_ok=True)
+            shutil.copytree(source_path, output, dirs_exist_ok=True)
+            copied_hash = model_sha256(output)
+            if copied_hash != source["sha256"]:
+                raise ValueError(f"copied Clean148 model hash differs: {budget}")
+            write_json_atomic({
+                "schema": "pzr.imported-frozen-reducer-training.v1",
+                "model_origin": "reused_verified_frozen_policy",
+                "source_manifest": str(config.frozen_policy_source.manifest),
+                "source_experiment_fingerprint": (
+                    config.frozen_policy_source.experiment_fingerprint
+                ),
+                "source_pzr_source_sha256": (
+                    config.frozen_policy_source.pzr_source_sha256
+                ),
+                "source_model_sha256": source["sha256"],
+                "source_subset_sha256": source.get("subset_sha256"),
+                "source_dataset_hashes": source.get("source_hashes", {}),
+                "variant": config.frozen_policy_source.variant,
+                "training_size": len(config.train_seeds),
+                "training_seeds": list(config.train_seeds),
+                "validation_seeds": list(config.validation_seeds),
+                "budget_filter": [budget],
+                "training_budgets": [budget],
+                "seed": config.training_seed,
+                "shared_hyperparameters": {
+                    "epochs": config.training_epochs,
+                    "batch_size": config.training_batch_size,
+                    "learning_rate": config.training_learning_rate,
+                    "weight_decay": config.training_weight_decay,
+                    "patience": config.training_patience,
+                },
+                "binding_revision": BINDING_REVISION,
+                "interpreter_revision": INTERPRETER_REVISION,
+                "binding_build_profile": BINDING_BUILD_PROFILE,
+            }, output / "training.json")
+            models[str(budget)] = {
+                "path": str(output),
+                "sha256": copied_hash,
+                "budget_filter": [budget],
+                "training_budget": budget,
+                "training_size": len(config.train_seeds),
+                "training_seeds": list(config.train_seeds),
+                "validation_seeds": list(config.validation_seeds),
+                "optimizer_seed": config.training_seed,
+                "model_origin": "reused_verified_frozen_policy",
+                "source_model_path": str(source_path),
+                "source_subset_sha256": source.get("subset_sha256"),
+            }
+        write_json_atomic(stage_manifest(
+            config,
+            stage="train",
+            status="completed",
+            extra={
+                "models_by_budget": models,
+                "model_origin": "reused_verified_frozen_policy",
+                "frozen_policy_variant": config.frozen_policy_source.variant,
+                "frozen_policy_model_matrix_sha256": (
+                    config.frozen_policy_source.model_matrix_sha256
+                ),
+                "shared_hyperparameters": {
+                    "epochs": config.training_epochs,
+                    "batch_size": config.training_batch_size,
+                    "learning_rate": config.training_learning_rate,
+                    "weight_decay": config.training_weight_decay,
+                    "patience": config.training_patience,
+                    "seed": config.training_seed,
+                },
+            },
+        ), stage_dir / "manifest.json")
+        return stage_dir
     dataset = config.output_root / "prepare" / "teacher" / "dataset"
     if not (dataset / "manifest.json").is_file():
         raise ValueError("prepare stage teacher dataset is missing")
@@ -2200,6 +2430,7 @@ def main(argv: list[str] | None = None) -> None:
             training_epochs=2,
             teacher_dataset_parent=None,
             teacher_dataset_parent_sha256=None,
+            frozen_policy_source=None,
             train_seeds=(0,),
             validation_seeds=(1,),
             reserved_exploration_seeds=(26,),

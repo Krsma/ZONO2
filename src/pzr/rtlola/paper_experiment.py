@@ -96,6 +96,31 @@ class TraceSource(str, Enum):
 
 
 @dataclass(frozen=True)
+class FrozenPolicySource:
+    """Pinned external model matrix selected before the paper evaluation."""
+
+    manifest: Path
+    schema: str
+    variant: str
+    training_size: int
+    optimizer_seed: int
+    experiment_fingerprint: str
+    pzr_source_sha256: str
+    model_matrix_sha256: str
+    source_dataset_sha256: tuple[tuple[str, str], ...]
+
+    def __post_init__(self) -> None:
+        if self.training_size < 1:
+            raise ValueError("frozen policy training size must be positive")
+        if not self.variant:
+            raise ValueError("frozen policy variant must be named")
+        if not self.source_dataset_sha256:
+            raise ValueError("frozen policy source datasets must be pinned")
+        names = tuple(name for name, _ in self.source_dataset_sha256)
+        _require_unique("frozen policy source dataset names", names)
+
+
+@dataclass(frozen=True)
 class MethodConfig:
     name: str
     execution_regime: ExecutionRegime
@@ -149,6 +174,7 @@ class PaperExperimentConfig:
     training_seed: int
     teacher_dataset_parent: Path | None
     teacher_dataset_parent_sha256: str | None
+    frozen_policy_source: FrozenPolicySource | None
     train_seeds: tuple[int, ...]
     validation_seeds: tuple[int, ...]
     reserved_exploration_seeds: tuple[int, ...]
@@ -230,14 +256,37 @@ class PaperExperimentConfig:
                 or self.ablation_workers != 1
             ):
                 raise ValueError("canonical paper worker contract differs")
-            expected_seeds = {
-                "training": tuple(range(0, 20)),
-                "validation": tuple(range(20, 26)),
-                "exploration": tuple(range(26, 42)),
+            stable_seeds = {
                 "ablation": tuple(range(60, 65)),
                 "pilot": tuple(range(90, 92)),
                 "generalization": tuple(range(100, 120)),
             }
+            if self.experiment_id == "paper-evaluation-v2":
+                expected_seeds = {
+                    "training": tuple(range(0, 20)),
+                    "validation": tuple(range(20, 26)),
+                    "exploration": tuple(range(26, 42)),
+                    **stable_seeds,
+                }
+                if self.frozen_policy_source is not None:
+                    raise ValueError("paper-evaluation-v2 must train its Clean20 models")
+            elif self.experiment_id == "paper-evaluation-v3":
+                expected_seeds = {
+                    "training": (
+                        tuple(range(0, 20))
+                        + tuple(range(26, 42))
+                        + tuple(range(200, 312))
+                    ),
+                    "validation": tuple(range(20, 26)),
+                    "exploration": tuple(range(312, 328)),
+                    **stable_seeds,
+                }
+                if self.frozen_policy_source is None:
+                    raise ValueError("paper-evaluation-v3 requires the frozen Clean148 matrix")
+            else:
+                raise ValueError(
+                    f"unsupported canonical paper experiment: {self.experiment_id}"
+                )
             actual_seeds = {
                 "training": self.train_seeds,
                 "validation": self.validation_seeds,
@@ -267,6 +316,16 @@ class PaperExperimentConfig:
             self.teacher_dataset_parent_sha256 is None
         ):
             raise ValueError("teacher parent path and hash must be configured together")
+        if self.frozen_policy_source is not None:
+            frozen = self.frozen_policy_source
+            if self.teacher_dataset_parent is not None:
+                raise ValueError(
+                    "frozen policy reuse and teacher dataset reuse are mutually exclusive"
+                )
+            if frozen.training_size != len(self.train_seeds):
+                raise ValueError("frozen policy training size differs from train seeds")
+            if frozen.optimizer_seed != self.training_seed:
+                raise ValueError("frozen policy optimizer seed differs from training seed")
         if self.enforce_canonical_scope:
             expected_counts = {
                 "pilot": 112,
@@ -344,6 +403,25 @@ def load_paper_experiment_config(path: Path) -> PaperExperimentConfig:
         )
         for name, values in raw["methods"].items()
     )
+    frozen_raw = raw.get("frozen_policy")
+    frozen_policy_source = None
+    if frozen_raw is not None:
+        if not isinstance(frozen_raw, dict):
+            raise ValueError("frozen_policy must be a mapping")
+        frozen_policy_source = FrozenPolicySource(
+            manifest=Path(str(frozen_raw["manifest"])),
+            schema=str(frozen_raw["schema"]),
+            variant=str(frozen_raw["variant"]),
+            training_size=int(frozen_raw["training_size"]),
+            optimizer_seed=int(frozen_raw["optimizer_seed"]),
+            experiment_fingerprint=str(frozen_raw["experiment_fingerprint"]),
+            pzr_source_sha256=str(frozen_raw["pzr_source_sha256"]),
+            model_matrix_sha256=str(frozen_raw["model_matrix_sha256"]),
+            source_dataset_sha256=tuple(sorted(
+                (str(name), str(value))
+                for name, value in frozen_raw["source_dataset_sha256"].items()
+            )),
+        )
     return PaperExperimentConfig(
         source=path.resolve(),
         schema=str(raw["schema"]),
@@ -375,6 +453,7 @@ def load_paper_experiment_config(path: Path) -> PaperExperimentConfig:
             str(raw["teacher_dataset"]["sha256"])
             if raw.get("teacher_dataset", {}).get("sha256") else None
         ),
+        frozen_policy_source=frozen_policy_source,
         train_seeds=tuple(int(value) for value in raw["training"]["train_seeds"]),
         validation_seeds=tuple(
             int(value) for value in raw["training"]["validation_seeds"]
