@@ -1,0 +1,59 @@
+schema: pzr.paper-evaluation-v4-pi-timing-config.v1
+experiment_id: paper-evaluation-v4-pi-timing-v1
+output_root: results/paper-evaluation-v4-pi-timing-v1
+combined_report_root: results/paper-evaluation-v4-final-report-v1
+
+parent:
+  config: experiments/paper_evaluation_v4.yaml
+  config_sha256: 2baa656c777cb250f03e3f947187f3ff56d0be1eae850709e19d35b6b75f9188
+  runner: tools/paper_evaluation_v4.py
+  runner_sha256: 3ab4fcb252f84b1f294e2601a42e814e48cfe7c5b46d36c3d7e1e698b8996cf2
+  output_root: results/paper-evaluation-v4
+  pzr_source_sha256: 27ce18877eb911bf130e7d38982288bd89900238c6cf757c127385f9fb1ca23c
+  tool_dependencies:
+    tools/prp_tail_vote_guard_exploratory.py: 5b6e6daf25defd2dabe2ad46d456ce7aed28b20ac54d9115cc14644e854ba8b4
+    tools/prp_tail_policy_exploratory.py: d84032f63cf810842c1941d34331c464c17ada66722bf5a5be00a324bca9f021
+    tools/prp_v4_exploratory.py: ed006440faafb0de2d60a3232c81f1505654bab39c22abf60e6cc250e90ec9ea
+
+timing:
+  seeds: [348, 349, 350, 351, 352]
+  budgets: [40, 80, 120, 150, 200, 250, 500]
+  methods:
+    - girard
+    - scott
+    - pca
+    - combastel
+    - mpc_terminal_beam
+    - mpc_terminal_full_width
+    - mpc_terminal_beam_predictive_linear
+    - pairwise_ranking_policy
+    - dagger05_vote3
+    - dagger05_vote3_guarded
+  warmup_start: 0
+  warmup_stop: 100
+  measured_start: 100
+  measured_stop: 300
+  workers: 1
+  native_threads: 1
+  cpu_core: 2
+  profile_seed: 348
+  profile_budget: 150
+  on_time_targets: [0.95, 0.99, 1.0]
+
+native:
+  binding_revision: 01c92a2bfac58755e3b832bb0094816f3f36e1d1
+  interpreter_revision: 2724b05ae6c62ed0df14f1401ed8db89472725a6
+  binding_build_profile: release
+  specification_sha256: aab5b768d872bc4f5b6dc11b96805c2d451cc5c91eb573225f6b0e246cee6acc
+
+environment:
+  miniforge_version: 26.3.2-2
+  miniforge_aarch64_sha256: 535144deb6908e2a8ef8c60306a9a6c4fdbbe85034f056a98776ec3dcb9e9c14
+  python: 3.11.15
+  numpy: 2.4.6
+  pandas: 3.0.3
+  pyyaml: 6.0.3
+  torch: 2.12.1+cpu
+  maturin: 1.14.1
+  pytest: 9.1.1
+  rust: 1.96.0

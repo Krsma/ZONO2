@@ -1,0 +1,136 @@
+{
+  "completed_nominal_cells": 1380,
+  "false_negative_count": 0,
+  "figure1": {
+    "deployment_timing_included": false,
+    "panel_a": "median event-mean approximation loss over 20 seeds",
+    "panel_b": "macro FPR with paired-seed percentile-bootstrap 95% CI"
+  },
+  "guard_decisions_combined_sha256": "0256eb6c4b972f1205de288d09c193d060f4fae51c4b24317b4261ef3e5e1779",
+  "guard_flow": {
+    "decisions": 69120,
+    "flow": {
+      "combastel->combastel": 281,
+      "combastel->girard": 156,
+      "combastel->scott": 188,
+      "girard->combastel": 527,
+      "girard->girard": 742,
+      "girard->scott": 572,
+      "scott->combastel": 81,
+      "scott->girard": 268,
+      "scott->pca": 41,
+      "scott->scott": 1279
+    },
+    "incoming": {
+      "combastel": 889,
+      "girard": 1166,
+      "pca": 41,
+      "scott": 2039
+    },
+    "invoked": 4135,
+    "ms_amortised_per_decision": 1.3966164727310957,
+    "ms_per_activation": 23.345618039945183,
+    "outgoing": {
+      "combastel": 625,
+      "girard": 1841,
+      "pca": 0,
+      "scott": 1669
+    },
+    "overrides": 1833,
+    "unanimous": 64985
+  },
+  "learned_comparison": {
+    "dagger05_vote3": {
+      "macro_fpr": 0.03710584572399497,
+      "median_loss": 3.7074520578332133e-07,
+      "p50": 1.3900339305957958,
+      "p90": 60908.591335170815,
+      "p95": 88260991.85608386,
+      "severe": 19
+    },
+    "dagger05_vote3_guarded": {
+      "macro_fpr": 0.032657591230530386,
+      "median_loss": 2.5467271444218e-07,
+      "p50": 1.1892135926187792,
+      "p90": 2741.644282748842,
+      "p95": 64068245.011078715,
+      "severe": 14
+    },
+    "mpc_terminal_beam_predictive_linear": {
+      "macro_fpr": 0.01781498365395871,
+      "median_loss": 1.7861074297425727e-07,
+      "p50": 1.0,
+      "p90": 1.0,
+      "p95": 1.0,
+      "severe": 0
+    },
+    "pairwise_ranking_policy": {
+      "macro_fpr": 0.0452069480667938,
+      "median_loss": 2.143015500775895e-07,
+      "p50": 1.2808858918921775,
+      "p90": 24881.503354546865,
+      "p95": 297752678.33749264,
+      "severe": 14
+    }
+  },
+  "nominal_cells": 1400,
+  "nominal_seeds": [
+    348,
+    349,
+    350,
+    351,
+    352,
+    353,
+    354,
+    355,
+    356,
+    357,
+    358,
+    359,
+    360,
+    361,
+    362,
+    363,
+    364,
+    365,
+    366,
+    367
+  ],
+  "predictor_ablation": {
+    "hold": {
+      "false_negatives": 0,
+      "macro_fpr": 0.01465622782513048,
+      "median_loss": 1.568187061883106e-07,
+      "paired_ratio": 0.9358286228073257
+    },
+    "linear": {
+      "false_negatives": 0,
+      "macro_fpr": 0.01465622782513048,
+      "median_loss": 1.687219357356156e-07,
+      "paired_ratio": 1.0
+    },
+    "quadratic": {
+      "false_negatives": 0,
+      "macro_fpr": 0.01465622782513048,
+      "median_loss": 1.6554609070998013e-07,
+      "paired_ratio": 0.8930100476860952
+    }
+  },
+  "reducer_decision_totals": {
+    "dagger05_vote3": 69120,
+    "dagger05_vote3_guarded": 69120,
+    "mpc_terminal_beam": 69100,
+    "mpc_terminal_beam_predictive_linear": 69100,
+    "mpc_terminal_full_width": 69100,
+    "pairwise_ranking_policy": 69120
+  },
+  "runtime_status": "pending Raspberry Pi timing artifact",
+  "schema": "pzr.paper-table-generation.v4",
+  "source_sha256": {
+    "results/paper-evaluation-v4/nominal/manifest.json": "475f7dd07a0fa1b6df5545e2395d1326edae5a5a07c3c34fd4cb386cdda55c75",
+    "results/paper-evaluation-v4/nominal/summary.csv": "a8d6804d4d84c1ae0cf2139586bc972128c8c46eb03c4b3b9741e37074ee7844",
+    "results/paper-evaluation-v4/prediction-ablation/manifest.json": "736d4f80076629658c9474e55660c42390a367cd9c7d8662d7f851c2585e1b26",
+    "results/paper-evaluation-v4/prediction-ablation/summary.csv": "16ace4829c8775100cf2e870c567ce873971cb1a7edcb70782ba1a906a71caa3"
+  },
+  "unavailable_nominal_cells": 20
+}

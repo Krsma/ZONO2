@@ -37,21 +37,23 @@ used at inference time.
 
 ## Primary Data and Evaluation
 
-The primary trace store contains 26 independent 500-event nominal
-random-waypoint trajectories:
+The current paper policy uses 148 independent 500-event nominal
+random-waypoint training trajectories and six validation trajectories:
 
 | Dataset | Train | Validation | Collection |
 |---|---:|---:|---|
-| Primary clean | 0--19 | 20--25 | teacher |
+| Clean148 | 0--19, 26--41, 200--311 | 20--25 | teacher |
 
-Validation trajectories never contribute gradients. The wrapper trains seven
-`pairwise_ranking_policy` specialists from this one dataset. Specialist `b`
+Validation trajectories never contribute gradients. The frozen data is stored
+across four source-aware teacher artifacts from the scaling sequence. The v3
+wrapper verifies and imports the seven optimizer-seed-42
+`pairwise_ranking_policy` specialists selected before the paper run. Specialist `b`
 receives only recorded budget-`b` samples and is dispatched only at evaluation
 budget `b`. Epochs, batch size, optimizer settings, patience, and seed are fixed
 across budgets. Joint-budget and cross-budget policies are follow-up work.
 
-Exact references are prepared once per trace. Teacher collection uses ten
-spawned workers; pilot, headline, objective comparison, and generalization use
+Exact references are prepared once per trace. Pilot, headline, objective
+comparison, and generalization use
 ten spawned workers with `max_tasks_per_child=1`. Ablation and timing are
 sequential so their reported throughput is not contaminated by experiment-worker
 contention. Every worker owns its binding monitor, while BLAS, OpenMP, MKL, and
@@ -127,6 +129,35 @@ We screen four models:
 
 The old promotion thresholds and model definitions remain here only as
 scientific history; they do not authorize claims or a new run.
+
+## Versioned DART Rescue Study
+
+We revisit DART through the separate `dart-rescue-v1` experiment. The study
+removes the earlier data-scale confound: For each exact budget, Clean36 and
+DART36 augment the same Clean20 teacher data with sixteen trajectories based on
+the same nominal paths. Clean36 executes the teacher, whereas DART36 injects
+the frozen budget specialist's guarded categorical disturbances. We retain the
+original pairwise objective and fixed training hyperparameters.
+
+We fit one DART calibration per budget from validation seeds 20--25. The
+calibration therefore never applies a specialist outside its training budget.
+Additional training uses seeds 26--41. The primary DART contrast is DART36
+against Clean36; Clean36 against Clean20 measures the effect of additional
+clean data, and DART36 against Clean20 measures the total rescue.
+
+The evaluation separates three scopes. Seeds 100--119 replay the observed
+nominal failures and are retrospective diagnostics. Seeds 120--139 form an
+untouched nominal confirmation set. The four fixed figure-eight variants remain
+controlled patterned case studies and do not support a randomized-fault
+generalization claim. The complete report contains 420 replay cells, 420
+confirmation cells, and 84 fixed-case cells. Verified Clean20 replay and
+fixed-case cells are imported by hash, leaving 756 new executions.
+
+The study has no automatic promotion threshold. Instead, it reports
+seed-paired FPR differences, multiplicative loss effects, complete tail
+summaries, fallback accounting, and reducer composition. We use deterministic
+paired bootstrap intervals only for the two nominal seed banks; we do not treat
+the four fixed conditions as population replicates.
 
 ## Artifacts
 

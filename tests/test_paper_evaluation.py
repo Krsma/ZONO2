@@ -8,7 +8,7 @@ import pandas as pd
 import pytest
 
 from pzr.learning.dataset import ReducerCostDataset
-from pzr.learning.provenance import pzr_source_sha256
+from pzr.learning.provenance import payload_sha256, pzr_source_sha256
 from pzr.learning.training import filter_training_budgets
 from pzr.rtlola.engine import RtlolaEvent
 from pzr.rtlola.paper_artifacts import (
@@ -23,6 +23,7 @@ from pzr.rtlola.paper_experiment import (
     PAPER_CELL_SCHEMA,
     PAPER_CONFIG_SCHEMA,
     ExecutionRegime,
+    FrozenPolicySource,
     RunState,
     TraceSource,
     aggregate_trace_metrics,
@@ -40,6 +41,7 @@ from pzr.rtlola.paper_pipeline import (
     RUN_EXIT_APPROVAL_REQUIRED,
     RUN_EXIT_PRIMARY_READINESS_FAILED,
     _execute_cell_job,
+    _frozen_policy_records,
     _fixed_figure8_traces,
     _generated_nominal_stage_traces,
     _junit_counts,
@@ -58,6 +60,9 @@ from pzr.rtlola.paper_pipeline import (
     run_paper_stage,
     run_scientific_paper_evaluation,
 )
+
+
+V2_CONFIG = Path("experiments/paper_evaluation_v2.yaml")
 
 
 def _summary_row(
@@ -123,9 +128,9 @@ def _projection_payload(config, *, approval_required: bool) -> dict[str, object]
 def test_checked_config_declares_stable_methods_regimes_and_cell_counts():
     config = load_paper_experiment_config(DEFAULT_CONFIG)
 
-    assert DEFAULT_CONFIG.name == "paper_evaluation_v2.yaml"
+    assert DEFAULT_CONFIG.name == "paper_evaluation_v3.yaml"
     assert config.schema == PAPER_CONFIG_SCHEMA == "pzr.paper-evaluation-config.v3"
-    assert config.experiment_id == "paper-evaluation-v2"
+    assert config.experiment_id == "paper-evaluation-v3"
     assert config.ablation_workers == 1
     assert config.evaluation_workers == 10
     assert config.generated_nominal_trace_kind == "random_waypoint"
@@ -151,9 +156,108 @@ def test_checked_config_declares_stable_methods_regimes_and_cell_counts():
     assert config.method_by_name["mpc_cumulative_beam"].objective.value == "cumulative"
     assert config.method_by_name["pairwise_ranking_policy"].horizon == 0
     assert config.pilot_budgets == config.budgets
+    assert config.teacher_dataset_parent_sha256 is None
+    assert len(config.train_seeds) == 148
+    assert config.validation_seeds == tuple(range(20, 26))
+    assert config.frozen_policy_source is not None
+    assert config.frozen_policy_source.variant == "clean148"
+    assert config.frozen_policy_source.optimizer_seed == 42
+
+
+def test_clean20_v2_config_remains_loadable_as_historical_artifact_contract():
+    config = load_paper_experiment_config(V2_CONFIG)
+
+    assert config.experiment_id == "paper-evaluation-v2"
+    assert config.train_seeds == tuple(range(20))
+    assert config.frozen_policy_source is None
     assert config.teacher_dataset_parent_sha256 == (
         "885c3dfbf70ddf614db72f564877e667e056a59966e62094d365606e0b503602"
     )
+
+
+def test_frozen_clean_specialists_validate_seed_optimizer_and_matrix_provenance(
+    tmp_path, monkeypatch,
+):
+    model = tmp_path / "model"
+    model.mkdir()
+    record = {
+        "variant": "clean2",
+        "training_size": 2,
+        "training_seeds": [1, 2],
+        "optimizer_seed": 42,
+        "budget": 40,
+        "path": str(model),
+        "sha256": "model-hash",
+        "subset_sha256": "subset-hash",
+    }
+    models = {"clean2:40": record}
+    matrix_hash = payload_sha256(models)
+    source = FrozenPolicySource(
+        manifest=tmp_path / "freeze.json",
+        schema="freeze.v1",
+        variant="clean2",
+        training_size=2,
+        optimizer_seed=42,
+        experiment_fingerprint="experiment-hash",
+        pzr_source_sha256="source-hash",
+        model_matrix_sha256=matrix_hash,
+        source_dataset_sha256=(("teacher", "teacher-hash"),),
+    )
+    config = replace(
+        load_paper_experiment_config(DEFAULT_CONFIG),
+        budgets=(40,),
+        train_seeds=(1, 2),
+        validation_seeds=(3,),
+        frozen_policy_source=source,
+        enforce_canonical_scope=False,
+    )
+    identity = {
+        "experiment_fingerprint": source.experiment_fingerprint,
+        "variant": source.variant,
+        "training_size": source.training_size,
+        "training_seeds": list(config.train_seeds),
+        "optimizer_seed": source.optimizer_seed,
+        "budget": 40,
+        "training": {
+            "epochs": config.training_epochs,
+            "batch_size": config.training_batch_size,
+            "learning_rate": config.training_learning_rate,
+            "weight_decay": config.training_weight_decay,
+            "patience": config.training_patience,
+        },
+        "source_hashes": {"teacher": "teacher-hash"},
+    }
+    (model / "exploratory_training.json").write_text(json.dumps({
+        "identity": identity,
+        "model_sha256": "model-hash",
+        "record": record,
+    }))
+    runtime = _runtime_provenance()
+    source.manifest.write_text(json.dumps({
+        "freeze_schema": source.schema,
+        "experiment_fingerprint": source.experiment_fingerprint,
+        "pzr_source_sha256": source.pzr_source_sha256,
+        "model_matrix_sha256": matrix_hash,
+        "binding_revision": runtime["binding_revision"],
+        "interpreter_revision": runtime["interpreter_revision"],
+        "binding_build_profile": runtime["binding_build_profile"],
+        "models": models,
+    }))
+    monkeypatch.setattr(
+        "pzr.rtlola.paper_pipeline.model_sha256", lambda _path: "model-hash",
+    )
+
+    records, _ = _frozen_policy_records(config)
+    assert records[40]["source_hashes"] == {"teacher": "teacher-hash"}
+
+    identity["training_seeds"] = [1, 9]
+    (model / "exploratory_training.json").write_text(json.dumps({
+        "identity": identity,
+        "model_sha256": "model-hash",
+        "record": record,
+    }))
+    with pytest.raises(ValueError, match="training training_seeds differs"):
+        _frozen_policy_records(config)
 
 
 def test_checked_config_seed_groups_are_pairwise_disjoint():
@@ -216,7 +320,7 @@ def test_generated_evaluation_store_is_nominal_only_and_stage_owned(
 
 def test_prepare_generates_only_nominal_teacher_traces(tmp_path, monkeypatch):
     config = replace(
-        load_paper_experiment_config(DEFAULT_CONFIG),
+        load_paper_experiment_config(V2_CONFIG),
         output_root=tmp_path,
         teacher_dataset_parent=None,
         teacher_dataset_parent_sha256=None,
@@ -346,7 +450,7 @@ def test_paper_training_builds_one_fixed_hyperparameter_model_per_budget(
     tmp_path, monkeypatch,
 ):
     config = replace(
-        load_paper_experiment_config(DEFAULT_CONFIG),
+        load_paper_experiment_config(V2_CONFIG),
         output_root=tmp_path,
         budgets=(40, 80),
         enforce_canonical_scope=False,

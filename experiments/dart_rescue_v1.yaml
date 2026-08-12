@@ -1,0 +1,52 @@
+schema: pzr.dart-rescue-config.v1
+experiment_id: dart-rescue-v1
+output_root: results/dart-rescue-v1
+
+base_paper:
+  config: experiments/paper_evaluation_v2.yaml
+  output_root: results/paper-evaluation-v2
+  config_sha256: a7a911f641b0227aa3a6657231afef97aedbd8428ab25f2caf9d9d6dd486f074
+  pzr_source_sha256: f230d481022de2c69c610c917deae901e7a87e4322c979c248f2cf8f4fa1e5ca
+  teacher_dataset: results/paper-evaluation-v2/prepare/teacher/dataset
+  teacher_dataset_sha256: 885c3dfbf70ddf614db72f564877e667e056a59966e62094d365606e0b503602
+
+event_count: 500
+budgets: [40, 80, 120, 150, 200, 250, 500]
+candidate_names: [girard, scott, pca, combastel]
+
+seeds:
+  clean_train: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17, 18, 19]
+  clean_validation: [20, 21, 22, 23, 24, 25]
+  extra_training: [26, 27, 28, 29, 30, 31, 32, 33, 34, 35, 36, 37, 38, 39, 40, 41]
+  retrospective_replay: [100, 101, 102, 103, 104, 105, 106, 107, 108, 109, 110, 111, 112, 113, 114, 115, 116, 117, 118, 119]
+  untouched_confirmation: [120, 121, 122, 123, 124, 125, 126, 127, 128, 129, 130, 131, 132, 133, 134, 135, 136, 137, 138, 139]
+
+fixed_figure8:
+  - figure8
+  - figure8_drift
+  - figure8_geofence
+  - figure8_drift_geofence
+
+workers:
+  collection: 10
+  evaluation: 10
+
+training:
+  epochs: 100
+  batch_size: 256
+  learning_rate: 0.001
+  weight_decay: 0.0001
+  patience: 10
+  seed: 42
+
+dart:
+  regret_cap_quantile: 0.9
+  direction_pseudocount: 1.0
+  recovery_decisions: 1
+  disturbance_seed: 20260717
+
+reporting:
+  bootstrap_replicates: 10000
+  bootstrap_seed: 20260721
+  instability_budgets: [40, 80, 120, 500]
+

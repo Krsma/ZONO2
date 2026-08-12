@@ -1,0 +1,81 @@
+{
+  "figures": {
+    "accuracy_cost_tradeoff": {
+      "composition": "existing Pareto plus FPR panels",
+      "deployment_timing_status": "pending Raspberry Pi replacement",
+      "methods": [
+        "girard",
+        "scott",
+        "pca",
+        "combastel",
+        "mpc_terminal_beam",
+        "mpc_terminal_full_width",
+        "mpc_terminal_beam_predictive_linear",
+        "pairwise_ranking_policy",
+        "dagger05_vote3",
+        "dagger05_vote3_guarded"
+      ]
+    },
+    "guard_flow": {
+      "decisions": 69120,
+      "flow": {
+        "combastel->combastel": 281,
+        "combastel->girard": 156,
+        "combastel->scott": 188,
+        "girard->combastel": 527,
+        "girard->girard": 742,
+        "girard->scott": 572,
+        "scott->combastel": 81,
+        "scott->girard": 268,
+        "scott->pca": 41,
+        "scott->scott": 1279
+      },
+      "incoming": {
+        "combastel": 889,
+        "girard": 1166,
+        "pca": 41,
+        "scott": 2039
+      },
+      "invoked": 4135,
+      "ms_amortised_per_decision": 1.3966164727310957,
+      "ms_per_activation": 23.345618039945183,
+      "outgoing": {
+        "combastel": 625,
+        "girard": 1841,
+        "pca": 0,
+        "scott": 1669
+      },
+      "overrides": 1833,
+      "unanimous": 64985
+    }
+  },
+  "guard_decisions_combined_sha256": "0256eb6c4b972f1205de288d09c193d060f4fae51c4b24317b4261ef3e5e1779",
+  "nominal_cells": 1400,
+  "nominal_seeds": [
+    348,
+    349,
+    350,
+    351,
+    352,
+    353,
+    354,
+    355,
+    356,
+    357,
+    358,
+    359,
+    360,
+    361,
+    362,
+    363,
+    364,
+    365,
+    366,
+    367
+  ],
+  "schema": "pzr.paper-figure-generation.v4",
+  "source_sha256": {
+    "results/paper-evaluation-v4/nominal/manifest.json": "475f7dd07a0fa1b6df5545e2395d1326edae5a5a07c3c34fd4cb386cdda55c75",
+    "results/paper-evaluation-v4/nominal/summary.csv": "a8d6804d4d84c1ae0cf2139586bc972128c8c46eb03c4b3b9741e37074ee7844"
+  }
+}

@@ -110,16 +110,40 @@ workers. Dedicated timing is deferred from the main `evaluate` command. Full
 RLolaEval notebook parity remains available through
 `pzr-rtlola-parity` but is never invoked or required by paper stages.
 `tools/run_paper_evaluation.sh explore` is the preliminary entrypoint: it runs
-only release preflight, verified teacher reuse, seven specialist trainings,
-and the formal pilot. It does not run paper-scale matrices or the historical
+only release preflight, verified Clean148 specialist import, and the formal
+pilot. It does not run paper-scale matrices or the historical
 bounded-exploration study.
+
+The v4 finalization is a standalone orchestration layer defined by
+`experiments/paper_evaluation_v4.yaml` and
+`tools/run_paper_evaluation_v4.sh`; it must not modify `src/pzr` or any existing
+result directory. It uses nominal seeds 348--367 for all ten methods and writes
+only below `results/paper-evaluation-v4`. Its default `run` command ends after
+`prediction-ablation` and must never start workstation timing. The explicit
+`runtime`, `report`, and `validate` commands remain diagnostic-only because
+they retain their workstation-timing dependency.
+
+The independently versioned Pi add-on is
+`experiments/paper_evaluation_v4_pi_timing_v1.yaml`, with wrapper
+`tools/run_paper_evaluation_v4_pi_timing_v1.sh`. It consumes a frozen,
+hash-verified v4 parent and writes only to
+`results/paper-evaluation-v4-pi-timing-v1` and
+`results/paper-evaluation-v4-final-report-v1`. Workstation v4 timing is a
+separately labelled diagnostic once the Pi is the paper-facing runtime source;
+never pool the two timing distributions or copy Pi measurements into the v4
+parent.
 
 ## Current Robot-Arm Results
 
-There is currently no active canonical paper artifact. New results belong under
-`results/paper-evaluation-v2` and must validate through the versioned pipeline.
-Earlier robot-arm, four-budget learning, MPC-tail, and bounded-exploration
-outputs are historical and must not be quoted as the current evaluation.
+The current completed canonical paper artifact is
+`results/paper-evaluation-v3`; `results/paper-evaluation-v4` becomes the
+scientific parent only after its required matrices validate. The completed
+Clean20 artifact at `results/paper-evaluation-v2` remains a preserved, loadable
+historical contract and must never be reinterpreted as v3 or v4. Earlier
+robot-arm, four-budget learning, MPC-tail, and bounded-exploration outputs are
+historical and must not be quoted as the current evaluation. The separate DART
+rescue study belongs under `results/dart-rescue-v1` and cannot silently replace
+the canonical paper artifact.
 
 ## Coding and Testing
 
@@ -161,18 +185,20 @@ generator mass. It is strictly pre-event and does not use stream values,
 history, spectral statistics, or an inference-time preview rollout.
 
 Pairwise Ranking Policy is the primary paper-facing learned method. The
-versioned experiment in `experiments/paper_evaluation_v2.yaml` reuses the verified
-26 independent 500-event nominal random-waypoint traces and collects one
-terminal full-width teacher dataset at budgets `40,80,120,150,200,250,500`.
-Clean teacher train/validation seeds are 0--19/20--25. It trains one
-fixed-hyperparameter specialist per budget from only that budget's rows and
-dispatches each specialist only at its matching evaluation budget. Joint- and
-cross-budget learned policies are deferred follow-up work.
+versioned experiment in `experiments/paper_evaluation_v3.yaml` uses the frozen
+optimizer-seed-42 Clean148 matrix selected by the completed scaling study.
+Training trajectories are nominal random waypoints at seeds 0--19, 26--41, and
+200--311; validation remains exclusively seeds 20--25. Every trace has 500
+events and terminal full-width teacher rows at budgets
+`40,80,120,150,200,250,500`. One fixed-hyperparameter specialist is trained
+from only its matching budget rows and dispatched only at that budget. The
+paper pipeline verifies and copies the seven frozen models by hash rather than
+retraining or recollecting them. Joint- and cross-budget learned policies are
+deferred follow-up work.
 
-The Phase 1 cleanup reset all prior learning result directories. There is no
-active primary, secondary, exploratory, or paper-evaluation result artifact.
-New claims require the versioned 224-cell fixed figure-8 headline and 1,120-cell
-nominal held-out manifests, with every failed point explicitly unavailable.
+The canonical paper result requires the versioned 224-cell fixed figure-8
+headline and 1,120-cell nominal held-out manifests, with every failed point
+explicitly unavailable.
 
 Soft-KL and guarded DART remain completed secondary ablations and are not part
 of the default wrapper. Their historical result artifact was removed during the
@@ -184,19 +210,29 @@ targets the global per-budget novice-error rate, restricts alternatives to the
 Q90 normalized-regret radius, and forces one teacher recovery decision after
 every disturbance.
 
-The former Clean20/Clean36/DART36/expected-regret promotion workflow is not a
-current experiment entry point. Seeds 26--41 remain reserved so a future,
-explicitly versioned learning study cannot contaminate the paper splits.
+The former Clean20/Clean36/DART36/expected-regret promotion workflow remains
+historical. The new `dart-rescue-v1` study is narrower: it compares exact-budget
+Clean20, Clean36, and guarded-DART36 specialists without expected-regret or an
+automatic promotion gate. It uses seeds 26--41 for paired additional clean and
+DART training trajectories, replays seeds 100--119 retrospectively, and
+reserves untouched seeds 120--139 for confirmation.
+
+The canonical DART wrapper is `tools/run_dart_rescue.sh`. It validates the
+existing teacher dataset and Clean20 models, fits seven budget-specific DART
+calibrations, collects paired Clean36/DART36 data, trains fourteen new
+specialists, evaluates 924 reported cells, and writes failure-aware tables and
+figures. Its orchestration stays outside `src/pzr` so it does not invalidate the
+completed paper cells merely by adding follow-up reporting logic.
 
 The four fixed figure-8 headline traces always retain their full authoritative
 lengths and pinned RLolaEval hashes. They are controlled patterned case studies,
 not multi-seed fault-population estimates. Held-out generalization uses generated
 nominal random-waypoint seeds 100--119 at 500 events; pilot seeds 90--91 and
 ablation seeds 60--64 are nominal-only. No randomized drift/geofence
-generalization claim is made. Reserved exploration/model-selection seeds remain
-26--41.
-Teacher shards use ten spawned workers. Headline, pilot, objective comparison,
-and generalization use ten spawned workers with `max_tasks_per_child=1`; each
+generalization claim is made. Reserved exploration/model-selection seeds are
+312--327 for the v3 contract. Historical studies retain their recorded seed
+roles. Headline, pilot, objective comparison, and generalization use ten spawned
+workers with `max_tasks_per_child=1`; each
 worker owns its monitor and planner. Ablation and timing are sequential. BLAS,
 OpenMP, MKL, and NumExpr remain limited to one thread per worker.
 

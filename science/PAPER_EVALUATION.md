@@ -1,7 +1,58 @@
 # Paper Evaluation
 
+## V4 finalization contract
+
+The authoritative finalization contract is
+`experiments/paper_evaluation_v4.yaml`. It preserves the v3 result directory,
+uses nominal seeds 348--367 as one paired cohort for all ten methods, and writes
+new scientific results only below `results/paper-evaluation-v4`. The stages are
+`preflight`, `prepare`, `pilot`, `nominal`, `prediction-ablation`, `runtime`,
+`report`, and `validate`. The 1,400-cell nominal matrix and 15-cell predictor
+ablation remain workstation experiments; unchanged v3 fixed-trace, objective,
+and H/W artifacts are imported by verified hash.
+
+We collect the paper-facing deployment timing independently on a Raspberry Pi
+5 through `experiments/paper_evaluation_v4_pi_timing_v1.yaml`. This changes the
+finalization workflow, but not the v4 scientific contract: The add-on consumes
+a frozen, hash-verified v4 snapshot and writes only to its own timing and
+combined-report roots. Consequently, the v4 nominal quality, availability,
+FPR/FNR, approximation-loss, tail, reducer-composition, guard-flow, generator,
+and predictor claims remain workstation-derived. Latency, empirical rate
+capacity, model footprint, process-memory, and phase-profile claims are
+Pi-derived and carry separate machine and artifact provenance.
+
+For the canonical Pi-timed artifact, the default v4 `run` command executes the
+scientific stages only and stops after `prediction-ablation`:
+
+```bash
+tools/run_paper_evaluation_v4.sh run
+```
+
+The v4 `runtime` stage remains a valid workstation diagnostic. However, its
+measurements are not the primary paper runtime once the Pi experiment is
+adopted, and the original v4 `report` and `validate` stages still depend on that
+local runtime. They execute only when requested by their exact stage names and
+are never reached by `run`. Final acceptance is therefore split across three
+immutable artifacts: the v4 scientific parent, the validated Pi timing result,
+and `results/paper-evaluation-v4-final-report-v1`, which pairs the two by seed,
+bound, and method. We do not copy Pi measurements into
+`results/paper-evaluation-v4` or relabel a workstation v4 report as Pi-timed.
+
+The primary Pi measure retains the existing benchmark semantics: reducer
+selection plus the live binding-native commit over events 100--299, after
+events 0--99 warm the process. Predictor computation is reported separately in
+the phase profile and is not included in the primary measure. Exact-reference
+metrics, prediction-diagnostic construction, and artifact I/O remain excluded.
+All ten methods, seven bounds, and five seeds produce 350 method--seed--bound
+cells in one sequential pass with rotated method order and one native thread.
+
+See `RASPBERRY_PI_TIMING_V1.md` for the transfer, setup, execution, import, and
+combined-report procedure.
+
+## Preserved v3 contract
+
 The authoritative experiment contract is
-`experiments/paper_evaluation_v2.yaml`. The `pzr-paper` CLI runs independent,
+`experiments/paper_evaluation_v3.yaml`. The `pzr-paper` CLI runs independent,
 resumable stages: `prepare`, `train`, `pilot`, `objective-comparison`,
 `headline`, `generalization`, `ablation`, `science-report`, `science-validate`,
 `timing`, `report`, and `validate`.
@@ -22,7 +73,7 @@ stage or manifest dependency. The ordinary unfiltered release test command
 continues to include parity-marked tests.
 
 For a preliminary run, `tools/run_paper_evaluation.sh explore` executes only
-release preflight, verified teacher reuse, seven budget-specialist trainings,
+release preflight, verified import of seven frozen Clean148 specialists,
 and the formal 112-cell nominal pilot. It explicitly excludes every paper-scale matrix,
 including the unrelated historical bounded-exploration study. These stages are
 source-aware and are reused by a later complete `run`.
@@ -45,8 +96,12 @@ selection or teaching reference.
 
 ## Scope and stopping rule
 
-Training and validation use nominal 500-event random-waypoint traces with seeds
-0--19 and 20--25. The 112-cell pilot uses nominal seeds 90--91, all seven
+Clean148 training uses nominal 500-event random-waypoint traces with seeds
+0--19, 26--41, and 200--311; validation uses only seeds 20--25. The selected
+optimizer seed is 42. The v3 pipeline verifies the frozen seven-model matrix,
+its seed lists, subset provenance, and model hashes before copying it into the
+paper namespace; it does not retrain during the overnight run. The 112-cell
+pilot uses nominal seeds 90--91, all seven
 budgets, and eight methods. It records CPU, ten-worker wall, disk, and
 per-method projections. A projection above 72 wall hours pauses only the
 1,120-cell nominal held-out stage until `--approve-long-run` is supplied; fixed
@@ -91,17 +146,18 @@ redundant color/marker/line encodings, and do not connect across unavailable
 points. Loss uses a log scale only when every displayed completed value is
 positive.
 
-Raw artifacts remain ignored under `results/paper-evaluation-v2`. The
+Raw artifacts remain ignored under `results/paper-evaluation-v3`. The
 timing-free science report writes compact CSV sources, TeX tables, PDF/PNG
-figures, and a hash manifest under `results/paper-evaluation-v2/science-report`.
+figures, and a hash manifest under `results/paper-evaluation-v3/science-report`.
 The later final report writes to
-`paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v2`.
+`paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v3`.
 The compact sources include the pilot projection, terminal-versus-cumulative
 objective comparison, specialist model hashes, fallback diagnostics, separately
 labelled nominal and fixed-figure-eight reducer composition, ablation heatmaps,
 and contention-free timing.
 
 The configuration, cell, stage, run, and report contracts are schema v3.
-Artifacts from v1, including the all-budget/budget-80 policy experiment, are
-historical and cannot be resumed or reinterpreted as v2 results. Only the
-teacher dataset is reused, after its exact hash and scientific contract pass.
+Artifacts from v1 and the Clean20 v2 paper run remain historical and cannot be
+resumed or reinterpreted as v3 results. V3 imports only the prespecified
+Clean148 optimizer-seed-42 model matrix after its freeze manifest, scientific
+contract, seed lists, source-dataset hashes, and model hashes pass.

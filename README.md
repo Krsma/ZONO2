@@ -69,15 +69,17 @@ pzr-learning train --dataset clean=/tmp/pzr-learning/clean/dataset \
   --output /tmp/pzr-learning/model-pairwise-ranking-policy --objective pairwise --epochs 2
 ```
 
-The current paper evaluation is defined by `experiments/paper_evaluation_v2.yaml`.
-Run or resume only the release-checked teacher/training/formal-pilot bundle with:
+The current paper evaluation is defined by `experiments/paper_evaluation_v3.yaml`.
+It pins the selected optimizer-seed-42 Clean148 specialists while preserving
+the completed Clean20 v2 artifact under its original namespace. Run or resume
+only the release-checked model-import/formal-pilot bundle with:
 
 ```bash
 tools/run_paper_evaluation.sh explore
 ```
 
-`explore` includes preflight, verified reuse of the nominal teacher dataset,
-seven fixed-hyperparameter budget-specialist trainings, and the 112-cell
+`explore` includes preflight, hash-verified import of seven exact-budget
+Clean148 specialists, and the 112-cell
 nominal pilot (two seeds, seven budgets, eight methods). It
 does not run objective comparison, headline, held-out generalization, ablation,
 timing, reporting, validation, or the historical bounded-exploration study. Its
@@ -91,7 +93,7 @@ tools/run_paper_evaluation.sh evaluate
 ```
 
 The command runs the release/binding preflight excluding explicitly marked
-RLolaEval parity tests, teacher reuse, specialist training, pilot, headline,
+RLolaEval parity tests, frozen-specialist verification/import, pilot, headline,
 matched objective comparison, held-out generalization, H/W ablation, interim
 reporting, and integrity validation. Dedicated contention-free timing is
 deferred; run `tools/run_paper_evaluation.sh timing` and then `run` when it is
@@ -121,10 +123,10 @@ tools/run_paper_evaluation.sh evaluate --approve-long-run
 Supplying approval before the pilot exists is rejected. Valid completed stages
 are skipped, partial cell matrices resume, and stale manifests require a fresh
 output directory. Raw cells and stage logs remain under
-`results/paper-evaluation-v2`; compact interim source tables, TeX tables, PDF/PNG
+`results/paper-evaluation-v3`; compact interim source tables, TeX tables, PDF/PNG
 figures, and their hashes are written under
-`results/paper-evaluation-v2/science-report/artifacts`. Final timing-inclusive
-artifacts use `paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v2`.
+`results/paper-evaluation-v3/science-report/artifacts`. Final timing-inclusive
+artifacts use `paper/corl2026/Zonotopes_at_CoRL/generated/paper_evaluation_v3`.
 
 Learning, pilot, held-out generalization, and H/W ablation use independently
 generated nominal random-waypoint traces only. The four full-length imported
@@ -152,11 +154,13 @@ bundle validated with explicitly unavailable scientific or timing points, `75`
 means pilot approval is required, and `1` indicates an execution or integrity
 failure.
 
-`pairwise_ranking_policy` denotes a family of seven specialists. Specialist
-`b` is trained only from budget-`b` rows of the one verified terminal full-width
-teacher dataset and is evaluated only at budget `b`; all specialists share the
-same fixed training hyperparameters. Cross-budget and joint-budget learned
-policies are deferred follow-up work. Offline terminal beam uses recorded future inputs, while the linear
+`pairwise_ranking_policy` denotes the frozen Clean148 family of seven
+specialists. Its nominal training seeds are 0--19, 26--41, and 200--311, with
+validation fixed at 20--25. Specialist `b` is trained only from budget-`b`
+terminal full-width teacher rows and is evaluated only at budget `b`; all
+specialists share the same fixed hyperparameters and optimizer seed 42.
+Cross-budget and joint-budget learned policies are deferred follow-up work.
+Offline terminal beam uses recorded future inputs, while the linear
 predictive beam is causal and deployable. Exact caches are used only for
 offline metrics; selection and teaching retain native unreduced rollouts.
 
@@ -165,9 +169,51 @@ ablations. Their historical result artifact is no longer active. The observed
 DART improvement was marginal and is confounded by additional training data,
 so neither method appears in the default pipeline.
 
+The explicitly versioned DART rescue study removes that confound with paired
+Clean20, Clean36, and DART36 specialists at every exact budget. It replays
+nominal seeds 100--119 as a retrospective diagnostic, evaluates untouched
+nominal seeds 120--139 as a separate confirmation set, and reports the fixed
+figure-eight traces as controlled case studies. Run or resume it with:
+
+```bash
+tools/run_dart_rescue.sh run
+```
+
+The study reports 924 policy cells, of which 756 are new executions; verified
+Clean20 replay and fixed-case cells are imported with their source manifests.
+It writes only under `results/dart-rescue-v1` and does not alter the canonical
+paper pipeline or its source fingerprint. Use `--smoke` for a disposable
+one-budget workflow under `/tmp`.
+
 Predictive MPC sees the exact arrived current event and causal input history;
 PRP remains strictly pre-event. Forecasts use scheduled times at 0.1-second
 increments and never inspect recorded future inputs during action selection.
+
+## V4 Finalization and Raspberry Pi Timing
+
+Paper evaluation v4 is a standalone finalization pipeline under
+`results/paper-evaluation-v4`. It evaluates all ten methods on the paired fresh
+nominal cohort 348--367 and imports unchanged v3 fixed-trace, objective, and
+H/W artifacts only after their hashes pass. Run its scientific stages on the
+workstation with:
+
+```bash
+tools/run_paper_evaluation_v4.sh run
+```
+
+The paper-facing deployment timing is collected independently on a Raspberry
+Pi 5 with the append-only `paper-evaluation-v4-pi-timing-v1` add-on. The v4
+`run` command therefore stops after `prediction-ablation`; it never starts the
+workstation `runtime`, `report`, or `validate` stages. Those commands remain
+available only as explicit workstation diagnostics, and their latency values
+must not be mixed with or substituted for the Pi measurements.
+
+After the scientific matrices pass the add-on's bundle gate, follow
+`science/RASPBERRY_PI_TIMING_V1.md`. The Pi results are imported under
+`results/paper-evaluation-v4-pi-timing-v1`; a new combined report under
+`results/paper-evaluation-v4-final-report-v1` joins Pi timing identities to the
+matching v4 nominal cells. Neither operation edits or reinterprets the v4
+result directory.
 
 See `science/LEARNING_PIPELINE.md` for the feature contract, pairwise and
 expected-regret objectives, secondary DART calibration, seed schedules,
@@ -238,7 +284,7 @@ datasets, explicit PyTorch model directories, and generalization evaluation
 artifacts at the user-provided paths.
 The paper pipeline writes source-aware cells, diagnostic time series, stage
 summaries, a top-level run manifest, and per-stage logs below
-`results/paper-evaluation-v2`. Its report stage writes compact CSV and TeX
+`results/paper-evaluation-v3`. Its report stage writes compact CSV and TeX
 tables plus PDF/PNG figures and a complete hash manifest into the paper's
 generated-artifact directory.
 

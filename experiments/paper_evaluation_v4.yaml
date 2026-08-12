@@ -1,0 +1,72 @@
+schema: pzr.paper-evaluation-config.v4
+experiment_id: paper-evaluation-v4
+output_root: results/paper-evaluation-v4
+event_count: 500
+budgets: [40, 80, 120, 150, 200, 250, 500]
+workers: 10
+candidate_names: [girard, scott, pca, combastel]
+nominal_seeds: [348, 349, 350, 351, 352, 353, 354, 355, 356, 357, 358, 359, 360, 361, 362, 363, 364, 365, 366, 367]
+pilot_seeds: [348]
+prediction_ablation:
+  seeds: [60, 61, 62, 63, 64]
+  budget: 150
+  horizon: 4
+  beam_width: 4
+  predictors: [hold, linear, quadratic]
+timing:
+  seeds: [348, 349, 350, 351, 352]
+  warmup_start: 0
+  warmup_stop: 100
+  measured_start: 100
+  measured_stop: 300
+  workers: 1
+  native_threads: 1
+methods:
+  - {name: girard, label: Girard, kind: static, runtime_method: girard, horizon: 0, beam_width: 1}
+  - {name: scott, label: Scott, kind: static, runtime_method: scott, horizon: 0, beam_width: 1}
+  - {name: pca, label: PCA, kind: static, runtime_method: pca, horizon: 0, beam_width: 1}
+  - {name: combastel, label: Combastel, kind: static, runtime_method: combastel, horizon: 0, beam_width: 1}
+  - {name: mpc_terminal_beam, label: MPC-B, kind: mpc, runtime_method: mpc_terminal_beam, horizon: 4, beam_width: 4}
+  - {name: mpc_terminal_full_width, label: MPC-F, kind: mpc, runtime_method: mpc_terminal_full_width, horizon: 1, beam_width: 1}
+  - {name: mpc_terminal_beam_predictive_linear, label: MPC-L, kind: mpc, runtime_method: mpc_terminal_beam_predictive_linear, horizon: 4, beam_width: 4}
+  - {name: pairwise_ranking_policy, label: G15/Clean148, kind: g15, runtime_method: pairwise_ranking_policy, horizon: 0, beam_width: 1}
+  - {name: dagger05_vote3, label: Vote3, kind: vote3, runtime_method: dagger05_vote3, horizon: 0, beam_width: 1}
+  - {name: dagger05_vote3_guarded, label: Vote3-Guarded, kind: vote3_guarded, runtime_method: dagger05_vote3_guarded, horizon: 0, beam_width: 1}
+native:
+  binding_revision: 01c92a2bfac58755e3b832bb0094816f3f36e1d1
+  interpreter_revision: 2724b05ae6c62ed0df14f1401ed8db89472725a6
+  binding_build_profile: release
+  specification_sha256: aab5b768d872bc4f5b6dc11b96805c2d451cc5c91eb573225f6b0e246cee6acc
+  pzr_source_sha256: 27ce18877eb911bf130e7d38982288bd89900238c6cf757c127385f9fb1ca23c
+fixed_trace_sha256:
+  figure8: fa07293b1a30c409ede95162f359f087f8c2e77e0df07a333d0045978150f309
+  figure8_drift: 1a9def5a128a236f0e246f9d7403869ec676e62617a3cf4edf9c904e841362f7
+  figure8_geofence: f2d68199baadd956ccfa5b43688cbb973956d7367aa2dc986123f6bb25d28ede
+  figure8_drift_geofence: e055f7faeade23f9f30952f7c0871bf3803bb87a09c3a16ba3ef09f2bba9cd03
+imports:
+  v3_ablation:
+    manifest: results/paper-evaluation-v3/ablation/manifest.json
+    manifest_sha256: 1a315e0ae109c0958d0753a2b7f8fdc97e158cb1d9930feb947b2667041c9f7d
+    summary: results/paper-evaluation-v3/ablation/summary.csv
+    summary_sha256: 801c74aec5bdfdd129947f3c67d9d6d6d2c1a3ea4fc11982658b3da6f8f50568
+  v3_objective_comparison:
+    manifest: results/paper-evaluation-v3/objective-comparison/manifest.json
+    manifest_sha256: 8c4b66763e8f100aca9d1a26c526c101bea2fe07a543555448c9e17c4bcb2ecf
+    summary: results/paper-evaluation-v3/objective-comparison/summary.csv
+    summary_sha256: 430c123fd347e4437e6a325ec7bf9f44d37a390c4367a738fde7df6fde8d0deb
+  v3_fixed:
+    manifest: results/paper-evaluation-v3/headline/manifest.json
+    manifest_sha256: 9133a5f0996bb8418175aeca673b10ad6ee50a87024ef362c02dc63bc7c0d0de
+    summary: results/paper-evaluation-v3/headline/summary.csv
+    summary_sha256: 06482fccff46acb12507af252b773d51fc9d4e58421da72b3cab32f025914ae3
+  vote3_fixed:
+    manifest: results/prp-vote3-guarded-paper-sweep-v1/evaluate-fixed/manifest.json
+    manifest_sha256: 91dc7f374512871741e001c2983b17d39ffef40394b266b2bc5cab0a6239f111
+    summary: results/prp-vote3-guarded-paper-sweep-v1/evaluate-fixed/summary.csv
+    summary_sha256: 3f391f314a75c2097e6f22322a5fc24a5f76151ac5b20f92e8024da93ed1aeaf
+selection:
+  decision: results/prp-vote3-guarded-paper-sweep-v1/report/artifacts/decision.json
+  decision_sha256: 063d16c8296efc06485ad75bb1bb83f561d34aa16b7e97b2c3fdcece0afb5fbd
+  freeze: results/prp-vote3-guarded-paper-sweep-v1/prepare/freeze.json
+  freeze_sha256: 22ab9f3dce5373af49fbbd7141b8e39e9e4e7ce452e2f87311dbf0d6e18ee121
+  frozen_method_identity: dagger05_vote3_guarded

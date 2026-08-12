@@ -1,0 +1,55 @@
+# Restrained defaults for publication figures. Set figsize in plotting code.
+figure.dpi: 120
+savefig.dpi: 300
+savefig.bbox: tight
+savefig.pad_inches: 0.02
+savefig.transparent: False
+
+# Serif matched to the ieeeconf body text, which mathptmx sets in Times.
+# Liberation Serif, Nimbus Roman and TeX Gyre Termes are all metric-compatible
+# Times clones, and STIX is the Times-compatible math set, so figure text has the
+# same texture as the surrounding prose.  Liberation Serif is listed first
+# because it is TrueType and embeds without the OpenType/CFF type mismatch that
+# some PDF validators flag.
+font.family: serif
+font.serif: Liberation Serif, Nimbus Roman, TeX Gyre Termes, Times New Roman, Times, DejaVu Serif
+font.size: 8
+mathtext.fontset: stix
+axes.labelsize: 8
+axes.titlesize: 9
+axes.titleweight: regular
+axes.linewidth: 0.7
+axes.spines.top: False
+axes.spines.right: False
+axes.axisbelow: True
+
+xtick.labelsize: 7
+ytick.labelsize: 7
+xtick.direction: out
+ytick.direction: out
+xtick.major.size: 3
+ytick.major.size: 3
+xtick.major.width: 0.6
+ytick.major.width: 0.6
+xtick.minor.size: 1.8
+ytick.minor.size: 1.8
+
+grid.color: D9D9D9
+grid.linewidth: 0.45
+grid.alpha: 0.7
+
+lines.linewidth: 1.25
+lines.markersize: 4
+patch.linewidth: 0.6
+
+legend.fontsize: 7
+legend.frameon: False
+legend.borderaxespad: 0.4
+legend.handlelength: 1.8
+
+pdf.fonttype: 42
+ps.fonttype: 42
+svg.fonttype: none
+
+# Okabe-Ito palette, ordered for general categorical use.
+axes.prop_cycle: cycler('color', ['0072B2', 'D55E00', '009E73', 'CC79A7', 'E69F00', '56B4E9', '000000'])

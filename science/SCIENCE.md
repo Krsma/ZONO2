@@ -91,13 +91,31 @@ data. Consequently, the default pipeline does not train Soft-KL or DART models.
 Its historical artifact, together with every prior learning result directory,
 was removed by the Phase 1 schema reset and is not an active result.
 
+We address this confound in the separately versioned `dart-rescue-v1` study.
+For every exact budget, we compare the frozen Clean20 specialist with Clean36
+and DART36 specialists trained on the same sixteen additional nominal base
+paths. The DART calibration uses only clean validation states from the matching
+budget. Thus, DART36 versus Clean36 isolates disturbance-shaped data from the
+amount of additional data.
+
+The study has two nominal evaluation roles: Seeds 100--119 are a retrospective
+replay because their failures motivated the experiment, whereas seeds 120--139
+are untouched confirmation trajectories. We analyze the four fixed
+figure-eight conditions separately as controlled cases. A favorable replay is
+therefore not confirmatory evidence, and neither fixed nor nominal results
+support a randomized drift/geofence generalization claim.
+
 ## Evaluation Claims
 
-The primary completion criteria are the 224-cell full-length fixed figure-eight
-headline and the 1,120-cell nominal held-out generalization matrix. The latter
-covers twenty independently generated random-waypoint traces, seven transform
-bounds, and eight headline methods. The learned row uses the specialist trained
-at the same exact budget; joint- and cross-budget policies are deferred.
+The completed v3 contract comprises the 224-cell full-length fixed figure-eight
+headline and the 1,120-cell nominal held-out generalization matrix. The v4
+finalization replaces the fragmented primary nominal comparison with one
+1,400-cell matrix: twenty fresh random-waypoint seeds 348--367, seven transform
+bounds, and ten methods. It adds Vote3 and Vote3-Guarded to the seven fixed/MPC
+methods and the Clean148 policy without tuning or retraining on the v4 cohort.
+The exact-budget learned row remains backed by the prespecified Clean148
+optimizer-seed-42 specialists, and Vote3-Guarded retains its frozen selection
+decision.
 
 The four imported nominal, drift, geofence, and combined figure-eight traces
 form a controlled patterned case study. They are not a multi-seed estimate of
@@ -108,6 +126,14 @@ These matrices define experimental contracts, not results. We do not claim new
 findings before the source-aware manifests validate every required cell and mark
 failed points unavailable. The former bounded challenger workflow is historical
 and does not define a current claim.
+
+We measure primary deployment runtime independently on a Raspberry Pi 5 after
+the v4 scientific matrices are frozen. This introduces a second provenance
+root, not a second scientific evaluation: Quality and soundness remain derived
+from v4, while timing, empirical rate capacity, model footprint, and process
+memory are Pi measurements paired to the same method, seed, and bound
+identities. We join them only in the separately versioned combined report and
+never pool workstation and Pi latency samples.
 
 ## Scenarios
 
