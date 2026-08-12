@@ -65,6 +65,28 @@ environment can be used for both bundles by setting `PZR_PI_TIMING_PYTHON`.
 
 On Raspberry Pi OS Lite 64-bit, inside the extracted full bundle:
 
+The bundled convenience launcher keeps the environment and every run output
+outside the immutable bundles.  It is the recommended Pi-side sequence:
+
+```bash
+# In the extracted full bundle.  This installs the pinned environment and
+# requests the performance governor, then tells you to reboot.
+tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh setup "$PWD"
+
+# After reboot, first pass the path to the separately extracted smoke bundle.
+tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh smoke "$PWD" \
+  /absolute/path/to/extracted-smoke-bundle
+
+# With the Pi idle, runs preflight, semantic contracts, all timing cells,
+# phase profiling, and packing.  It prints the archive to copy back.
+tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh measure "$PWD"
+```
+
+Set `PZR_PI_TIMING_ENV_ROOT` or `PZR_PI_TIMING_RUNS_ROOT` before invoking the
+launcher only if the default sibling locations are unsuitable.  The manual
+commands below remain available for diagnosis or for running an individual
+stage.
+
 ```bash
 tools/setup_paper_evaluation_v4_pi_timing_v1.sh setup "$PWD"
 sudo tools/setup_paper_evaluation_v4_pi_timing_v1.sh host-controls "$PWD"

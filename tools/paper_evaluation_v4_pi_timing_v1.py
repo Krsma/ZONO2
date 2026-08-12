@@ -402,6 +402,7 @@ def build_bundle(config: PiTimingConfig, archive: Path) -> Path:
         tool_paths = (
             Path(__file__).resolve(),
             ROOT / "tools/run_paper_evaluation_v4_pi_timing_v1.sh",
+            ROOT / "tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh",
             ROOT / "tools/setup_paper_evaluation_v4_pi_timing_v1.sh",
             config.parent_runner,
             *config.dependency_hashes,
