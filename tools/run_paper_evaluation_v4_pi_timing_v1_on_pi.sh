@@ -33,6 +33,29 @@ run_bundle() {
     PZR_PI_TIMING_PYTHON="$PYTHON_BIN" "$RUNNER" "$@"
 }
 
+wait_for_idle() {
+    local timeout_seconds="${PZR_PI_TIMING_IDLE_TIMEOUT_SECONDS:-600}"
+    if [[ ! "$timeout_seconds" =~ ^[1-9][0-9]*$ ]]; then
+        echo "PZR_PI_TIMING_IDLE_TIMEOUT_SECONDS must be a positive integer" >&2
+        exit 1
+    fi
+    local deadline=$((SECONDS + timeout_seconds))
+    local load_average
+    while true; do
+        read -r load_average _ </proc/loadavg
+        if awk -v load="$load_average" 'BEGIN { exit !(load < 0.5) }'; then
+            echo "Pi is idle enough for timing (one-minute load average: $load_average)"
+            return
+        fi
+        if ((SECONDS >= deadline)); then
+            echo "Pi did not become idle within ${timeout_seconds}s (load: $load_average)" >&2
+            exit 1
+        fi
+        echo "Waiting for contract-test load to decay below 0.5 (current: $load_average)"
+        sleep 10
+    done
+}
+
 case "$COMMAND" in
 setup)
     "$SETUP" setup "$BUNDLE_ROOT"
@@ -66,6 +89,7 @@ measure)
     ARCHIVE="$RUNS_ROOT/paper-evaluation-v4-pi-timing-v1-results.tar.gz"
     run_bundle preflight --bundle "$BUNDLE_ROOT"
     run_bundle contract-tests --bundle "$BUNDLE_ROOT"
+    wait_for_idle
     run_bundle run --bundle "$BUNDLE_ROOT" --run-output "$RUN_OUTPUT"
     run_bundle profile --bundle "$BUNDLE_ROOT" --run-output "$RUN_OUTPUT"
     run_bundle pack --bundle "$BUNDLE_ROOT" --run-output "$RUN_OUTPUT" --archive "$ARCHIVE"

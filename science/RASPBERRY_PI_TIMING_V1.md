@@ -80,7 +80,8 @@ tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh smoke "$PWD" \
   /absolute/path/to/extracted-smoke-bundle
 
 # With the Pi idle, runs preflight, semantic contracts, all timing cells,
-# phase profiling, and packing.  It prints the archive to copy back.
+# waits for contract-test load to decay, then runs phase profiling and packing.
+# It prints the archive to copy back.
 tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh measure "$PWD"
 ```
 
