@@ -41,7 +41,7 @@ host-controls)
 setup)
     sudo apt-get update
     sudo apt-get install -y \
-        build-essential curl git libfontconfig-dev libopenblas-dev pkg-config openssh-client
+        build-essential curl git libfontconfig-dev libopenblas-dev patchelf pkg-config openssh-client
 
     INSTALLER="$ENV_ROOT/Miniforge3-26.3.2-2-Linux-aarch64.sh"
     INSTALLER_SHA256="f4096a92482b30f04534cddb63d8bc929118318deffac71d90fb89dc52359d22"
