@@ -49,6 +49,8 @@ smoke)
         exit 1
     fi
     SMOKE_BUNDLE_ROOT="$(cd "$SMOKE_BUNDLE_ROOT" && pwd)"
+    # Reboot restores the governor on Raspberry Pi OS; preflight requires it.
+    sudo "$SETUP" host-controls "$BUNDLE_ROOT"
     mkdir -p "$RUNS_ROOT/smoke"
     PZR_PI_TIMING_CONFIG="$SMOKE_BUNDLE_ROOT/experiments/paper_evaluation_v4_pi_timing_v1.yaml" \
         PZR_PI_TIMING_PYTHON="$PYTHON_BIN" "$RUNNER" smoke \

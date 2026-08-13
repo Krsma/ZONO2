@@ -75,6 +75,7 @@ outside the immutable bundles.  It is the recommended Pi-side sequence:
 tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh setup "$PWD"
 
 # After reboot, first pass the path to the separately extracted smoke bundle.
+# The launcher reapplies the performance governor before preflight.
 tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh smoke "$PWD" \
   /absolute/path/to/extracted-smoke-bundle
 
