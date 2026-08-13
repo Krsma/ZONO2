@@ -21,8 +21,28 @@ export TORCH_NUM_THREADS=1
 export PYTHONDONTWRITEBYTECODE=1
 export MPLCONFIGDIR="${MPLCONFIGDIR:-/tmp/pzr-pi-timing-v1-matplotlib}"
 
-if [[ -f "$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/lib/libopenblas.so" ]]; then
-    export LD_PRELOAD="$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/lib/libopenblas.so${LD_PRELOAD:+:$LD_PRELOAD}"
+OPENBLAS_LIBRARY="${PZR_PI_TIMING_OPENBLAS:-}"
+if [[ -z "$OPENBLAS_LIBRARY" ]]; then
+    for candidate in \
+        "$ROOT_DIR/external/miniconda3/envs/pzr-robot-arm/lib/libopenblas.so" \
+        /usr/lib/aarch64-linux-gnu/libopenblas.so \
+        /usr/lib/aarch64-linux-gnu/openblas-pthread/libopenblas.so \
+        /usr/lib/aarch64-linux-gnu/openblas-pthread/libopenblas.so.0; do
+        if [[ -f "$candidate" ]]; then
+            OPENBLAS_LIBRARY="$candidate"
+            break
+        fi
+    done
+fi
+if [[ -n "$OPENBLAS_LIBRARY" ]]; then
+    if [[ ! -f "$OPENBLAS_LIBRARY" ]]; then
+        echo "Configured OpenBLAS library does not exist: $OPENBLAS_LIBRARY" >&2
+        exit 1
+    fi
+    export LD_PRELOAD="$OPENBLAS_LIBRARY${LD_PRELOAD:+:$LD_PRELOAD}"
+elif [[ "$(uname -m)" == "aarch64" ]]; then
+    echo "OpenBLAS was not found; install libopenblas-dev or set PZR_PI_TIMING_OPENBLAS." >&2
+    exit 1
 fi
 
 cd "$ROOT_DIR"

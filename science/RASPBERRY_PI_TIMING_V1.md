@@ -97,6 +97,8 @@ sudo tools/setup_paper_evaluation_v4_pi_timing_v1.sh host-controls "$PWD"
 The setup requires network access and working CISPA SSH credentials to build
 the pinned binding. Reboot immediately before the measured run, reapply
 `host-controls`, and ensure no unrelated workload is active.
+The wrappers preload the Debian ARM64 OpenBLAS library required by the native
+binding; override its path only when necessary with `PZR_PI_TIMING_OPENBLAS`.
 
 Set the interpreter for subsequent commands:
 

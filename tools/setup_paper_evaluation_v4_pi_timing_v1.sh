@@ -124,6 +124,23 @@ marker.write_text(
     "BINDING_BUILD_PROFILE = 'release'\n"
 )
 PY
+    OPENBLAS_LIBRARY=""
+    for candidate in \
+        /usr/lib/aarch64-linux-gnu/libopenblas.so \
+        /usr/lib/aarch64-linux-gnu/openblas-pthread/libopenblas.so \
+        /usr/lib/aarch64-linux-gnu/openblas-pthread/libopenblas.so.0; do
+        if [[ -f "$candidate" ]]; then
+            OPENBLAS_LIBRARY="$candidate"
+            break
+        fi
+    done
+    if [[ -z "$OPENBLAS_LIBRARY" ]]; then
+        echo "OpenBLAS library was not found after installing libopenblas-dev." >&2
+        exit 1
+    fi
+    LD_PRELOAD="$OPENBLAS_LIBRARY${LD_PRELOAD:+:$LD_PRELOAD}" \
+        "$RUNTIME_PREFIX/bin/python" -c 'import rlola_python_binding'
+    echo "Binding import verified with OpenBLAS: $OPENBLAS_LIBRARY"
     echo "Pi environment ready: $RUNTIME_PREFIX"
     ;;
 *)
