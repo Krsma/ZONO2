@@ -71,8 +71,8 @@ setup)
     fi
     "$RUNTIME_PREFIX/bin/python" -m pip install --upgrade pip
     "$RUNTIME_PREFIX/bin/python" -m pip install \
-        numpy==2.4.6 pandas==3.0.3 pyyaml==6.0.3 \
-        maturin==1.14.1 pytest==9.1.1
+        matplotlib==3.11.0 maturin==1.14.1 numpy==2.4.6 \
+        pandas==3.0.3 pytest==9.1.1 pyyaml==6.0.3 tqdm==4.68.3
     "$RUNTIME_PREFIX/bin/python" -m pip install \
         'torch==2.12.1+cpu' --index-url https://download.pytorch.org/whl/cpu
 
@@ -139,7 +139,9 @@ PY
         exit 1
     fi
     LD_PRELOAD="$OPENBLAS_LIBRARY${LD_PRELOAD:+:$LD_PRELOAD}" \
-        "$RUNTIME_PREFIX/bin/python" -c 'import rlola_python_binding'
+        "$RUNTIME_PREFIX/bin/python" -c \
+        'import matplotlib, numpy, pandas, rlola_python_binding, torch, tqdm, yaml'
+    "$RUNTIME_PREFIX/bin/python" -m pip check
     echo "Binding import verified with OpenBLAS: $OPENBLAS_LIBRARY"
     echo "Pi environment ready: $RUNTIME_PREFIX"
     ;;
