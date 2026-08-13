@@ -5,6 +5,13 @@ COMMAND="${1:?usage: setup_paper_evaluation_v4_pi_timing_v1.sh setup|host-contro
 BUNDLE_ROOT="${2:?bundle root is required}"
 BUNDLE_ROOT="$(cd "$BUNDLE_ROOT" && pwd)"
 ENV_ROOT="${PZR_PI_TIMING_ENV_ROOT:-$BUNDLE_ROOT/../pzr-pi-timing-env-v1}"
+
+if [[ "$COMMAND" == "setup" && "$EUID" -eq 0 ]]; then
+    echo "Run setup as the regular Pi user, without an outer sudo." >&2
+    echo "The script invokes sudo only for system packages and host controls." >&2
+    exit 1
+fi
+
 mkdir -p "$ENV_ROOT"
 ENV_ROOT="$(cd "$ENV_ROOT" && pwd)"
 MINIFORGE_ROOT="$ENV_ROOT/miniforge"
@@ -37,14 +44,24 @@ setup)
         build-essential curl git libopenblas-dev pkg-config openssh-client
 
     INSTALLER="$ENV_ROOT/Miniforge3-26.3.2-2-Linux-aarch64.sh"
+    INSTALLER_SHA256="f4096a92482b30f04534cddb63d8bc929118318deffac71d90fb89dc52359d22"
     if [[ ! -f "$INSTALLER" ]]; then
+        DOWNLOAD="$INSTALLER.download"
         curl -fL \
             "https://github.com/conda-forge/miniforge/releases/download/26.3.2-2/Miniforge3-26.3.2-2-Linux-aarch64.sh" \
-            -o "$INSTALLER"
+            -o "$DOWNLOAD"
+        if ! printf '%s  %s\n' "$INSTALLER_SHA256" "$DOWNLOAD" | sha256sum --check; then
+            rm -f "$DOWNLOAD"
+            echo "Miniforge installer checksum verification failed; download was discarded." >&2
+            exit 1
+        fi
+        mv "$DOWNLOAD" "$INSTALLER"
     fi
-    printf '%s  %s\n' \
-        535144deb6908e2a8ef8c60306a9a6c4fdbbe85034f056a98776ec3dcb9e9c14 \
-        "$INSTALLER" | sha256sum --check --status
+    if ! printf '%s  %s\n' "$INSTALLER_SHA256" "$INSTALLER" | sha256sum --check; then
+        echo "Cached Miniforge installer failed checksum verification: $INSTALLER" >&2
+        echo "Expected SHA-256: $INSTALLER_SHA256" >&2
+        exit 1
+    fi
     if [[ ! -x "$MINIFORGE_ROOT/bin/conda" ]]; then
         bash "$INSTALLER" -b -p "$MINIFORGE_ROOT"
     fi

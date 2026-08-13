@@ -69,8 +69,9 @@ The bundled convenience launcher keeps the environment and every run output
 outside the immutable bundles.  It is the recommended Pi-side sequence:
 
 ```bash
-# In the extracted full bundle.  This installs the pinned environment and
-# requests the performance governor, then tells you to reboot.
+# In the extracted full bundle.  Run this as the regular Pi user (no outer
+# sudo): it installs the pinned environment, requests the performance
+# governor, then tells you to reboot.
 tools/run_paper_evaluation_v4_pi_timing_v1_on_pi.sh setup "$PWD"
 
 # After reboot, first pass the path to the separately extracted smoke bundle.
