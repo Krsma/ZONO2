@@ -27,3 +27,11 @@ dist/
 *.out
 *.run.xml
 *-SAVE-ERROR
+
+# Private research material and local agent instructions
+/science/
+/paper/
+/AGENTS.md
+/CLAUDE.md
+/AUDIT.md
+/claude.md
