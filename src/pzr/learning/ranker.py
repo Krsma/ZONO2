@@ -5,6 +5,7 @@ from __future__ import annotations
 from dataclasses import asdict, dataclass
 import json
 from pathlib import Path
+from typing import Callable
 
 import numpy as np
 from numpy.typing import NDArray
@@ -93,6 +94,7 @@ class ReducerScorer(nn.Module):
         feature_schema: FeatureSchema,
         candidate_names: tuple[str, ...],
         hidden_sizes: tuple[int, ...] = (32, 32),
+        network: nn.Module | None = None,
     ) -> None:
         super().__init__()
         if not candidate_names or len(set(candidate_names)) != len(candidate_names):
@@ -102,6 +104,10 @@ class ReducerScorer(nn.Module):
         self.feature_schema = feature_schema
         self.candidate_names = candidate_names
         self.hidden_sizes = hidden_sizes
+        self.custom_network = network is not None
+        if network is not None:
+            self.network = network
+            return
         sizes = [len(feature_schema.feature_names), *hidden_sizes, len(candidate_names)]
         layers: list[nn.Module] = []
         for index, (left, right) in enumerate(zip(sizes[:-1], sizes[1:])):
@@ -186,8 +192,21 @@ class ReducerPolicy:
         transformed = self.feature_schema.transform(raw_features)
         normalized = self.normalizer.transform(transformed)
         tensor = torch.as_tensor(normalized, dtype=torch.float32)
+        # Student networks (e.g. BatchNorm) always receive [batch, features],
+        # including direct inference on one monitor state. Keep the historical
+        # built-in MLP's single-vector execution unchanged.
+        single_custom = self.model.custom_network and tensor.ndim == 1
+        if single_custom:
+            tensor = tensor.unsqueeze(0)
         with torch.no_grad():
-            return self.model(tensor).cpu().numpy().astype(np.float32)
+            scores = self.model(tensor).cpu().numpy().astype(np.float32)
+        if single_custom:
+            if scores.shape != (1, len(self.candidate_names)):
+                raise ValueError("custom network must preserve the batch dimension")
+            scores = scores[0]
+        if scores.shape != (*normalized.shape[:-1], len(self.candidate_names)) or not np.isfinite(scores).all():
+            raise ValueError("policy must return finite scores aligned with input and candidates")
+        return scores
 
     def predict_probabilities(
         self,
@@ -206,6 +225,8 @@ class ReducerPolicy:
         return [self.candidate_names[index] for index in order]
 
     def save(self, directory: Path) -> None:
+        if self.model.custom_network:
+            raise ValueError("Save custom networks using pzr.student.TrainingRun.save")
         directory.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), directory / "weights.pt")
         payload = {
@@ -265,6 +286,7 @@ def train_reducer_policy(
     batch_size: int = 256,
     patience: int = 10,
     seed: int = 42,
+    model_factory: Callable[[int, int], nn.Module] | None = None,
 ) -> tuple[ReducerPolicy, ReducerTrainingResult]:
     if dataset.feature_names != feature_schema.feature_names:
         raise ValueError("dataset does not match feature schema")
@@ -310,7 +332,11 @@ def train_reducer_policy(
             expected_regret_targets(dataset.teacher_costs, dataset.feasible),
             dtype=torch.float64,
         )
-    model = ReducerScorer(feature_schema, dataset.candidate_names, hidden_sizes)
+    network = (
+        model_factory(len(feature_schema.feature_names), dataset.num_candidates)
+        if model_factory is not None else None
+    )
+    model = ReducerScorer(feature_schema, dataset.candidate_names, hidden_sizes, network)
     optimizer = torch.optim.AdamW(model.parameters(), lr=learning_rate, weight_decay=weight_decay)
     generator = torch.Generator().manual_seed(seed)
     loader = DataLoader(
@@ -332,6 +358,8 @@ def train_reducer_policy(
 
     def loss_for(indices: Tensor) -> tuple[Tensor, Tensor, Tensor]:
         scores = model(features[indices]).to(torch.float64)
+        if scores.shape != (indices.numel(), dataset.num_candidates) or not torch.isfinite(scores).all():
+            raise ValueError("network must return finite scores shaped [batch, candidates]")
         if objective == "pairwise":
             total = cost_sensitive_pairwise_loss(scores, costs[indices], feasible[indices])
             zero = total.detach() * 0.0

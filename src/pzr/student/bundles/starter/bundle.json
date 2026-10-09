@@ -1,0 +1,76 @@
+{
+  "baseline": "Clean148 optimizer seed 42; larger training set than starter",
+  "budgets": [
+    40
+  ],
+  "files": {
+    "baseline/budget-40/model.json": "701c6f79189661af89866ac4fea1cd8cfa9f70c565960ccc71497e8fa7e5a32e",
+    "baseline/budget-40/weights.pt": "888d7aa5d94715565ee17b7f704186c865ce555caeb7547ab172c68d25ea9553",
+    "dataset/candidate_costs.csv": "6a6aae26dce230b961c26cbf064011e90ffc87cd1dfede186ff5cbf5cada5001",
+    "dataset/manifest.json": "1fef8ce3715e0c5a553d88cabdcc99a3bc1a0d86ec573e96bb9b68d241d06d9f",
+    "dataset/samples.csv": "4be930d1b4841f8723e0a27cc42ad0a93ae776e4e6b365b0b041fe6fdbebe7ec",
+    "dataset/samples.npz": "92ccceb19c0794a8e92115998e70139db84f4afb11a10a67d6996871e0a67f55",
+    "traces/seed-0.json": "6b44c55411602861bca3f5202778d3040d3f2bdf3d8daf933f317d467428af35",
+    "traces/seed-1.json": "adc81c5bbebe0e47c21e89d6bd88a628c503a9f4611b3b79faab8546d3626527",
+    "traces/seed-2.json": "0a206204727914ba1833b6f8d844412043fcc2ae58c9eb754ab1aca25a96e6a7",
+    "traces/seed-20.json": "97658b146841805d110d214e5487af21e305842a1a4f893efdd00f34e5765676",
+    "traces/seed-21.json": "539c60f0342be16d3a9b8ee61b9358f635e1af9483271623d91a0d33651ae1f5",
+    "traces/seed-3.json": "ecf9c33adacbaa76b94b07cf1a891707ad78daec8ffb6fda65b4dcb2f39649a9"
+  },
+  "name": "starter",
+  "schema": "pzr.student-bundle.v1",
+  "sources": {
+    "paper_clean20": "885c3dfbf70ddf614db72f564877e667e056a59966e62094d365606e0b503602"
+  },
+  "spec_sha256": "aab5b768d872bc4f5b6dc11b96805c2d451cc5c91eb573225f6b0e246cee6acc",
+  "traces": [
+    {
+      "path": "traces/seed-0.json",
+      "seed": 0,
+      "source_trace_sha256": "bc69694678e3086e18dce89f5ded55760e9af5cecd03a5cfc155f8243e7a144d",
+      "split": "train",
+      "trace_id": "random_waypoint:seed-0",
+      "trace_kind": "random_waypoint"
+    },
+    {
+      "path": "traces/seed-1.json",
+      "seed": 1,
+      "source_trace_sha256": "4cd72c355ee6776437c7e6fea536ee26955a71a1db57abf46b7e54d59eb2b1cb",
+      "split": "train",
+      "trace_id": "random_waypoint:seed-1",
+      "trace_kind": "random_waypoint"
+    },
+    {
+      "path": "traces/seed-2.json",
+      "seed": 2,
+      "source_trace_sha256": "f50a2d5146998e43d241e2cc5efc87ebdb9d79edc1c449aa3e9146dbe21e53f5",
+      "split": "train",
+      "trace_id": "random_waypoint:seed-2",
+      "trace_kind": "random_waypoint"
+    },
+    {
+      "path": "traces/seed-20.json",
+      "seed": 20,
+      "source_trace_sha256": "336cb3f875fef276dde278fd74d47d91bd508b80aa4010c19a243a8a07f7afda",
+      "split": "validation",
+      "trace_id": "random_waypoint:seed-20",
+      "trace_kind": "random_waypoint"
+    },
+    {
+      "path": "traces/seed-21.json",
+      "seed": 21,
+      "source_trace_sha256": "1db6a1afc40e497b7e588d11d8ad6a59410b7de7bda8716891e8f5f6a6044eb1",
+      "split": "validation",
+      "trace_id": "random_waypoint:seed-21",
+      "trace_kind": "random_waypoint"
+    },
+    {
+      "path": "traces/seed-3.json",
+      "seed": 3,
+      "source_trace_sha256": "34d28c42f0ca235e268b662c43013d10adc18ebf87fd9d566dd7bfeb5be42829",
+      "split": "train",
+      "trace_id": "random_waypoint:seed-3",
+      "trace_kind": "random_waypoint"
+    }
+  ]
+}

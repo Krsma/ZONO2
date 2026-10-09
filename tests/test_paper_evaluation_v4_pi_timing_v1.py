@@ -23,14 +23,20 @@ sys.modules[SPEC.name] = pi
 SPEC.loader.exec_module(pi)
 
 
-def test_pi_timing_matrix_and_parent_pins_are_exact() -> None:
+def test_pi_timing_matrix_and_parent_pins_are_exact(monkeypatch: pytest.MonkeyPatch) -> None:
     config = pi.load_config()
     assert config.seeds == tuple(range(348, 353))
     assert config.budgets == (40, 80, 120, 150, 200, 250, 500)
     assert config.methods == pi.METHOD_NAMES
     assert config.expected_cells == 350
     assert config.measured_event_count == 200
+    # The frozen timing study must reject later source trees, while ordinary
+    # development tests must remain runnable after adding follow-up APIs.
+    monkeypatch.setattr(pi, "pzr_source_sha256", lambda: config.parent_source_sha256)
     assert pi.verify_parent_pins(config)
+    monkeypatch.setattr(pi, "pzr_source_sha256", lambda: "changed-source-tree")
+    with pytest.raises(ValueError, match="read-only scientific source hash mismatch"):
+        pi.verify_parent_pins(config)
 
 
 def test_pi_smoke_contract_keeps_all_method_types() -> None:

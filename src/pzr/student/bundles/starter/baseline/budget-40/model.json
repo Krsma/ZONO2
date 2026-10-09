@@ -1,0 +1,91 @@
+{
+  "candidate_names": [
+    "girard",
+    "scott",
+    "pca",
+    "combastel"
+  ],
+  "feature_schema": {
+    "feature_names": [
+      "budget",
+      "dynamic_generator_count",
+      "active_dynamic_generator_count",
+      "compact_dimension",
+      "logical_dynamic_dimension",
+      "generator_overflow_ratio",
+      "zero_dynamic_fraction",
+      "state_width",
+      "max_row_width",
+      "mean_active_generator_norm",
+      "max_to_mean_generator_norm",
+      "generator_coupling",
+      "row_width_concentration",
+      "active_generator_norm_cv",
+      "mean_generator_off_axis_fraction"
+    ],
+    "log1p_features": [
+      "budget",
+      "dynamic_generator_count",
+      "active_dynamic_generator_count",
+      "compact_dimension",
+      "logical_dynamic_dimension",
+      "state_width",
+      "max_row_width",
+      "mean_active_generator_norm",
+      "active_generator_norm_cv"
+    ],
+    "name": "rtlola.current-zonotope",
+    "version": 2
+  },
+  "hidden_sizes": [
+    32,
+    32
+  ],
+  "normalizer_mean": [
+    3.7135720252990723,
+    4.330596446990967,
+    4.2481513023376465,
+    2.079441547393799,
+    2.079441547393799,
+    1.8747484683990479,
+    0.0801839604973793,
+    1.6911296844482422,
+    1.0988574028015137,
+    0.0370778888463974,
+    28.65751838684082,
+    0.41478627920150757,
+    0.43294328451156616,
+    1.6882989406585693,
+    0.32867589592933655
+  ],
+  "normalizer_std": [
+    0.0,
+    0.0030495326500386,
+    0.007660776376724243,
+    0.0,
+    0.0,
+    0.005601372569799423,
+    0.004097004421055317,
+    0.6054067015647888,
+    0.45362555980682373,
+    0.02123878337442875,
+    4.582461357116699,
+    0.04047447815537453,
+    0.03211529180407524,
+    0.1536322683095932,
+    0.04788867384195328
+  ],
+  "objective_contract": {
+    "absolute_tolerance": 1e-15,
+    "feasible_pair_weighting": "gap_over_largest_meaningful_feasible_gap_in_state",
+    "infeasible_pair_weight": 1.0,
+    "infeasible_semantics": "every_feasible_candidate_ranks_above_every_infeasible_candidate",
+    "loss": "weighted_pairwise_softplus",
+    "reduction": "per_state_pair_weight_sum_then_rankable_state_mean",
+    "relative_tolerance": 1e-09,
+    "schema": "pzr.reducer-objective.pairwise-v2",
+    "score_semantics": "lower_is_better_uncalibrated_score"
+  },
+  "schema": "pzr.reducer-scorer.v3",
+  "torch_version": "2.12.1+cu130"
+}

@@ -1,0 +1,9 @@
+services:
+  lab:
+    image: ${PZR_STUDENT_IMAGE:-pzr-student:local}
+    ports:
+      - "127.0.0.1:8888:8888"
+    volumes:
+      - student-workspace:/workspace
+volumes:
+  student-workspace:

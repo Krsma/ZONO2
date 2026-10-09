@@ -1,0 +1,77 @@
+{
+  "budgets": [
+    40
+  ],
+  "candidate_names": [
+    "girard",
+    "scott",
+    "pca",
+    "combastel"
+  ],
+  "cost_contract": {
+    "absolute_tolerance": 1e-15,
+    "infeasible_cost": "nan_with_explicit_false_feasibility",
+    "relative_tolerance": 1e-09,
+    "schema": "pzr.reducer-cost-target.v3",
+    "teacher_cost": "binding_native_two_event_full_width_terminal_cost"
+  },
+  "feature_names": [
+    "budget",
+    "dynamic_generator_count",
+    "active_dynamic_generator_count",
+    "compact_dimension",
+    "logical_dynamic_dimension",
+    "generator_overflow_ratio",
+    "zero_dynamic_fraction",
+    "state_width",
+    "max_row_width",
+    "mean_active_generator_norm",
+    "max_to_mean_generator_norm",
+    "generator_coupling",
+    "row_width_concentration",
+    "active_generator_norm_cv",
+    "mean_generator_off_axis_fraction"
+  ],
+  "feature_schema": {
+    "feature_names": [
+      "budget",
+      "dynamic_generator_count",
+      "active_dynamic_generator_count",
+      "compact_dimension",
+      "logical_dynamic_dimension",
+      "generator_overflow_ratio",
+      "zero_dynamic_fraction",
+      "state_width",
+      "max_row_width",
+      "mean_active_generator_norm",
+      "max_to_mean_generator_norm",
+      "generator_coupling",
+      "row_width_concentration",
+      "active_generator_norm_cv",
+      "mean_generator_off_axis_fraction"
+    ],
+    "log1p_features": [
+      "budget",
+      "dynamic_generator_count",
+      "active_dynamic_generator_count",
+      "compact_dimension",
+      "logical_dynamic_dimension",
+      "state_width",
+      "max_row_width",
+      "mean_active_generator_norm",
+      "active_generator_norm_cv"
+    ],
+    "name": "rtlola.current-zonotope",
+    "version": 2
+  },
+  "num_samples": 2982,
+  "scenario": "robot_arm",
+  "schema": "pzr.reducer-cost-dataset.v5",
+  "source_hashes": {
+    "paper_clean20": "885c3dfbf70ddf614db72f564877e667e056a59966e62094d365606e0b503602"
+  },
+  "splits": {
+    "train": 1988,
+    "validation": 994
+  }
+}

@@ -1,0 +1,12 @@
+**
+!pyproject.toml
+!README.md
+!src/**
+!tests/**
+!notebooks/**
+!tools/student/**
+!docker/student/**
+!build/student-native/**
+!data/student/clean148/**
+**/__pycache__
+**/*.pyc
