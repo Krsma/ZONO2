@@ -1,9 +1,9 @@
-"""Run with python -m pzr.student.doctor to check a student environment."""
+"""Run with python -m pzr.learning.doctor to check a learning environment."""
 from importlib.metadata import version
 import json
 import platform
 
-from pzr.student import load_task
+from pzr.learning import load_task
 
 
 def main() -> None:

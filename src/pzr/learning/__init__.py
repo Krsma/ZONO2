@@ -1,4 +1,4 @@
-"""Scenario-neutral reducer-cost learning models."""
+"""Learning interface and reducer-cost models for neural reducer experiments."""
 
 from pzr.learning.artifacts import (
     REDUCER_COST_DATASET_SCHEMA,
@@ -39,3 +39,27 @@ __all__ = [
     "train_reducer_policy",
     "write_reducer_cost_dataset",
 ]
+
+# Lazy exports avoid importing the RTLola stack when low-level training modules
+# are imported, and keep Gymnasium optional.
+_INTERFACE_MODULES = {
+    **dict.fromkeys(("Task", "TraceSet", "load_task"), "tasks"),
+    **dict.fromkeys(("TrainingConfig", "TrainingRun", "train_selector",
+                     "load_selector", "evaluate_selector", "prepared_samples"), "selector"),
+    **dict.fromkeys(("MonitorSession", "Observation", "Zonotope", "evaluate_monitor"), "monitor"),
+}
+__all__ += list(_INTERFACE_MODULES)
+
+
+def __getattr__(name: str) -> object:
+    if name not in _INTERFACE_MODULES:
+        raise AttributeError(f"module {__name__!r} has no attribute {name!r}")
+    from importlib import import_module
+
+    value = getattr(import_module(f"{__name__}.{_INTERFACE_MODULES[name]}"), name)
+    globals()[name] = value
+    return value
+
+
+def __dir__() -> list[str]:
+    return sorted(set(globals()) | set(__all__))

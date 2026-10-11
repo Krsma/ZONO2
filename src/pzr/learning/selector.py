@@ -25,7 +25,7 @@ from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA
 
 ModelFactory = Callable[[int, int], nn.Module]
 if TYPE_CHECKING:
-    from pzr.student.data import Task
+    from pzr.learning.tasks import Task
 
 
 @dataclass(frozen=True)
@@ -76,7 +76,7 @@ class TrainingRun:
         path.mkdir(parents=True, exist_ok=True)
         torch.save(self.policy.model.state_dict(), path / "weights.pt")
         write_json_atomic({
-            "schema": "pzr.student-selector.v1",
+            "schema": "pzr.learning-selector.v1",
             "custom_network": self.policy.model.custom_network,
             "feature_schema": asdict(self.policy.feature_schema),
             "candidate_names": list(self.policy.candidate_names),
@@ -86,7 +86,7 @@ class TrainingRun:
             "training_config": asdict(self.config),
             "history": asdict(self.history),
             "provenance": self.provenance,
-        }, path / "student.json")
+        }, path / "learning.json")
         return path
 
 
@@ -107,9 +107,9 @@ def train_selector(task: Task, *, model_factory: ModelFactory | None = None,
 def load_selector(directory: str | Path, *, model_factory: ModelFactory | None = None) -> ReducerPolicy:
     """Load weights without pickled model code; custom networks need their factory."""
     path = Path(directory)
-    payload = json.loads((path / "student.json").read_text())
-    if payload.get("schema") != "pzr.student-selector.v1":
-        raise ValueError("unsupported student selector schema")
+    payload = json.loads((path / "learning.json").read_text())
+    if payload.get("schema") != "pzr.learning-selector.v1":
+        raise ValueError("unsupported learning selector schema")
     if payload["feature_schema"] != json.loads(json.dumps(asdict(RTL_RANKING_FEATURE_SCHEMA))):
         raise ValueError("selector feature schema differs")
     from pzr.rtlola.actions import MPC_ACTION_NAMES

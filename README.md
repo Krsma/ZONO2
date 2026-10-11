@@ -5,10 +5,10 @@ selection for RTLola monitors with zonotope uncertainty. RTLola evaluates the
 monitor and applies native reductions; Python provides traces, search,
 learning, and benchmark reporting.
 
-## Student neural experiments
+## Learning interface
 
-Start with the [student guide](docs/student/README.md) and
-[first-selector notebook](notebooks/00_start_here.ipynb). The `pzr.student` API
+Start with the [learning guide](docs/learning/README.md) and
+[selector training tutorial](notebooks/00_start_here.ipynb). The `pzr.learning` API
 loads recorded teacher data, trains ordinary PyTorch networks to rank native
 reducers, and evaluates them in the monitor. Docker/Jupyter and an optional
 Gymnasium adapter are included; offline neural training needs no native binding.

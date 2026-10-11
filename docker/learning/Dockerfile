@@ -6,7 +6,7 @@ COPY --from=rust /usr/local/rustup /usr/local/rustup
 ENV PATH="/usr/local/cargo/bin:${PATH}" RUSTUP_HOME=/usr/local/rustup CARGO_HOME=/usr/local/cargo
 RUN apt-get update && apt-get install -y --no-install-recommends build-essential pkg-config libfontconfig1-dev libopenblas-dev && rm -rf /var/lib/apt/lists/*
 RUN pip install --no-cache-dir maturin==1.14.1 numpy==2.4.6
-COPY build/student-native /native
+COPY build/learning-native /native
 WORKDIR /native
 ENV RUSTC_BOOTSTRAP=kmeans CARGO_BUILD_JOBS=2 LD_PRELOAD=libopenblas.so.0
 RUN maturin build --release --locked --offline --compatibility linux --out /wheels
@@ -14,7 +14,7 @@ RUN maturin build --release --locked --offline --compatibility linux --out /whee
 FROM python:3.11-slim-bookworm@sha256:0a310eeecf4e1f5a0743f9a6520c90c88d089c903ca5fd283f501e3a805f5f89 AS runtime
 RUN apt-get update && apt-get install -y --no-install-recommends libopenblas0-pthread libfontconfig1 && rm -rf /var/lib/apt/lists/*
 ENV LD_PRELOAD=libopenblas.so.0 OPENBLAS_NUM_THREADS=1 OMP_NUM_THREADS=1 MKL_NUM_THREADS=1 NUMEXPR_NUM_THREADS=1 PYTHONUNBUFFERED=1
-COPY docker/student/requirements.lock /tmp/requirements.lock
+COPY docker/learning/requirements.lock /tmp/requirements.lock
 RUN pip install --no-cache-dir -r /tmp/requirements.lock && pip install --no-cache-dir --no-deps torch==2.12.1 --index-url https://download.pytorch.org/whl/cpu
 COPY --from=native /wheels /wheels
 RUN pip install --no-cache-dir --no-deps /wheels/*.whl && rm -rf /wheels
@@ -25,15 +25,15 @@ COPY src ./src
 RUN pip install --no-deps --no-build-isolation . && python -m pip check
 COPY notebooks /opt/pzr/notebooks
 COPY tests /opt/pzr/tests
-COPY tools/student/check_notebooks.py /opt/pzr/check_notebooks.py
-COPY tools/student/container_entrypoint.py /opt/pzr/container_entrypoint.py
-RUN useradd --create-home --uid 1000 student && mkdir -p /workspace && chown student:student /workspace
-USER student
+COPY tools/learning/check_notebooks.py /opt/pzr/check_notebooks.py
+COPY tools/learning/container_entrypoint.py /opt/pzr/container_entrypoint.py
+RUN useradd --create-home --uid 1000 researcher && mkdir -p /workspace && chown researcher:researcher /workspace
+USER researcher
 WORKDIR /workspace
 EXPOSE 8888
 ENTRYPOINT ["python", "/opt/pzr/container_entrypoint.py"]
 CMD ["jupyter", "lab", "--ip=0.0.0.0", "--no-browser", "--ServerApp.root_dir=/workspace"]
 
 FROM runtime AS course
-COPY data/student/clean148 /opt/pzr/data/clean148
-ENV PZR_STUDENT_DATA=/opt/pzr/data
+COPY data/learning/clean148 /opt/pzr/data/clean148
+ENV PZR_LEARNING_DATA=/opt/pzr/data

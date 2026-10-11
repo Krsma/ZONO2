@@ -1,4 +1,4 @@
-"""Export recorded teaching bundles; never collect, retrain, or modify results."""
+"""Export recorded learning datasets; never collect, retrain, or modify results."""
 from __future__ import annotations
 
 import argparse
@@ -18,7 +18,7 @@ from pzr.learning.training import dataset_sha256
 from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA
 from pzr.rtlola.robot_arm import ROBOT_ARM_SPEC_SHA256
 from pzr.rtlola.robot_arm_random import load_random_waypoint_trace
-from pzr.student.data import file_hash
+from pzr.learning.tasks import file_hash
 
 ROOT = Path(__file__).resolve().parents[2]
 SOURCES = {
@@ -97,7 +97,7 @@ def export_bundle(output: Path, *, full: bool = False) -> None:
         for filename in ('model.json', 'weights.pt'):
             shutil.copyfile(source / filename, destination / filename)
     write_json_atomic({
-        'schema': 'pzr.student-bundle.v1', 'name': 'clean148' if full else 'starter',
+        'schema': 'pzr.learning-bundle.v1', 'name': 'clean148' if full else 'starter',
         'sources': sources, 'spec_sha256': ROBOT_ARM_SPEC_SHA256, 'budgets': list(budgets),
         'traces': records, 'baseline': 'Clean148 optimizer seed 42; larger training set than starter',
         'files': {str(p.relative_to(output)): file_hash(p) for p in sorted(output.rglob('*')) if p.is_file()},

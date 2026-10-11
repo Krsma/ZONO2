@@ -1,4 +1,4 @@
-"""One native execution path shared by student evaluation and Gym."""
+"""One native execution path shared by learning evaluation and Gym."""
 from __future__ import annotations
 
 from collections import Counter
@@ -17,7 +17,7 @@ from pzr.rtlola.metrics import RtlolaMatrixMetrics
 from pzr.rtlola.reference import load_or_compute_reference, trace_sha256
 from pzr.rtlola.scenarios import RtlolaTrace, scenario_by_name
 from pzr.learning.ranker import ReducerPolicy
-from pzr.student.data import TraceSet
+from pzr.learning.tasks import TraceSet
 
 
 @dataclass(frozen=True)

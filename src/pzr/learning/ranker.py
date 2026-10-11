@@ -192,7 +192,7 @@ class ReducerPolicy:
         transformed = self.feature_schema.transform(raw_features)
         normalized = self.normalizer.transform(transformed)
         tensor = torch.as_tensor(normalized, dtype=torch.float32)
-        # Student networks (e.g. BatchNorm) always receive [batch, features],
+        # Custom networks (e.g. BatchNorm) always receive [batch, features],
         # including direct inference on one monitor state. Keep the historical
         # built-in MLP's single-vector execution unchanged.
         single_custom = self.model.custom_network and tensor.ndim == 1
@@ -226,7 +226,7 @@ class ReducerPolicy:
 
     def save(self, directory: Path) -> None:
         if self.model.custom_network:
-            raise ValueError("Save custom networks using pzr.student.TrainingRun.save")
+            raise ValueError("Save custom networks using pzr.learning.TrainingRun.save")
         directory.mkdir(parents=True, exist_ok=True)
         torch.save(self.model.state_dict(), directory / "weights.pt")
         payload = {

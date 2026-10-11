@@ -1,4 +1,4 @@
-"""Populate a persistent workspace once without replacing student edits."""
+"""Populate a persistent workspace once without replacing learning edits."""
 import os
 from pathlib import Path
 import shutil

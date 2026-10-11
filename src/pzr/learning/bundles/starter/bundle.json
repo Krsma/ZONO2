@@ -18,7 +18,7 @@
     "traces/seed-3.json": "ecf9c33adacbaa76b94b07cf1a891707ad78daec8ffb6fda65b4dcb2f39649a9"
   },
   "name": "starter",
-  "schema": "pzr.student-bundle.v1",
+  "schema": "pzr.learning-bundle.v1",
   "sources": {
     "paper_clean20": "885c3dfbf70ddf614db72f564877e667e056a59966e62094d365606e0b503602"
   },

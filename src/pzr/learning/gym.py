@@ -1,11 +1,11 @@
-"""Optional Gymnasium adapter; importing pzr.student does not require Gym."""
+"""Optional Gymnasium adapter; importing pzr.learning does not require Gym."""
 from __future__ import annotations
 
 import gymnasium as gym
 import numpy as np
 
-from pzr.student.data import TraceSet
-from pzr.student.monitor import MonitorSession
+from pzr.learning.tasks import TraceSet
+from pzr.learning.monitor import MonitorSession
 
 
 class ReducerEnv(gym.Env):

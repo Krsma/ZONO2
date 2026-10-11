@@ -1,4 +1,4 @@
-"""Student workflow contracts: scientific parity, custom models, and isolation."""
+"""Learning workflow contracts: scientific parity, custom models, and isolation."""
 from dataclasses import replace
 from pathlib import Path
 import random
@@ -10,7 +10,7 @@ import pytest
 import torch
 from torch import nn
 
-from pzr import student
+from pzr import learning
 from pzr.learning.ranker import train_reducer_policy
 from pzr.rtlola.features import RTL_RANKING_FEATURE_SCHEMA
 from pzr.rtlola.scenarios import RtlolaTrace
@@ -18,7 +18,7 @@ from pzr.rtlola.scenarios import RtlolaTrace
 
 @pytest.fixture(scope='module')
 def task():
-    return student.load_task()
+    return learning.load_task()
 
 
 def factory(inputs, actions):
@@ -33,7 +33,7 @@ def test_bundle_and_splits(task):
     assert len(task.validation_traces.traces) == 2
     assert task.frozen_baseline().candidate_names == task.dataset.candidate_names
     with pytest.raises(ValueError, match='unavailable'):
-        student.load_task(budget=80)
+        learning.load_task(budget=80)
 
 
 def test_bundle_hash_tampering(task, tmp_path):
@@ -42,12 +42,12 @@ def test_bundle_hash_tampering(task, tmp_path):
     with (root / 'traces/seed-0.json').open('a') as stream:
         stream.write(' ')
     with pytest.raises(ValueError, match='integrity'):
-        student.load_task(bundle=root)
+        learning.load_task(bundle=root)
 
 
 def test_default_training_matches_existing(task):
-    config = student.TrainingConfig(epochs=2)
-    run = student.train_selector(task, config=config)
+    config = learning.TrainingConfig(epochs=2)
+    run = learning.train_selector(task, config=config)
     original, history = train_reducer_policy(task.dataset, RTL_RANKING_FEATURE_SCHEMA,
                                             objective='pairwise', epochs=2)
     assert_array_equal(run.policy.predict_scores(task.validation.features),
@@ -59,52 +59,52 @@ def test_custom_network_training_roundtrip_and_rng(task, tmp_path):
     before_torch = torch.get_rng_state().clone()
     before_numpy = np.random.get_state()
     before_python = random.getstate()
-    config = student.TrainingConfig(epochs=2)
-    run = student.train_selector(task, model_factory=factory, config=config)
+    config = learning.TrainingConfig(epochs=2)
+    run = learning.train_selector(task, model_factory=factory, config=config)
     assert_array_equal(torch.get_rng_state(), before_torch)
     assert_array_equal(np.random.get_state()[1], before_numpy[1])
     assert random.getstate() == before_python
-    again = student.train_selector(task, model_factory=factory, config=config)
+    again = learning.train_selector(task, model_factory=factory, config=config)
     assert_array_equal(run.policy.predict_scores(task.validation.features),
                        again.policy.predict_scores(task.validation.features))
     assert run.history.train_loss_history[0] != run.history.train_loss_history[1]
     run.save(tmp_path / 'model')
     with pytest.raises(ValueError, match='model_factory'):
-        student.load_selector(tmp_path / 'model')
-    loaded = student.load_selector(tmp_path / 'model', model_factory=factory)
+        learning.load_selector(tmp_path / 'model')
+    loaded = learning.load_selector(tmp_path / 'model', model_factory=factory)
     assert_array_equal(run.policy.predict_scores(task.validation.features),
                        loaded.predict_scores(task.validation.features))
     with pytest.raises(FileExistsError):
         run.save(tmp_path / 'model')
-    metrics = student.evaluate_selector(loaded, task.validation)
+    metrics = learning.evaluate_selector(loaded, task.validation)
     assert 0 <= metrics['teacher_agreement'] <= 1
 
 
 def test_default_roundtrip_and_train_only_normalizer(task, tmp_path):
-    run = student.train_selector(task, config=student.TrainingConfig(epochs=1))
+    run = learning.train_selector(task, config=learning.TrainingConfig(epochs=1))
     expected = RTL_RANKING_FEATURE_SCHEMA.transform(task.training.features).mean(axis=0, dtype=np.float64)
     assert_allclose(run.policy.normalizer.mean, expected, rtol=1e-6)
     run.save(tmp_path / 'model')
-    loaded = student.load_selector(tmp_path / 'model')
+    loaded = learning.load_selector(tmp_path / 'model')
     assert_array_equal(loaded.predict_scores(task.validation.features), run.policy.predict_scores(task.validation.features))
-    batch = student.prepared_samples(task.validation, run.policy.normalizer)
+    batch = learning.prepared_samples(task.validation, run.policy.normalizer)
     assert batch.tensors[0].shape == (994, 15)
     assert batch.tensors[1].dtype == torch.float64
 
 
 def test_invalid_network_fails(task):
     with pytest.raises((ValueError, RuntimeError), match='output|scores'):
-        student.train_selector(task, model_factory=lambda n, a: nn.Linear(n, a + 1),
-                               config=student.TrainingConfig(epochs=1))
+        learning.train_selector(task, model_factory=lambda n, a: nn.Linear(n, a + 1),
+                               config=learning.TrainingConfig(epochs=1))
 
 
 def test_zonotope_preserves_signed_and_zero_geometry():
-    z = student.Zonotope(np.array([1., 0.]), np.array([[-2., 0.], [0., 0.]]))
+    z = learning.Zonotope(np.array([1., 0.]), np.array([[-2., 0.], [0., 0.]]))
     assert z.generators[0, 0] == -2
     assert z.generators.shape == (2, 2)
     assert not z.generators.flags.writeable
     with pytest.raises(ValueError):
-        student.Zonotope(np.zeros(2), np.zeros((3, 4)))
+        learning.Zonotope(np.zeros(2), np.zeros((3, 4)))
 
 
 @pytest.fixture
@@ -119,8 +119,8 @@ def native_trace(task):
 
 
 def test_session_replay_geometry_and_evaluation(native_trace):
-    left = student.MonitorSession(native_trace, budget=40)
-    right = student.MonitorSession(native_trace, budget=40)
+    left = learning.MonitorSession(native_trace, budget=40)
+    right = learning.MonitorSession(native_trace, budget=40)
     while not left.done:
         obs = left.observe(geometry=True)
         assert obs.dynamic.generators.shape[0] == obs.dynamic.center.size
@@ -129,7 +129,7 @@ def test_session_replay_geometry_and_evaluation(native_trace):
         assert a['executed_action'] == b['executed_action']
         assert a['approx_loss'] == b['approx_loss']
     assert left.records[0]['executed_action'] == 'none'
-    result = student.evaluate_monitor('girard', student.TraceSet((native_trace,), 40, 'validation'))
+    result = learning.evaluate_monitor('girard', learning.TraceSet((native_trace,), 40, 'validation'))
     assert result.iloc[0].final_approx_loss == left.records[-1]['approx_loss']
     assert result.iloc[0].sum_approx_loss == sum(r['approx_loss'] for r in left.records)
     with pytest.raises(RuntimeError):
@@ -139,8 +139,8 @@ def test_session_replay_geometry_and_evaluation(native_trace):
 def test_gym_checker_and_terminal_reward(native_trace):
     gym = pytest.importorskip('gymnasium')
     from gymnasium.utils.env_checker import check_env
-    from pzr.student.gym import ReducerEnv
-    traces = student.TraceSet((native_trace,), 40, 'validation')
+    from pzr.learning.gym import ReducerEnv
+    traces = learning.TraceSet((native_trace,), 40, 'validation')
     env = ReducerEnv(traces)
     check_env(env, skip_render_check=True)
     obs, info = env.reset(seed=42)
@@ -161,7 +161,7 @@ def test_gym_checker_and_terminal_reward(native_trace):
 
 
 def test_session_fallback_for_infeasible_bound(native_trace):
-    session = student.MonitorSession(native_trace, budget=0)
+    session = learning.MonitorSession(native_trace, budget=0)
     for _ in range(5):
         session.step(0)
     assert any(r['fallback_used'] for r in session.records)
@@ -177,10 +177,10 @@ def test_native_evaluator_matches_existing_benchmark(native_trace, task):
         RtlolaBenchmarkConfig(scenario='robot_arm', length=len(native_trace.events), budget=40,
                              reference_mode='exact', mpc_candidate_names=policy.candidate_names),
         native_trace.events, trace_kind=native_trace.trace_kind, seed=native_trace.seed,
-        method='student', policy=RtlolaReducerPolicy(policy, default_action_catalog()),
+        method='learning', policy=RtlolaReducerPolicy(policy, default_action_catalog()),
     )
     assert not existing.failures
-    new = student.evaluate_monitor(policy, student.TraceSet((native_trace,), 40, 'validation')).iloc[0]
+    new = learning.evaluate_monitor(policy, learning.TraceSet((native_trace,), 40, 'validation')).iloc[0]
     original = existing.summary.iloc[0]
     for name in ('final_approx_loss', 'sum_approx_loss', 'fallback_count', 'infeasible_candidate_count', 'fpr', 'fnr'):
         assert_allclose(new[name], original[name], equal_nan=True)
@@ -189,8 +189,8 @@ def test_native_evaluator_matches_existing_benchmark(native_trace, task):
 def test_custom_network_receives_batch_dimension_for_single_state(task):
     def batched_network(inputs, actions):
         return nn.Sequential(nn.Linear(inputs, 8), nn.BatchNorm1d(8), nn.ReLU(), nn.Linear(8, actions))
-    run = student.train_selector(task, model_factory=batched_network,
-                                 config=student.TrainingConfig(epochs=1))
+    run = learning.train_selector(task, model_factory=batched_network,
+                                 config=learning.TrainingConfig(epochs=1))
     single = run.policy.predict_scores(task.validation.features[0])
     batch = run.policy.predict_scores(task.validation.features[:1])
     assert single.shape == (4,)

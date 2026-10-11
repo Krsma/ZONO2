@@ -18,7 +18,7 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
-student = [
+learning = [
     "gymnasium>=1.0,<2",
     "jupyterlab>=4,<5",
     "nbclient>=0.10,<1",
@@ -42,10 +42,10 @@ where = ["src"]
 
 [tool.setuptools.package-data]
 pzr = [
-    "student/bundles/starter/bundle.json",
-    "student/bundles/starter/dataset/*",
-    "student/bundles/starter/traces/*.json",
-    "student/bundles/starter/baseline/budget-40/*",
+    "learning/bundles/starter/bundle.json",
+    "learning/bundles/starter/dataset/*",
+    "learning/bundles/starter/traces/*.json",
+    "learning/bundles/starter/baseline/budget-40/*",
     "rtlola/specs/*.lola",
     "rtlola/traces/robot_arm/*.csv",
     "envs/mujoco_models/low_cost_robot_arm/*.xml",

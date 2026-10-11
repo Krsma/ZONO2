@@ -60,18 +60,18 @@ class Task:
 
 def load_task(name: str = "robot_arm", *, bundle: str | Path = "starter", budget: int = 40) -> Task:
     if name != "robot_arm":
-        raise ValueError("The recorded student bundles currently support robot_arm")
+        raise ValueError("The recorded learning bundles currently support robot_arm")
     root = Path(bundle)
     if str(bundle) == "starter":
         root = Path(__file__).parent / "bundles" / "starter"
     elif str(bundle) == "clean148":
-        root = Path(os.environ.get("PZR_STUDENT_DATA", "data/student")) / "clean148"
+        root = Path(os.environ.get("PZR_LEARNING_DATA", "data/learning")) / "clean148"
     manifest_path = root / "bundle.json"
     if not manifest_path.is_file():
-        raise FileNotFoundError(f"Student bundle missing: {root}. See docs/student/README.md")
+        raise FileNotFoundError(f"Learning bundle missing: {root}. See docs/learning/README.md")
     manifest = json.loads(manifest_path.read_text())
-    if manifest.get("schema") != "pzr.student-bundle.v1":
-        raise ValueError("unsupported student bundle")
+    if manifest.get("schema") != "pzr.learning-bundle.v1":
+        raise ValueError("unsupported learning bundle")
     for relative, expected in manifest["files"].items():
         path = (root / relative).resolve()
         if not path.is_relative_to(root.resolve()) or file_hash(path) != expected:

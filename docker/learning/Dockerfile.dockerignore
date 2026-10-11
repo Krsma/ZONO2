@@ -1,0 +1,12 @@
+**
+!pyproject.toml
+!README.md
+!src/**
+!tests/**
+!notebooks/**
+!tools/learning/**
+!docker/learning/**
+!build/learning-native/**
+!data/learning/clean148/**
+**/__pycache__
+**/*.pyc

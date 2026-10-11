@@ -16,7 +16,7 @@ if subprocess.check_output(['git', '-C', str(source), 'status', '--porcelain'], 
 lock = (source / 'Cargo.lock').read_text()
 if lock.count('rtlola-interpreter.git?branch=slack-vars#' + INTERPRETER) != 2:
     raise SystemExit('Unexpected interpreter revision in Cargo.lock')
-output = ROOT / 'build/student-native'
+output = ROOT / 'build/learning-native'
 output.mkdir(parents=True, exist_ok=True)
 for name in ('Cargo.toml', 'Cargo.lock', 'pyproject.toml'):
     if (source / name).exists():

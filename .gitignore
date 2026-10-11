@@ -36,8 +36,8 @@ dist/
 /AUDIT.md
 /claude.md
 
-# Student experiment outputs and optional full recorded bundle
+# Learning experiment outputs and optional full recorded bundle
 /workspace/
-/data/student/
+/data/learning/
 notebooks/workspace/
 notebooks/.ipynb_checkpoints/
