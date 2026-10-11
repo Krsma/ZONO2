@@ -167,8 +167,10 @@ features. Its `feature_names` describe each entry; the underlying computation is
 and fitted normalization belong to the supervised selector, not the Gym adapter.
 `Observation.features` always retains its Geometry15 meaning.
 
-Notebook 03 demonstrates a custom zonotope-property function and a learned
-embedding module. Keep trainable embeddings inside the policy so gradients flow
+Notebook 03 introduces a custom zonotope-property function and a learned
+embedding module. [Notebook 04](../../notebooks/04_define_zonotope_features.ipynb)
+walks through selecting, ordering, and transforming properties, inspecting the
+resulting Gym tensors, and reusing the encoder in native policy evaluation. Keep trainable embeddings inside the policy so gradients flow
 through them; a Gym encoder may call a frozen embedding, but the NumPy observation
 boundary cannot propagate gradients. Tensor shapes may have multiple axes, for
 example for padded graph inputs and masks. Never silently truncate geometry to

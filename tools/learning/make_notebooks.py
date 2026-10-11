@@ -220,3 +220,151 @@ assert truncated and not terminated and reward == 0
 limited.close()
 env.close()'''),
 ])
+notebook('04_define_zonotope_features.ipynb', [
+('md', '''# Tutorial: Define model inputs from zonotope geometry
+
+This tutorial is a hands-on guide to controlling exactly what the policy receives. We will inspect a current zonotope, compute named properties, choose their order and preprocessing, and reuse the resulting encoder in Gym and native policy evaluation.
+
+Run all cells in the learning environment with the pinned native binding. This notebook uses one short training-trace prefix and untrained network weights; it demonstrates the interface, not model quality. Notebook 03 explains actions and rewards; notebook 01 covers supervised training on the recorded Geometry15 data.'''),
+('code', setup),
+('code', '''import numpy as np
+from torch import nn
+from pzr.learning.gym import ReducerEnv
+from pzr.rtlola.scenarios import RtlolaTrace
+
+trace = task.training_traces.traces[0]
+prefix = RtlolaTrace(trace.scenario, trace.trace_kind, trace.seed, trace.events[:20])
+traces = learning.TraceSet((prefix,), task.budget, "train")
+session = learning.MonitorSession(prefix, budget=task.budget)
+for _ in range(5):
+    session.step(0)
+state = session.observe(geometry=True)'''),
+('md', '''## 1. Inspect the inputs available to a feature function
+
+A zonotope is `c + G @ xi`, with `xi` in `[-1, 1]^m`: `center` has shape `[d]` and `generators` has shape `[d, m]`. Its coordinate radius is `r[i] = sum_j abs(G[i, j])`; coordinate widths are `2*r`. These properties describe the current pre-event state, without a future rollout.
+
+`dynamic` excludes constant calibration slack; `total` includes it. Exported logical zero rows and signed coefficients are preserved. Do not treat the exported shape as the compact reducer dimension, assume stable row identities across events, or match dynamic and total columns. Arrays are read-only; only native reducers modify monitor state.'''),
+('code', '''for name in ("dynamic", "total"):
+    geometry = getattr(state, name)
+    print(name, "center:", geometry.center.shape, "generators:", geometry.generators.shape)
+print("Native counts:", state.counts)
+print("Budget:", state.budget)
+
+# The default encoder exposes raw Geometry15, even when custom inputs are used.
+pd.Series(learning.GEOMETRY15_ENCODER(state),
+          index=learning.GEOMETRY15_ENCODER.feature_names, name="raw Geometry15")'''),
+('md', '''## 2. Define a small catalogue of properties
+
+The function below returns scalar properties with explicit names. Empty initial geometry produces zero radii and zero center magnitude. Absolute values preserve the contribution of negative coefficients. Radius sums and maxima are invariant to reordering coordinates or generators; this avoids relying on persistent row positions.
+
+These are illustrative features, not the paper's complete Geometry15 computation. Width is an input property here, not a replacement for the native approximation-loss objective.'''),
+('code', '''def zonotope_properties(observation):
+    dynamic = observation.dynamic
+    total = observation.total
+    dynamic_radius = np.abs(dynamic.generators).sum(axis=1)
+    total_radius = np.abs(total.generators).sum(axis=1)
+    return {
+        "budget": float(observation.budget),
+        "dynamic_radius_sum": float(dynamic_radius.sum()),
+        "dynamic_radius_max": float(dynamic_radius.max(initial=0.0)),
+        "dynamic_center_abs_max": float(np.abs(dynamic.center).max(initial=0.0)),
+        "total_radius_sum": float(total_radius.sum()),
+    }
+
+pd.Series(zonotope_properties(state), name="property value")'''),
+('md', '''## 3. Choose the tensor's contents, order, and scale
+
+**Edit `selected_features` to add, remove, or reorder inputs.** Set `use_log1p=False` for raw values. This example's properties are all nonnegative, so `log1p(x)` is defined and compresses their scale. Signed features need a different transformation. If you later fit a normalizer, fit it on training states only and reuse it unchanged for validation and inference.
+
+Rerun this cell and the remaining cells after editing. The declared shape, feature names, Gym space, and network input dimension then agree. Change the encoder name/version whenever its definition changes.'''),
+('code', '''selected_features = (
+    "budget",
+    "dynamic_radius_sum",
+    "dynamic_radius_max",
+    "total_radius_sum",
+)
+use_log1p = True
+
+# Capture the configuration so later variable edits cannot silently change this encoder.
+def make_feature_function(names, log_scale):
+    names = tuple(names)
+
+    def encode(observation):
+        properties = zonotope_properties(observation)
+        values = np.array([properties[name] for name in names], dtype=np.float64)
+        if log_scale:
+            if np.any(values < 0):
+                raise ValueError("This log1p example requires nonnegative properties")
+            values = np.log1p(values)
+        return values.astype(np.float32)
+
+    return encode
+
+encoder = learning.FeatureEncoder(
+    name="tutorial-zonotope-properties.v1",
+    shape=(len(selected_features),),
+    function=make_feature_function(selected_features, use_log1p),
+    requires_geometry=True,
+    feature_names=selected_features,
+)
+pd.DataFrame({
+    "raw property": [zonotope_properties(state)[name] for name in encoder.feature_names],
+    "model input": encoder(state),
+}, index=encoder.feature_names)'''),
+('md', '''`FeatureEncoder` checks the declared shape and rejects NaN or infinite outputs. `requires_geometry=True` asks Gym to export geometry for the function. Without Gym, call `session.observe(geometry=True)` yourself. The original `Observation.features` remains Geometry15; the custom vector becomes Gym's `observation["features"]`.'''),
+('code', '''# A simple known-answer check for the radius calculation, including negative entries.
+example_generators = np.array([[1.0, -2.0], [0.0, 0.0]])
+np.testing.assert_array_equal(np.abs(example_generators).sum(axis=1), [3.0, 0.0])
+assert encoder(state).shape == encoder.shape
+assert encoder(state).dtype == np.float32
+assert np.isfinite(encoder(state)).all()'''),
+('md', '''## 4. Inspect the actual Gym inputs over time
+
+Reset tests the empty initial state. The table records observations **before** each event, which is when the policy chooses an action. We request Girard throughout to make this demonstration deterministic. Changing features does not change the native action catalogue, transform bounds, fallback rules, or reward definition.'''),
+('code', '''env = ReducerEnv(traces, feature_encoder=encoder)
+observation, _ = env.reset(seed=42, options={"trace_index": 0})
+print(env.observation_space)
+rows = []
+while True:
+    assert env.observation_space.contains(observation)
+    native_observation = env.session.observe(geometry=True)
+    np.testing.assert_array_equal(observation["features"], encoder(native_observation))
+    rows.append(dict(zip(encoder.feature_names, observation["features"])))
+    observation, reward, terminated, truncated, info = env.step(0)
+    if terminated or truncated:
+        break
+env.close()
+pd.DataFrame(rows).rename_axis("pre-event index")'''),
+('md', '''## 5. Feed the vector into a learned representation and action head
+
+Keep trainable embeddings inside the PyTorch policy: gradients cannot pass through Gym's NumPy observations. Here a small embedding maps `[batch, num_features]` to `[batch, 8]`; the action head returns `[batch, 4]`. Both modules can be optimized jointly by your training loop. The weights below are seeded but **untrained**.'''),
+('code', '''with torch.random.fork_rng():
+    torch.manual_seed(42)
+    network = nn.Sequential(
+        nn.Linear(encoder.shape[0], 8), nn.Tanh(),  # learned representation
+        nn.Linear(8, 4),                         # action scores
+    )
+inputs = torch.from_numpy(encoder(state)).unsqueeze(0)
+scores = network(inputs)
+assert scores.shape == (1, 4)
+print("Input shape:", tuple(inputs.shape), "score shape:", tuple(scores.shape))
+
+def score_one(features):
+    network.eval()
+    with torch.no_grad():
+        return network(torch.from_numpy(features).unsqueeze(0))[0].numpy()
+
+policy = learning.ObservationPolicy(encoder, score_one)
+learning.evaluate_monitor(policy, traces, max_events=10)'''),
+('md', '''The same encoder now drives native evaluation. Scores are lower-is-better, ordered `girard`, `scott`, `pca`, `combastel`. This integration check runs only ten events; it does not train the network or establish performance.
+
+## Next experiments
+
+- Add a property inside `zonotope_properties`, include its name in `selected_features`, and rerun from section 3. Keep the empty-state and finite-value checks.
+- For a frozen embedding, the feature function can call a model in evaluation mode and return its fixed-size output. For jointly learned representations, keep the embedding inside the policy as above.
+- A GNN needs geometry-preserving inputs rather than these aggregates. `FeatureEncoder` also accepts multidimensional fixed shapes, so a future graph encoder can pack padded nodes/edges and masks. Reject capacity overflow instead of dropping generators; do not use unstable row identities as persistent node IDs. Graph construction and batching require an additional implementation.
+
+The starter and Clean148 bundles contain **Geometry15 only**, not the original zonotope matrices. This notebook does not alter `train_selector`'s recorded inputs. You can train an embedding over those 15 features using notebook 01's `model_factory`. Training supervised selectors on new geometric properties requires geometry captured at the matching teacher decision states; arbitrary replay cannot reconstruct those states or justify reusing their labels.
+
+Save the feature function, selected names/order, transform settings, encoder version, any fitted preprocessing, and network weights together. Custom encoders are not serialized by `TrainingRun.save`. No live zonotope prediction or matrix writeback is introduced here.'''),
+])
