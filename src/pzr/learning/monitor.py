@@ -16,6 +16,7 @@ from pzr.rtlola.learned_policy import RtlolaReducerPolicy
 from pzr.rtlola.metrics import RtlolaMatrixMetrics
 from pzr.rtlola.reference import load_or_compute_reference, trace_sha256
 from pzr.rtlola.scenarios import RtlolaTrace, scenario_by_name
+from pzr.learning.encoding import ObservationPolicy
 from pzr.learning.ranker import ReducerPolicy
 from pzr.learning.tasks import TraceSet
 
@@ -145,18 +146,19 @@ class MonitorSession:
         return dict(record)
 
 
-def evaluate_monitor(policy: ReducerPolicy | str, traces: TraceSet, *, max_events: int | None = None,
+def evaluate_monitor(policy: ReducerPolicy | ObservationPolicy | str, traces: TraceSet, *, max_events: int | None = None,
                      reference_cache: str | Path | None = None) -> pd.DataFrame:
     """Evaluate validation traces, with explicit prefix diagnostics for quick runs.
 
-    policy may be a trained selector or one of the four native action names.
+    policy may be a trained selector, an ObservationPolicy with custom encoding,
+    or one of the four native action names.
     Prefix results are labelled and must not be reported as full-trajectory loss.
     """
     if max_events is not None and max_events < 1:
         raise ValueError('max_events must be positive')
     if isinstance(policy, str) and policy not in MPC_ACTION_NAMES:
         raise ValueError('unknown native selector')
-    if not isinstance(policy, str) and (policy.candidate_names != MPC_ACTION_NAMES or
+    if not isinstance(policy, (str, ObservationPolicy)) and (policy.candidate_names != MPC_ACTION_NAMES or
                                        policy.feature_schema != RTL_RANKING_FEATURE_SCHEMA):
         raise ValueError('policy schema differs')
     rows = []
@@ -171,10 +173,16 @@ def evaluate_monitor(policy: ReducerPolicy | str, traces: TraceSet, *, max_event
         inference_ms = []
         start_run = perf_counter()
         while not session.done:
-            obs = session.observe()
+            obs = session.observe(geometry=isinstance(policy, ObservationPolicy) and policy.encoder.requires_geometry)
             start = perf_counter()
-            action = (MPC_ACTION_NAMES.index(policy) if isinstance(policy, str) else
-                      policy.predict_scores(obs.features) if obs.reduction_needed else 0)
+            if isinstance(policy, str):
+                action = MPC_ACTION_NAMES.index(policy)
+            elif not obs.reduction_needed:
+                action = 0
+            elif isinstance(policy, ObservationPolicy):
+                action = policy(obs)
+            else:
+                action = policy.predict_scores(obs.features)
             inference_ms.append((perf_counter() - start) * 1000)
             session.step(action)
         records = pd.DataFrame(session.records)

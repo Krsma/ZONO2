@@ -43,6 +43,7 @@ __all__ = [
 # Lazy exports avoid importing the RTLola stack when low-level training modules
 # are imported, and keep Gymnasium optional.
 _INTERFACE_MODULES = {
+    **dict.fromkeys(("FeatureEncoder", "GEOMETRY15_ENCODER", "geometry15_features", "ObservationPolicy"), "encoding"),
     **dict.fromkeys(("Task", "TraceSet", "load_task"), "tasks"),
     **dict.fromkeys(("TrainingConfig", "TrainingRun", "train_selector",
                      "load_selector", "evaluate_selector", "prepared_samples"), "selector"),

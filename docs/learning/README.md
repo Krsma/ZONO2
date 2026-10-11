@@ -138,7 +138,7 @@ observation, reward, terminated, truncated, info = env.step(0)
 ```
 
 Gym uses `Discrete(4)`, one recorded event per step, and observations containing
-raw Geometry15, a conservative action mask, and a reduction-needed flag. The
+raw Geometry15 by default, a conservative action mask, and a reduction-needed flag. The
 mask excludes known bound failures; it cannot guarantee a native transform will
 succeed. If all entries are zero, the execution layer still accepts a request
 and attempts the native fallback. A failed request tries the remaining actions
@@ -150,6 +150,41 @@ An external `max_steps` cutoff sets truncation and does not fabricate a terminal
 reward. Exact references and teacher costs never appear in observations or info.
 An RL training algorithm may use rewards as usual. Reset with
 `options={"trace_index": 0}` to select a particular supplied trace.
+
+### Customize Gym inputs and embeddings
+
+`ReducerEnv(traces, feature_encoder=encoder)` accepts a public
+`learning.FeatureEncoder(name, shape, function, requires_geometry=False,
+feature_names=())`. The function receives a pre-event `Observation` and returns
+a finite float32-compatible tensor with the declared fixed shape. Set
+`requires_geometry=True` to inspect dynamic and total zonotopes. Empty reset
+states and variable geometry sizes need explicit handling. The encoder never
+receives the monitor, recorded future inputs, teacher costs, or exact references.
+
+The default `learning.GEOMETRY15_ENCODER` returns the unchanged raw paper
+features. Its `feature_names` describe each entry; the underlying computation is
+`pzr.rtlola.features.ranking_features_from_matrices`. Geometry15's log transform
+and fitted normalization belong to the supervised selector, not the Gym adapter.
+`Observation.features` always retains its Geometry15 meaning.
+
+Notebook 03 demonstrates a custom zonotope-property function and a learned
+embedding module. Keep trainable embeddings inside the policy so gradients flow
+through them; a Gym encoder may call a frozen embedding, but the NumPy observation
+boundary cannot propagate gradients. Tensor shapes may have multiple axes, for
+example for padded graph inputs and masks. Never silently truncate geometry to
+fit a capacity. Save encoder code/version, preprocessing and model weights with
+your experiment; custom encoders are not serialized by `TrainingRun.save`.
+
+For native evaluation, wrap the same encoder and a single-input scoring function
+with `learning.ObservationPolicy(encoder, score_function)` and pass it to
+`learning.evaluate_monitor`. Scores must be four finite lower-is-better values in
+`girard, scott, pca, combastel` order. Native bounds and fallbacks remain in force.
+
+Recorded starter/Clean148 datasets contain Geometry15 only. `train_selector`
+continues to train on those features; an embedding over them can be included in
+`model_factory`. Supervised training with new geometry-based inputs requires
+capturing geometry at the corresponding teacher decision states. Replaying a
+different policy cannot recover those states or justify reusing their labels.
 
 ## Build and distribute the environment
 

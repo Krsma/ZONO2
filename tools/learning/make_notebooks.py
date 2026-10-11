@@ -129,7 +129,7 @@ print("Total:", observation.total.center.shape, observation.total.generators.sha
 print("Counts:", observation.counts)
 print("Known availability:", observation.action_mask)
 print("Reduction needed:", observation.reduction_needed)'''),
-('md', '''The arrays are read-only inspection data. Native transforms alone change the monitor. Future GNN datasets will use these geometry exports; learned reduction and forecasting require separate targets and soundness checks before any live use.'''),
+('md', '''The arrays are read-only inspection data. Native transforms alone change the monitor. Custom encoders can use these exports now through `learning.FeatureEncoder` (see notebook 03). Recorded teacher bundles contain only Geometry15, so supervised GNN training requires geometry captured at the corresponding teacher states; learned reduction and forecasting require separate targets and soundness checks before any live use.'''),
 ])
 notebook('03_use_gym.ipynb', [
 ('md', '''# Tutorial: Use the Gymnasium reducer environment
@@ -156,6 +156,60 @@ while True:
     if terminated or truncated:
         break
 pd.DataFrame(rows)'''),
+('md', '''## Define the model input
+`FeatureEncoder` makes the observation-to-tensor computation explicit. The default `learning.GEOMETRY15_ENCODER` returns the raw paper features, whose names are available as `feature_names`. Their implementation is `pzr.rtlola.features.ranking_features_from_matrices`; supervised selectors additionally apply the schema's log transform and train-fitted normalization.
+
+Here we define three alternative properties from the dynamic zonotope. This is a feature-design example, not a validated replacement for Geometry15. The function receives a pre-event observation, with no future inputs or exact reference. Handle the empty initial state and variable geometry sizes explicitly.'''),
+('code', '''import numpy as np
+
+def zonotope_properties(observation):
+    generators = observation.dynamic.generators
+    radius = np.abs(generators).sum(axis=1)
+    return np.array([
+        observation.budget,
+        radius.sum(),
+        radius.max(initial=0.0),
+    ], dtype=np.float32)
+
+encoder = learning.FeatureEncoder(
+    name="dynamic-radius.v1", shape=(3,), function=zonotope_properties,
+    requires_geometry=True,
+    feature_names=("budget", "radius_sum", "radius_max"),
+)
+custom_env = ReducerEnv(traces, feature_encoder=encoder)
+custom_observation, _ = custom_env.reset(seed=42)
+assert custom_env.observation_space.contains(custom_observation)
+print(custom_env.observation_space)
+print(custom_observation["features"])
+# The same function is usable outside Gym.
+raw = custom_env.session.observe(geometry=True)
+np.testing.assert_array_equal(encoder(raw), custom_observation["features"])'''),
+('md', '''## Put a learned embedding inside the policy
+A feature function can call a frozen embedding model in evaluation mode. For an embedding that should learn jointly with action selection, return its input from the encoder and put the embedding in your PyTorch policy. Gym returns NumPy arrays, so gradients do not flow through the environment.
+
+This small example keeps the embedding and action head in one differentiable module. For a future GNN, an encoder can instead return a fixed-capacity node/edge tensor with explicit masks; declare that tensor shape and reject capacity overflow rather than silently dropping geometry. Row identities are not stable across events. Graph construction, batching and the GNN remain your model's responsibility.'''),
+('code', '''from torch import nn
+
+embedding = nn.Sequential(nn.Linear(3, 8), nn.Tanh())
+action_head = nn.Linear(8, 4)
+network = nn.Sequential(embedding, action_head)
+inputs = torch.from_numpy(custom_observation["features"]).unsqueeze(0)
+scores = network(inputs)
+assert scores.shape == (1, 4)
+# A training loss on scores can update both modules.
+
+def score_one(features):
+    network.eval()
+    with torch.no_grad():
+        return network(torch.from_numpy(features).unsqueeze(0))[0].numpy()
+
+# Native evaluation accepts the same encoder and lower-is-better score order.
+policy = learning.ObservationPolicy(encoder, score_one)
+learning.evaluate_monitor(policy, traces, max_events=10)
+custom_env.close()'''),
+('md', '''These weights are untrained; the evaluation only demonstrates integration. An RL optimizer must train the policy using environment transitions. Keep any fitted preprocessing restricted to training data and save it alongside the encoder definition and model weights.
+
+The recorded starter/Clean148 supervised datasets store Geometry15, not full zonotopes. `train_selector` continues to use those recorded features. New geometry-based supervised inputs require collecting geometry at the original teacher decision states; replaying an arbitrary policy does not reconstruct them. An embedding over the existing 15 inputs can already be trained through `model_factory` in notebook 01.'''),
 ('md', '''## Distinguish truncation and termination
 An external limit ends an incomplete episode with `truncated=True`. An incomplete episode receives no terminal reward at the cutoff. Use full trajectories when optimizing the terminal objective.'''),
 ('code', '''limited = ReducerEnv(traces, max_steps=2)

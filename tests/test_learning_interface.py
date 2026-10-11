@@ -195,3 +195,60 @@ def test_custom_network_receives_batch_dimension_for_single_state(task):
     batch = run.policy.predict_scores(task.validation.features[:1])
     assert single.shape == (4,)
     assert_array_equal(single, batch[0])
+
+
+def test_feature_encoder_validation_and_default():
+    from types import SimpleNamespace
+    obs = SimpleNamespace(features=np.arange(15, dtype=np.float32), dynamic=None, total=None)
+    encoded = learning.GEOMETRY15_ENCODER(obs)
+    assert_array_equal(encoded, obs.features)
+    encoded[0] = -1
+    assert obs.features[0] == 0
+    for result in (np.zeros(2), np.array([np.nan]), np.array([np.inf])):
+        encoder = learning.FeatureEncoder('invalid.v1', (1,), lambda o: result)
+        with pytest.raises(ValueError, match='finite values of shape'):
+            encoder(obs)
+    geometry = learning.FeatureEncoder('geometry.v1', (1,), lambda o: np.zeros(1), True)
+    with pytest.raises(ValueError, match='geometry=True'):
+        geometry(obs)
+    tensor = learning.FeatureEncoder('tensor.v1', (2, 3), lambda o: np.ones((2, 3)))
+    assert tensor(obs).shape == (2, 3)
+    with pytest.raises(ValueError, match='positive fixed shape'):
+        learning.FeatureEncoder('empty.v1', (0,), lambda o: np.zeros(0))
+    with pytest.raises(ValueError, match='four finite'):
+        learning.ObservationPolicy(tensor, lambda x: np.zeros(3))(obs)
+
+
+def test_custom_geometry_encoder_native_parity(native_trace):
+    from gymnasium.utils.env_checker import check_env
+    from pzr.learning.gym import ReducerEnv
+
+    def properties(obs):
+        radius = np.abs(obs.dynamic.generators).sum(axis=1)
+        return np.array([obs.budget, radius.sum(), radius.max(initial=0)])
+
+    encoder = learning.FeatureEncoder('radius.v1', (3,), properties, requires_geometry=True)
+    traces = learning.TraceSet((native_trace,), 40, 'validation')
+    custom = ReducerEnv(traces, feature_encoder=encoder)
+    check_env(custom, skip_render_check=True)
+    default = ReducerEnv(traces)
+    custom.reset(seed=42)
+    observation, _ = default.reset(seed=42)
+    assert_array_equal(observation['features'], default.session.observe().features)
+    while True:
+        observation, reward, done, truncated, info = custom.step(0)
+        reference, expected_reward, expected_done, expected_truncated, expected_info = default.step(0)
+        raw = custom.session.observe(geometry=True)
+        assert_allclose(observation['features'], properties(raw))
+        assert observation['features'].dtype == np.float32
+        assert custom.observation_space.contains(observation)
+        assert_array_equal(observation['action_mask'], reference['action_mask'])
+        assert (reward, done, truncated, info) == (expected_reward, expected_done, expected_truncated, expected_info)
+        if done:
+            break
+    policy = learning.ObservationPolicy(encoder, lambda features: np.arange(4))
+    report = learning.evaluate_monitor(policy, traces).iloc[0]
+    assert report.final_approx_loss == custom.session.records[-1]['approx_loss']
+    assert report.fallback_count == sum(r['fallback_used'] for r in custom.session.records)
+    custom.close()
+    default.close()

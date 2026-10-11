@@ -4,31 +4,39 @@ from __future__ import annotations
 import gymnasium as gym
 import numpy as np
 
-from pzr.learning.tasks import TraceSet
+from pzr.learning.encoding import FeatureEncoder, GEOMETRY15_ENCODER
 from pzr.learning.monitor import MonitorSession
+from pzr.learning.tasks import TraceSet
 
 
 class ReducerEnv(gym.Env):
-    """One event per step. Reward references never enter observation or info."""
+    """One event per step; configurable fixed-shape pre-event feature tensors.
+
+    ``feature_encoder`` defines the features Box; masks and native execution
+    are independent of the encoding. Reward references never enter observations
+    or info. See FeatureEncoder for geometry and learned-embedding contracts.
+    """
     metadata = {'render_modes': []}
 
-    def __init__(self, traces: TraceSet, *, objective: str = 'terminal', max_steps: int | None = None):
+    def __init__(self, traces: TraceSet, *, objective: str = 'terminal', max_steps: int | None = None,
+                 feature_encoder: FeatureEncoder = GEOMETRY15_ENCODER):
         if objective not in ('terminal', 'cumulative'):
             raise ValueError('objective must be terminal or cumulative')
         if not traces.traces or (max_steps is not None and max_steps < 1):
             raise ValueError('nonempty traces and positive max_steps required')
         self.traces, self.objective, self.max_steps = traces, objective, max_steps
+        self.feature_encoder = feature_encoder
         self.action_space = gym.spaces.Discrete(4)
         self.observation_space = gym.spaces.Dict({
-            'features': gym.spaces.Box(-np.inf, np.inf, (15,), np.float32),
+            'features': gym.spaces.Box(-np.inf, np.inf, feature_encoder.shape, np.float32),
             'action_mask': gym.spaces.MultiBinary(4), 'reduction_needed': gym.spaces.Discrete(2),
         })
         self.session: MonitorSession | None = None
         self._ended = False
 
     def _observation(self):
-        obs = self.session.observe()
-        return {'features': obs.features.copy(), 'action_mask': obs.action_mask.copy(),
+        obs = self.session.observe(geometry=self.feature_encoder.requires_geometry)
+        return {'features': self.feature_encoder(obs), 'action_mask': obs.action_mask.copy(),
                 'reduction_needed': int(obs.reduction_needed)}
 
     def reset(self, *, seed=None, options=None):
