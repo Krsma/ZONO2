@@ -21,7 +21,8 @@ labels, and notebooks. It requires no teacher recollection or private Git
 credentials at runtime. Notebooks and results persist in a named Docker volume;
 restarting the container does not replace your edits. Reference data is installed
 read-only for the unprivileged container user. Stop with Ctrl-C. Keep the volume to retain your work. The launcher needs only
-Docker; a Compose alternative is provided in `docker/learning/compose.yaml`.
+Docker. Registry images and a Compose launcher are maintained in the private
+[Docker distribution repository](https://github.com/Krsma/ZONO2-docker).
 
 Linux AMD64 and Apple Silicon use corresponding Linux container variants.
 Apple Silicon support is through Docker Desktop, not a native macOS install.
@@ -192,7 +193,8 @@ different policy cannot recover those states or justify reusing their labels.
 
 Maintainers build from the existing private checkout; researchers consume the
 finished image. Keep source/license access rules in mind when distributing it.
-No registry publication is performed by these scripts.
+Build definitions remain here; the private [Docker distribution repository](https://github.com/Krsma/ZONO2-docker)
+contains the validated publishing script and access instructions for GHCR.
 
 ```bash
 # Uses the pinned checkout and dependencies already in Cargo's local cache.

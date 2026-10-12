@@ -1,0 +1,31 @@
+cff-version: 1.2.0
+message: "If you use PZR, please cite the associated paper."
+title: "Predictive Zonotope Reduction"
+type: software
+license: MIT
+repository-code: "https://github.com/Krsma/ZONO2"
+authors:
+  - family-names: Krsmanovic
+    given-names: Vladimir
+  - family-names: Kohn
+    given-names: Florian
+  - family-names: Finkbeiner
+    given-names: Bernd
+  - family-names: Simovic
+    given-names: Milan
+preferred-citation:
+  type: article
+  title: "Predictive Zonotope Reduction: Precise Runtime Monitoring under Uncertainty"
+  authors:
+    - family-names: Krsmanovic
+      given-names: Vladimir
+    - family-names: Kohn
+      given-names: Florian
+    - family-names: Finkbeiner
+      given-names: Bernd
+    - family-names: Simovic
+      given-names: Milan
+  year: 2026
+  journal: arXiv
+  doi: "10.48550/arXiv.2609.03699"
+  url: "https://arxiv.org/abs/2609.03699v1"

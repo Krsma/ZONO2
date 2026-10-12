@@ -20,7 +20,7 @@ COPY --from=native /wheels /wheels
 RUN pip install --no-cache-dir --no-deps /wheels/*.whl && rm -rf /wheels
 RUN python -c "import pathlib,sysconfig; pathlib.Path(sysconfig.get_paths()['purelib'],'rlola_python_binding_pzr_provenance.py').write_text('BINDING_REVISION = \'01c92a2bfac58755e3b832bb0094816f3f36e1d1\'\nINTERPRETER_REVISION = \'2724b05ae6c62ed0df14f1401ed8db89472725a6\'\nBINDING_BUILD_PROFILE = \'release\'\n')"
 WORKDIR /opt/pzr
-COPY pyproject.toml README.md ./
+COPY pyproject.toml README.md LICENSE ./
 COPY src ./src
 RUN pip install --no-deps --no-build-isolation . && python -m pip check
 COPY notebooks /opt/pzr/notebooks

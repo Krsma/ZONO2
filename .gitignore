@@ -41,3 +41,11 @@ dist/
 /data/learning/
 notebooks/workspace/
 notebooks/.ipynb_checkpoints/
+
+# Local credentials, assistant state, and caches
+/.aws/
+/.claude/
+.ruff_cache/
+.env
+.env.*
+*.tar.gz
