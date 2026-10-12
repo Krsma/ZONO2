@@ -89,3 +89,19 @@ Docker distribution is intentionally private. This checkout can support public
 offline learning without claiming that every dependency or paper artifact is
 publicly downloadable. Making the GitHub source repository public is a separate
 repository-settings action, not performed by these cleanup changes.
+
+The current tracked tree excludes private research notes and paper drafts, but
+older Git commits contain them. `.gitignore` does not remove historical content.
+Before making the existing GitHub repository public, use a reviewed history
+rewrite or publish the current tree into a new repository with fresh history.
+Neither action is implied by a normal source push. For sharing the current tree
+without its Git history:
+
+```bash
+git archive --format=tar.gz --prefix=pzr/ HEAD > /tmp/pzr-public-source.tar.gz
+```
+
+This exports committed files only; private submodule contents, ignored results,
+credentials, and local uncommitted experiments are not included. Native source
+access requirements still apply. An archive of the current tree is not a review
+of the entire historical repository.
