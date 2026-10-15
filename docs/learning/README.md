@@ -26,7 +26,12 @@ Docker. Registry images and a Compose launcher are maintained in the private
 
 Linux AMD64 and Apple Silicon use corresponding Linux container variants.
 Apple Silicon support is through Docker Desktop, not a native macOS install.
-The first release uses CPU training and inference. Select the locally built
+Use the architecture-selecting release tags documented in the distribution
+repository, or an explicit ARM64 tag on Apple Silicon. Running AMD64 images on
+Apple Silicon requires emulation and can cause slow execution or Jupyter kernel
+communication problems with Rosetta. Native ARM64 images avoid that dependency.
+These images use CPU training and inference, without macOS Metal/MPS acceleration.
+Select the locally built
 ARM64 or full-data image with `PZR_LEARNING_IMAGE=pzr-learning:arm64` or
 `PZR_LEARNING_IMAGE=pzr-learning:course` before the same launch command. `PZR_LEARNING_PORT` changes the localhost port,
 and `PZR_LEARNING_VOLUME` selects a separate workspace.
