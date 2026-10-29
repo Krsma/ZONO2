@@ -82,7 +82,10 @@ def save_geometry(dataset:GeometrySampleDataset, output: Path, metadata: Mapping
     with temporary.open("wb") as handle:
         np.savez_compressed(handle,
                             sample_ids=np.asarray([s.sample_id for s in dataset.samples]),
+                            trace_ids=np.asarray([s.trace_id for s in dataset.samples]),
                             features=dataset.features,
+                            steps=np.asarray([s.step for s in dataset.samples], dtype=np.int64),
+                            teacher_actions=np.asarray([s.teacher_action for s in dataset.samples]),
                             dynamic_centers=np.stack([s.dynamic.center for s in dataset.samples]),
                             dynamic_generators=np.concatenate([s.dynamic.generators for s in dataset.samples], axis=1),
                             dynamic_offsets=np.cumsum([0] + [s.dynamic.generators.shape[1] for s in dataset.samples]),
@@ -183,11 +186,12 @@ def _validate_sample_metadata(dataset: GeometrySampleDataset, metadata: pd.DataF
         raise ValueError("sample metadata row count differs from dataset")
     if tuple(metadata["sample_id"].astype(str)) != tuple(gs.sample_id for gs in dataset.samples):
         raise ValueError("sample metadata identifiers are not aligned")
-    metadata_teacher_action = tuple(zip(metadata["sample_id"].astype(str), metadata["step"], metadata["teacher_action"]))
-    dataset_teacher_action = [(d.sample_id, d.step, d.teacher_action) for d in dataset.samples]
+    metadata_teacher_action = tuple(zip(metadata["sample_id"].astype(str),
+                                        metadata["step"].astype(int),
+                                        metadata["teacher_action"].astype(str)))
+    dataset_teacher_action = tuple((d.sample_id, d.step, d.teacher_action) for d in dataset.samples)
     if metadata_teacher_action != dataset_teacher_action:
-        raise ValueError("sample metadata identifiers are not aligned")
-
+        raise ValueError("sample metadata steps or teacher actions are not aligned")
 
 if __name__ == "__main__":
     import argparse
@@ -198,10 +202,8 @@ if __name__ == "__main__":
     parser.add_argument("--events", type=int, default=None)
     args = parser.parse_args()
     # debug config --limit 1 --events 10
-    export_geometry(args.output, limit=args.limit, events=args.events)
-    REPO = Path(__file__).resolve().parents[2]  # adjust the number to where your script sits
+    #export_geometry(args.output, limit=args.limit, events=args.events)
+    REPO = Path(__file__).resolve().parents[2]
     directory = REPO / "tools" / "learning" / "geometry.json"
-
-    with np.load(directory / "geometry.npz") as arrays:
-        print(arrays.files)
-        print(arrays["features"])
+    dataset, metadata, manifest = load_geometry(directory)
+    print(dataset.samples[0])
