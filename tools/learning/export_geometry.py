@@ -1,6 +1,6 @@
 """Replay the starter traces and save the zonotope geometry retrieved by teacher action"""
 import json
-
+import argparse
 import numpy as np
 import pandas as pd
 
@@ -60,14 +60,17 @@ def export_geometry(output: Path, limit: int | None = None, events: int | None =
     output.mkdir(parents=True)
     task = learning.load_task("robot_arm", bundle="starter", budget=40)
     # For easy debugging. Limit the trace and event number
-    traces = task.validation_traces.traces + task.training_traces.traces
+    traces = task.training_traces.traces + task.validation_traces.traces
     traces = traces[:limit]
     traces = [replace(t, events=t.events[:events]) for t in traces]
     samples = task.sample_metadata
     geometry = []
     for trace in traces:
         geometry.extend(replay_trace(trace, samples, task))
-    save_geometry(GeometrySampleDataset(tuple(geometry)), output, metadata={
+    is_complete = limit is None and events is None
+    dataset = GeometrySampleDataset(tuple(geometry))
+    _check_feature_alignment(dataset, task, complete=is_complete)
+    save_geometry(dataset, output, metadata={
         "task": "robot_arm",
         "bundle": "starter",
         "budget": task.budget,
@@ -77,7 +80,12 @@ def export_geometry(output: Path, limit: int | None = None, events: int | None =
 
 
 def save_geometry(dataset:GeometrySampleDataset, output: Path, metadata: Mapping[str, object]) -> None:
-    """Write geometry.npz, index.csv and manifest.json for the exported zonotopes."""
+    """Write geometry.npz, samples.csv and manifest.json for the exported zonotopes.
+
+    Centers are stacked to (N, d). Generator matrices have different column counts,
+    so they are concatenated to (d, total columns); sample i's generators are
+    generators[:, offsets[i]:offsets[i + 1]].
+    """
     temporary = output / ".geometry.npz.tmp"
     with temporary.open("wb") as handle:
         np.savez_compressed(handle,
@@ -143,6 +151,7 @@ def replay_trace(trace: RtlolaTrace,
     trace_id = f"{trace.trace_kind}:seed-{trace.seed}"
     trace_samples = samples[samples.trace_id == trace_id]
     teacher = dict(zip(trace_samples.step, trace_samples.teacher_action))
+    sample_id_by_step = dict(zip(trace_samples.step, trace_samples.sample_id))
     geometry = []
     session = learning.MonitorSession(trace, budget=task.budget)
     # Stop before the last event like the teacher so that the last event has no label
@@ -154,9 +163,6 @@ def replay_trace(trace: RtlolaTrace,
             raise RuntimeError(f"{trace_id}, step {step}: reduction needed but teacher has no label")
         if has_label and not obs.reduction_needed:
             raise RuntimeError(f"{trace_id}, step {step}: teacher label but no reduction needed")
-        # Binding geometry with the sample_ids.
-        # Can't use task.dataset.sample_ids because it contains all the traces together in one list
-        sample_id_by_step = dict(zip(trace_samples.step, trace_samples.sample_id))
         if obs.reduction_needed and step in teacher:
             geometry.append(
                 GeometrySample(trace_id,
@@ -193,17 +199,20 @@ def _validate_sample_metadata(dataset: GeometrySampleDataset, metadata: pd.DataF
     if metadata_teacher_action != dataset_teacher_action:
         raise ValueError("sample metadata steps or teacher actions are not aligned")
 
-if __name__ == "__main__":
-    import argparse
 
-    parser = argparse.ArgumentParser()
-    parser.add_argument("--output", type=Path, default=Path("geometry.json"))
-    parser.add_argument("--limit", type=int, default=None)
-    parser.add_argument("--events", type=int, default=None)
-    args = parser.parse_args()
-    # debug config --limit 1 --events 10
-    #export_geometry(args.output, limit=args.limit, events=args.events)
-    REPO = Path(__file__).resolve().parents[2]
-    directory = REPO / "tools" / "learning" / "geometry.json"
-    dataset, metadata, manifest = load_geometry(directory)
-    print(dataset.samples[0])
+def _check_feature_alignment(dataset: GeometrySampleDataset, task: Task, complete: bool) -> None:
+    """Replayed Geometry15 features must exactly reproduce the teacher's recorded features."""
+    row_by_id = {sid: i for i, sid in enumerate(task.dataset.sample_ids)}
+    missing = [g.sample_id for g in dataset.samples if g.sample_id not in row_by_id]
+    if missing:
+        raise ValueError(f"{len(missing)} samples not in the teacher dataset, e.g. {missing[0]}")
+    if complete and set(row_by_id) != {g.sample_id for g in dataset.samples}:
+        raise ValueError("complete export does not cover every teacher sample")
+    expected = task.dataset.features[[row_by_id[g.sample_id] for g in dataset.samples]]
+    replayed = dataset.features
+    if replayed.shape != expected.shape:
+        raise ValueError(f"feature shape {replayed.shape} differs from teacher {expected.shape}")
+    if not np.array_equal(replayed, expected, equal_nan=True):
+        bad = np.flatnonzero((replayed != expected).any(axis=1))
+        raise ValueError(f"replayed features differ from teacher for {len(bad)} samples, "
+                         f"e.g. {dataset.samples[bad[0]].sample_id}")
