@@ -1,4 +1,3 @@
-import importlib.util
 import sys
 from pathlib import Path
 
@@ -14,16 +13,6 @@ if str(TOOLS) not in sys.path:
 
 from tools.learning.export_geometry import *
 
-"""
-class GeometrySample:
-    trace_id: str
-    sample_id: str
-    step: int
-    teacher_action: str
-    features: np.ndarray
-    dynamic: Zonotope
-    total: Zonotope
-"""
 
 def _sample(i: int, d_gen: int, t_gen:int) -> GeometrySample:
     d = 2
@@ -61,3 +50,23 @@ def test_replaying_traces_save_geometry(tmp_path: Path):
         np.testing.assert_array_equal(restored.dynamic.center, original.dynamic.center)
         np.testing.assert_array_equal(restored.dynamic.generators, original.dynamic.generators)
         np.testing.assert_array_equal(restored.total.generators, original.total.generators)
+
+
+def test_geometry_load_rejects_misaligned_csv(tmp_path):
+    save_geometry(_dataset(), tmp_path, metadata={})
+    csv = pd.read_csv(tmp_path / "samples.csv")
+    csv.iloc[::-1].to_csv(tmp_path / "samples.csv", index=False)
+    with pytest.raises(ValueError, match="aligned"):
+        load_geometry(tmp_path)
+
+
+def test_geometry_load_rejects_unknown_schema(tmp_path):
+    save_geometry(_dataset(), tmp_path, metadata={})
+    (tmp_path / "manifest.json").write_text('{"schema": "other", "num_samples": 2}')
+    with pytest.raises(ValueError, match="schema"):
+        load_geometry(tmp_path)
+
+
+def test_geometry_dataset_rejects_duplicate_ids():
+    with pytest.raises(ValueError, match="unique"):
+        GeometrySampleDataset((_sample(1, 2, 4), _sample(1, 3, 4)))
